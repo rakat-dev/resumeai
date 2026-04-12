@@ -16,31 +16,21 @@ export interface Job {
   postedTimestamp: number;
   source: string;
   sourceType: "jsearch" | "greenhouse" | "lever" | "remotive" | "workday" | "other";
-  skills: string[];          // Gap skills: mentioned in JD but NOT in base resume
+  skills: string[];
   sponsorshipTag: "mentioned" | "not_mentioned";
-  experience?: string;       // "0-1yr" | "1-3yr" | "4-6yr" | "6+yr"
+  experience?: string;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Decode HTML entities then strip all tags */
 function cleanDescription(html: string): string {
   return html
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/g, "'")
     .replace(/&nbsp;/g, " ")
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// Master skill keyword list
 const SKILL_KEYWORDS = [
   "React","Next.js","Vue","TypeScript","JavaScript","Angular",
   "Python","Java","Go","Golang","Rust","Swift","Kotlin","Scala","PHP","Ruby","C++","C#",
@@ -53,7 +43,6 @@ const SKILL_KEYWORDS = [
   "Microservices","DevOps","SRE","DataDog","Prometheus","Grafana",
 ];
 
-// Rahul's current skills — used to find GAP skills (in JD but not in resume)
 const BASE_RESUME_TEXT = [
   "React Angular TypeScript JavaScript CSS3 React Hooks",
   "Java Spring Boot Spring MVC Spring Security REST Microservices Hibernate OAuth JWT",
@@ -63,7 +52,6 @@ const BASE_RESUME_TEXT = [
   "Agile Scrum Jira Git Python GitHub",
 ].join(" ");
 
-/** Returns skills mentioned in JD that are NOT in the base resume */
 function extractMissingSkills(description: string): string[] {
   return SKILL_KEYWORDS.filter(skill => {
     const regex = new RegExp(`\\b${skill.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
@@ -73,14 +61,13 @@ function extractMissingSkills(description: string): string[] {
 
 function detectSponsorship(description: string): "mentioned" | "not_mentioned" {
   const keywords = ["sponsor","h-1b","h1b","visa","work authorization","work permit","ead","opt","cpt","green card"];
-  const lc = description.toLowerCase();
-  return keywords.some(k => lc.includes(k)) ? "mentioned" : "not_mentioned";
+  return keywords.some(k => description.toLowerCase().includes(k)) ? "mentioned" : "not_mentioned";
 }
 
 function extractExperience(description: string): string {
   const m =
     description.match(/(\d+)\+?\s*(?:to|-)\s*\d+\s*years?\s*(?:of\s*)?(?:relevant\s*)?(?:experience|exp)/i) ||
-    description.match(/(\d+)\+\s*years?\s*(?:of\s*)?(?:relevant\s*)?(?:experience|exp)/i) ||
+    description.match(/(\d+)\+\s*years?\s*(?:of\s*)?(?:experience|exp)/i) ||
     description.match(/(?:at\s+least|minimum(?:\s+of)?)\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)/i) ||
     description.match(/(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)/i);
   if (!m) return "";
@@ -107,19 +94,69 @@ function isContractOrPartTime(type: string, description: string): boolean {
   return /\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/.test(lc);
 }
 
-// ── Title relevance filtering ──────────────────────────────────────────────
+// ── US location filter ─────────────────────────────────────────────────────
+const US_STATES = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
+  "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT",
+  "VA","WA","WV","WI","WY","DC",
+  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+  "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+  "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+  "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada",
+  "New Hampshire","New Jersey","New Mexico","New York","North Carolina",
+  "North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island",
+  "South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont",
+  "Virginia","Washington","West Virginia","Wisconsin","Wyoming",
+]);
 
-const TITLE_ALLOWLIST =
-  /\b(engineer|developer|architect|programmer|swe|java|python|node\.?js|golang|\bgo\b|react|angular|vue|frontend|back.?end|full.?stack|software|web\s|cloud|devops|sre|platform|typescript|javascript|spring|kotlin|scala|rust|swift|api\s|infrastructure|reliability|embedded|mobile|ios|android|data\s+engineer|ml\s+engineer|ai\s+engineer)\b/i;
+function isUSLocation(location: string): boolean {
+  if (!location) return true; // no location = assume remote/US
+  const loc = location.toLowerCase();
+  // Explicit remote — allow
+  if (loc.includes("remote") || loc.includes("anywhere") || loc.includes("worldwide")) return true;
+  // Check for US state names/codes or "United States" / "USA"
+  if (loc.includes("united states") || loc.includes(", us") || loc.includes(", usa")) return true;
+  // Check each token against US states set
+  const parts = location.split(/[,\s]+/);
+  return parts.some(p => US_STATES.has(p.trim()) || US_STATES.has(p.trim().toUpperCase()));
+}
 
-const TITLE_BLOCKLIST =
-  /\b(manager|director|recruiter|recruitment|machine\s+learning\s+scientist|data\s+scientist|auditor|qa\s+lead|qa\s+manager|test\s+lead|product\s+manager|marketing|talent|acquisition|hr\b|finance|accounting|legal|vp\b|vice\s+president|chief|officer|sales|business\s+analyst|scrum\s+master|project\s+manager|program\s+manager|relationship\s+manager)\b/i;
+const TITLE_ALLOWLIST = new RegExp(
+  "\\b(" + [
+    "engineer","developer","architect","devops","sre","reliability","infrastructure",
+    "platform","back.?end","front.?end","full.?stack","fullstack","backend","frontend",
+    "software","systems","cloud","\\bapi\\b","integration","distributed","scalable","programmer","swe",
+    "java","python","node\\.?js","golang","\\bgo\\b","rust","ruby","scala","kotlin","swift",
+    "c\\+\\+","c#","\\.net","php","spring","react","angular","vue",
+    "typescript","javascript","embedded","mobile","ios","android","web\\s",
+  ].join("|") + ")\\b",
+  "i"
+);
+
+const TITLE_BLOCKLIST = new RegExp(
+  "\\b(" + [
+    "manager","director","\\bvp\\b","vice\\s+president","head\\s+of",
+    "principal\\s+engineer","staff\\s+engineer",
+    "machine\\s+learning\\s+engineer","ml\\s+engineer","data\\s+scientist",
+    "data\\s+science","data\\s+engineer","data\\s+analyst",
+    "security\\s+engineer","cybersecurity","infosec",
+    "recruiter","recruitment","talent\\s+acquisition","\\bhr\\b",
+    "sales","account\\s+executive","account\\s+manager","marketing",
+    "finance","auditor","accountant","operations",
+    "program\\s+manager","product\\s+manager","product\\s+designer",
+    "ux\\s+designer","ui\\s+designer",
+    "apprentice","\\bintern\\b","internship",
+    "business\\s+analyst","scrum\\s+master","project\\s+manager",
+    "relationship\\s+manager","\\bchief\\b","\\bofficer\\b",
+    "\\blegal\\b","accounting","qa\\s+lead","qa\\s+manager","test\\s+lead",
+  ].join("|") + ")\\b",
+  "i"
+);
 
 function isRelevantTitle(title: string): boolean {
   return TITLE_ALLOWLIST.test(title) && !TITLE_BLOCKLIST.test(title);
 }
-
-// ── Fortune 500 / tier-1 tech company ranking ──────────────────────────────
 
 const TIER1_NAMES = [
   "amazon","google","microsoft","apple","meta","netflix","salesforce","adobe","ibm","oracle",
@@ -154,45 +191,31 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([p, new Promise<T>(res => setTimeout(() => res(fallback), ms))]);
 }
 
-// ── JSearch (RapidAPI) ─────────────────────────────────────────────────────
-
 const DATE_MAP: Record<JobFilter, string> = {
   "24h": "today", "7d": "week", "30d": "month", "any": "",
 };
 
+// ── JSearch ────────────────────────────────────────────────────────────────
 async function fetchJSearch(query: string, filter: JobFilter, page = 1): Promise<Job[]> {
   const apiKey = process.env.RAPIDAPI_KEY;
-  if (!apiKey) {
-    console.warn("JSearch: RAPIDAPI_KEY not set — skipping");
-    return [];
-  }
+  if (!apiKey) { console.warn("JSearch: RAPIDAPI_KEY not set"); return []; }
 
-  // NOTE: employment_types="FULLTIME" is a PAID-TIER-ONLY param that silently returns 0 results on free tier.
-  // We filter full-time server-side via isContractOrPartTime() instead.
   const params = new URLSearchParams({
-    query,
+    query: `${query} in USA`,   // bias results toward US
     page: String(page),
-    num_pages: "3",          // was 5 — reduce quota burn
+    num_pages: "3",
+    country: "us",              // JSearch country filter
     ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
   });
 
   try {
     const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
-      headers: {
-        "X-RapidAPI-Key": apiKey,
-        "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
-      },
+      headers: { "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "jsearch.p.rapidapi.com" },
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      console.error(`JSearch HTTP ${res.status} for query="${query}" page=${page}`);
-      return [];
-    }
-
+    if (!res.ok) { console.error(`JSearch HTTP ${res.status}`); return []; }
     const data = await res.json();
     const raw = data.data || [];
-    console.log(`JSearch: query="${query}" page=${page} → ${raw.length} raw results`);
 
     return (raw as Record<string, unknown>[])
       .map((j, i): Job => {
@@ -200,11 +223,12 @@ async function fetchJSearch(query: string, filter: JobFilter, page = 1): Promise
         const desc = cleanDescription(rawDesc).slice(0, 600);
         const empType = (j.job_employment_type as string) || "Full-time";
         const ts = (j.job_posted_at_timestamp as number) || 0;
+        const location = [j.job_city, j.job_state, j.job_country].filter(Boolean).join(", ") || "Remote";
         return {
           id: (j.job_id as string) || `js-${page}-${i}`,
           title: (j.job_title as string) || "",
           company: (j.employer_name as string) || "",
-          location: [j.job_city, j.job_state, j.job_country].filter(Boolean).join(", ") || "Remote",
+          location,
           type: empType,
           salary: j.job_min_salary
             ? `$${Math.round(Number(j.job_min_salary) / 1000)}k–$${Math.round(Number(j.job_max_salary) / 1000)}k`
@@ -221,15 +245,20 @@ async function fetchJSearch(query: string, filter: JobFilter, page = 1): Promise
           experience: extractExperience(rawDesc),
         };
       })
-      .filter(j => j.title && j.company && isRelevantTitle(j.title) && !isContractOrPartTime(j.type, j.description));
+      .filter(j =>
+        j.title &&
+        j.company &&
+        isRelevantTitle(j.title) &&
+        !isContractOrPartTime(j.type, j.description) &&
+        isUSLocation(j.location)   // ← US filter
+      );
   } catch (err) {
-    console.error(`JSearch exception query="${query}" page=${page}:`, err);
+    console.error(`JSearch exception:`, err);
     return [];
   }
 }
 
-// ── Greenhouse (official free API) ─────────────────────────────────────────
-
+// ── Greenhouse ─────────────────────────────────────────────────────────────
 const GREENHOUSE_COMPANIES = [
   "airbnb","stripe","doordash","openai","coinbase","gusto","brex","notion",
   "plaid","lattice","figma","robinhood","benchling","mixpanel","amplitude",
@@ -238,7 +267,6 @@ const GREENHOUSE_COMPANIES = [
 
 async function fetchGreenhouse(query: string): Promise<Job[]> {
   const results: Job[] = [];
-
   await Promise.allSettled(
     GREENHOUSE_COMPANIES.map(async company => {
       try {
@@ -248,49 +276,37 @@ async function fetchGreenhouse(query: string): Promise<Job[]> {
         );
         if (!res.ok) return;
         const data = await res.json();
-
         for (const j of (data.jobs || []) as Record<string, unknown>[]) {
           const title = (j.title as string) || "";
-          // Title-only relevance check — prevents irrelevant non-eng roles flooding results
           if (!isRelevantTitle(title)) continue;
-
           const rawContent = (j.content as string) || "";
           const desc = cleanDescription(rawContent).slice(0, 600);
           const location = ((j.location as Record<string, unknown>)?.name as string) || "Remote";
+          // US filter for Greenhouse
+          if (!isUSLocation(location)) continue;
+          if (isContractOrPartTime("", desc)) continue;
           const url = (j.absolute_url as string) || "#";
           const updatedAt = (j.updated_at as string) || "";
-
-          if (isContractOrPartTime("", desc)) continue;
-
           const ts = updatedAt ? Math.floor(new Date(updatedAt).getTime() / 1000) : 0;
           const displayName = company.charAt(0).toUpperCase() + company.slice(1);
-
           results.push({
             id: `gh-${company}-${j.id ?? Math.random()}`,
-            title,
-            company: displayName,
-            location,
-            type: "Full-time",
-            description: desc,
-            applyUrl: url,
-            postedAt: updatedAt,
+            title, company: displayName, location, type: "Full-time",
+            description: desc, applyUrl: url, postedAt: updatedAt,
             postedDate: ts ? formatPostedDate(ts) : "Recently",
-            postedTimestamp: ts,
-            source: "Greenhouse",
-            sourceType: "greenhouse",
+            postedTimestamp: ts, source: "Greenhouse", sourceType: "greenhouse",
             skills: extractMissingSkills(rawContent),
             sponsorshipTag: detectSponsorship(rawContent),
             experience: extractExperience(rawContent),
           });
         }
-      } catch { /* skip company */ }
+      } catch { /* skip */ }
     })
   );
   return results;
 }
 
-// ── Lever (official free API) ──────────────────────────────────────────────
-
+// ── Lever ──────────────────────────────────────────────────────────────────
 const LEVER_COMPANIES = [
   "netflix","reddit","webflow","miro","airtable","asana","attentive",
   "loom","superhuman","deel","remote","scale-ai","alchemy",
@@ -299,7 +315,6 @@ const LEVER_COMPANIES = [
 
 async function fetchLever(query: string): Promise<Job[]> {
   const results: Job[] = [];
-
   await Promise.allSettled(
     LEVER_COMPANIES.map(async company => {
       try {
@@ -310,51 +325,41 @@ async function fetchLever(query: string): Promise<Job[]> {
         if (!res.ok) return;
         const jobs = await res.json();
         if (!Array.isArray(jobs)) return;
-
         for (const j of jobs as Record<string, unknown>[]) {
           const title = (j.text as string) || "";
           if (!isRelevantTitle(title)) continue;
-
           const plainDesc = (j.descriptionPlain as string) || "";
           const rawDesc = (j.description as string) || plainDesc;
           const desc = cleanDescription(plainDesc || rawDesc).slice(0, 600);
           const cats = (j.categories as Record<string, unknown>) || {};
           const commitment = (cats.commitment as string) || "";
           const location = (cats.location as string) || "Remote";
+          // US filter for Lever
+          if (!isUSLocation(location)) continue;
+          if (isContractOrPartTime(commitment, desc)) continue;
           const url = (j.hostedUrl as string) || "#";
           const createdAt = (j.createdAt as number) || 0;
-
-          if (isContractOrPartTime(commitment, desc)) continue;
-
           const ts = createdAt > 1e10 ? Math.floor(createdAt / 1000) : createdAt;
           const displayName = company.charAt(0).toUpperCase() + company.slice(1).replace(/-/g, " ");
-
           results.push({
             id: `lever-${company}-${j.id ?? Math.random()}`,
-            title,
-            company: displayName,
-            location,
-            type: commitment || "Full-time",
-            description: desc,
-            applyUrl: url,
+            title, company: displayName, location, type: commitment || "Full-time",
+            description: desc, applyUrl: url,
             postedAt: createdAt ? new Date(createdAt > 1e10 ? createdAt : createdAt * 1000).toISOString() : "",
             postedDate: ts ? formatPostedDate(ts) : "Recently",
-            postedTimestamp: ts,
-            source: "Lever",
-            sourceType: "lever",
+            postedTimestamp: ts, source: "Lever", sourceType: "lever",
             skills: extractMissingSkills(rawDesc),
             sponsorshipTag: detectSponsorship(rawDesc),
             experience: extractExperience(rawDesc),
           });
         }
-      } catch { /* skip company */ }
+      } catch { /* skip */ }
     })
   );
   return results;
 }
 
-// ── Remotive (free remote-jobs API) ───────────────────────────────────────
-
+// ── Remotive ───────────────────────────────────────────────────────────────
 async function fetchRemotive(query: string): Promise<Job[]> {
   try {
     const res = await fetch(
@@ -363,11 +368,19 @@ async function fetchRemotive(query: string): Promise<Job[]> {
     );
     if (!res.ok) return [];
     const data = await res.json();
-
     return ((data.jobs || []) as Record<string, unknown>[])
       .filter(j => {
         const title = (j.title as string) || "";
-        return isRelevantTitle(title) &&
+        const location = (j.candidate_required_location as string) || "";
+        // For Remotive: only include if USA/Remote/Worldwide — exclude explicit non-US
+        const isUS = !location ||
+          location.toLowerCase().includes("usa") ||
+          location.toLowerCase().includes("united states") ||
+          location.toLowerCase().includes("us only") ||
+          location.toLowerCase().includes("remote") ||
+          location.toLowerCase().includes("worldwide") ||
+          location.toLowerCase().includes("anywhere");
+        return isRelevantTitle(title) && isUS &&
           !isContractOrPartTime((j.job_type as string) || "", (j.description as string) || "");
       })
       .map((j, i): Job => {
@@ -381,43 +394,32 @@ async function fetchRemotive(query: string): Promise<Job[]> {
           company: (j.company_name as string) || "",
           location: (j.candidate_required_location as string) || "Remote",
           type: (j.job_type as string) || "Full-time",
-          description: desc,
-          applyUrl: (j.url as string) || "#",
-          postedAt: pubDate,
-          postedDate: ts ? formatPostedDate(ts) : "Recently",
-          postedTimestamp: ts,
-          source: "Remotive",
-          sourceType: "other",
+          description: desc, applyUrl: (j.url as string) || "#",
+          postedAt: pubDate, postedDate: ts ? formatPostedDate(ts) : "Recently",
+          postedTimestamp: ts, source: "Remotive", sourceType: "other",
           skills: extractMissingSkills(rawDesc),
           sponsorshipTag: detectSponsorship(rawDesc),
           experience: extractExperience(rawDesc),
         };
       });
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 // ── Main Handler ───────────────────────────────────────────────────────────
-
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const query = searchParams.get("q") || "";
+  const query  = searchParams.get("q") || "";
   const filter = (searchParams.get("filter") as JobFilter) || "any";
 
-  if (!query.trim()) {
-    return NextResponse.json({ error: "query required" }, { status: 400 });
-  }
+  if (!query.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
 
   try {
-    // 2 JSearch calls + free sources in parallel
-    // JSearch timeout raised to 15s (avg response ~7.6s on free tier)
     const [r1, r2, r3, r4, r5] = await Promise.allSettled([
-      withTimeout(fetchJSearch(query, filter, 1),  15000, []),
-      withTimeout(fetchJSearch(query, filter, 2),  15000, []),
-      withTimeout(fetchGreenhouse(query),           10000, []),
-      withTimeout(fetchLever(query),                10000, []),
-      withTimeout(fetchRemotive(query),              6000, []),
+      withTimeout(fetchJSearch(query, filter, 1), 15000, []),
+      withTimeout(fetchJSearch(query, filter, 2), 15000, []),
+      withTimeout(fetchGreenhouse(query),          10000, []),
+      withTimeout(fetchLever(query),               10000, []),
+      withTimeout(fetchRemotive(query),             6000, []),
     ]);
 
     const allJobs: Job[] = [
@@ -428,7 +430,6 @@ export async function GET(req: NextRequest) {
       ...(r5.status === "fulfilled" ? r5.value : []),
     ].filter(j => j.title && j.company);
 
-    // Deduplicate then sort: Fortune 500 / tier-1 companies first, then newest
     const unique = deduplicateJobs(allJobs);
     unique.sort((a, b) => {
       const tier = getTierScore(b.company) - getTierScore(a.company);
@@ -436,23 +437,16 @@ export async function GET(req: NextRequest) {
       return (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
     });
 
-    const sourceCounts = {
+    const sources = {
       jsearch:    unique.filter(j => j.sourceType === "jsearch").length,
       greenhouse: unique.filter(j => j.sourceType === "greenhouse").length,
       lever:      unique.filter(j => j.sourceType === "lever").length,
       remotive:   unique.filter(j => j.sourceType === "other").length,
-      workday:    unique.filter(j => j.sourceType === "workday").length,
     };
 
-    console.log(
-      `Jobs API: "${query}" → ${unique.length} jobs | ` +
-      `jsearch:${sourceCounts.jsearch} gh:${sourceCounts.greenhouse} lever:${sourceCounts.lever} remotive:${sourceCounts.remotive}`
-    );
-
-    return NextResponse.json({ jobs: unique, count: unique.length, sources: sourceCounts });
+    return NextResponse.json({ jobs: unique, count: unique.length, sources });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("Jobs API error:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
