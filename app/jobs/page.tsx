@@ -191,7 +191,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs}:FiltersModalProps){
   const [draft,setDraft]=useState<Filters>(filters);
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
-  const allCompanies=useMemo(()=>[...new Set(allJobs.map(j=>j.company).filter(Boolean))].sort(),[allJobs]);
+  const allCompanies=useMemo(()=>Array.from(new Set(allJobs.map(j=>j.company).filter(Boolean))).sort(),[allJobs]);
   const allSources:SourceType[]=["jsearch","greenhouse","lever","remotive","other"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
   const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
