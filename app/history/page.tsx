@@ -297,6 +297,15 @@ export default function HistoryPage() {
 
   // Confirmation dialog for Clear All
   const [confirmClear, setConfirmClear] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Set<string>>(()=>new Set(["Today"]));
+
+  const toggleGroup = (label: string) => {
+    setOpenGroups(prev => {
+      const next = new Set(prev);
+      next.has(label) ? next.delete(label) : next.add(label);
+      return next;
+    });
+  };
 
   const reload = useCallback(() => {
     setEntries(getHistory());
@@ -350,6 +359,26 @@ export default function HistoryPage() {
 
   const named = filtered.filter(e => !e.isUntitled);
   const untitled = filtered.filter(e => e.isUntitled);
+
+  // ── Date grouping ──────────────────────────────────────────────────────
+  function getDateLabel(timestamp: number): string {
+    const now = new Date();
+    const d = new Date(timestamp);
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yestStart = todayStart - 86400000;
+    if (timestamp >= todayStart) return "Today";
+    if (timestamp >= yestStart) return "Yesterday";
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  // Group named entries by date label
+  const dateGroups: { label: string; entries: typeof named }[] = [];
+  for (const e of named) {
+    const label = getDateLabel(e.timestamp);
+    const existing = dateGroups.find(g => g.label === label);
+    if (existing) existing.entries.push(e);
+    else dateGroups.push({ label, entries: [e] });
+  }
 
   const filterTabs: { label: string; value: "all" | HistoryStatus; count: number }[] = [
     { label: "All", value: "all", count: entries.length },
@@ -497,25 +526,51 @@ export default function HistoryPage() {
         </div>
       )}
 
-      {/* Main history list */}
-      {named.length > 0 && (
-        <div style={{ marginBottom:32 }}>
-          {untitled.length > 0 && (
-            <div style={{ fontSize:13, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:1, marginBottom:14 }}>
-              📋 All Resumes ({named.length})
-            </div>
-          )}
-          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-            {named.map(entry => (
-              <HistoryCard
-                key={entry.id}
-                entry={entry}
-                isMobile={isMobile}
-                onUpdate={handleUpdate}
-                onDelete={handleDelete}
-              />
-            ))}
-          </div>
+      {/* Main history list — grouped by date */}
+      {dateGroups.length > 0 && (
+        <div style={{ marginBottom: 32, display: "flex", flexDirection: "column", gap: 8 }}>
+          {dateGroups.map(({ label, entries: groupEntries }) => {
+            const isOpen = openGroups.has(label);
+            return (
+              <div key={label} style={{ border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+                {/* Accordion header */}
+                <div
+                  onClick={() => toggleGroup(label)}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "12px 18px", cursor: "pointer", userSelect: "none",
+                    background: isOpen ? "rgba(108,99,255,0.06)" : "var(--surface)",
+                    borderBottom: isOpen ? "1px solid var(--border)" : "none",
+                    transition: "background 0.2s",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'Syne',sans-serif", color: label === "Today" ? "var(--accent)" : label === "Yesterday" ? "var(--accent2)" : "var(--text)" }}>
+                      {label === "Today" ? "🗓 Today" : label === "Yesterday" ? "📅 Yesterday" : `📅 ${label}`}
+                    </span>
+                    <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 400 }}>
+                      ({groupEntries.length} {groupEntries.length === 1 ? "resume" : "resumes"})
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 13, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+                </div>
+                {/* Accordion body */}
+                {isOpen && (
+                  <div style={{ padding: "14px 14px", display: "flex", flexDirection: "column", gap: 12, background: "var(--bg)" }}>
+                    {groupEntries.map(entry => (
+                      <HistoryCard
+                        key={entry.id}
+                        entry={entry}
+                        isMobile={isMobile}
+                        onUpdate={handleUpdate}
+                        onDelete={handleDelete}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
