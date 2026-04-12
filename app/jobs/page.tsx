@@ -5,36 +5,42 @@ import type { Job, JobFilter } from "@/app/api/jobs/route";
 import type { ATSResult } from "@/app/api/tailor/route";
 import { downloadPDF } from "@/lib/downloadPDF";
 import { saveJob, unsaveJob, isJobSaved, type SavedJob } from "@/lib/savedJobs";
+import { getBaseResume, saveBaseResume } from "@/lib/baseResume";
 
-// ── Base resume ────────────────────────────────────────────────────────────
-const BASE_RESUME = `Rahul katamneni — Senior Software Engineer
-(937) 718-5586 | rahul.kat.1107@gmail.com
-
-PROFESSIONAL SUMMARY:
-Senior Full Stack Engineer with 5+ years of experience building enterprise-grade applications using Java, Spring Boot, React.js, TypeScript. Expert in scalable architecture, responsive UI, reusable components, and secure REST APIs. Proven track record in application modernization, performance optimization, and production support in Agile SDLC environments.
-
-EDUCATION:
-Master of Science in Management @ Faulkner State Community College
-
-TECHNICAL SKILLS:
-• Frontend: React.js, Angular, TypeScript, JavaScript, HTML5, CSS3, Frontend Architecture, Reusable Components
-• Backend: Java 17, J2EE, Spring Boot, Spring MVC, REST API Development, Microservices, Distributed Systems, Concurrency, OAuth2/JWT, Secure Coding
-• Cloud & DevOps: AWS (EC2, ECS, EKS, S3, RDS, Lambda), Docker, Kubernetes, CI/CD, Jenkins
-• Databases: PostgreSQL, MySQL, MongoDB, Redis
-
-EXPERIENCE:
-Senior Software Engineer — Accenture (2022–Present)
-• Led development of microservices-based platform serving 2M+ users
-• Reduced API response time by 40% through caching and query optimization
-• Built React component library adopted across 6 teams
-
-Full Stack Engineer — Infosys (2019–2022)
-• Developed Spring Boot REST APIs consumed by mobile and web clients
-• Migrated monolith to microservices, improving deployment frequency by 3x
-• Implemented OAuth2/JWT authentication across 12 services`;
 
 // ── Session storage (clears when tab/browser closed) ──────────────────────
-const SS = { Q:"ss_rq", F:"ss_rf", J:"ss_rj", S:"ss_rs" };
+const SS = { Q:"ss_rq", F:"ss_rf", J:"ss_rj", S:"ss_rs",
+  SEL:"ss_sel", V1:"ss_v1", V2:"ss_v2", JD:"ss_jd",
+  V1ATS:"ss_v1ats", V2ATS:"ss_v2ats", STEP:"ss_step" };
+
+function savePanel(sel:Job|null,v1:string,v2:string,jd:string,v1ats:unknown,v2ats:unknown,step:number){
+  try{
+    if(sel) sessionStorage.setItem(SS.SEL,JSON.stringify(sel)); else sessionStorage.removeItem(SS.SEL);
+    sessionStorage.setItem(SS.V1,v1);
+    sessionStorage.setItem(SS.V2,v2);
+    sessionStorage.setItem(SS.JD,jd);
+    sessionStorage.setItem(SS.V1ATS,JSON.stringify(v1ats));
+    sessionStorage.setItem(SS.V2ATS,JSON.stringify(v2ats));
+    sessionStorage.setItem(SS.STEP,String(step));
+  }catch{}
+}
+function loadPanel():{sel:Job|null;v1:string;v2:string;jd:string;v1ats:unknown;v2ats:unknown;step:number}|null{
+  try{
+    const selRaw=sessionStorage.getItem(SS.SEL);
+    const v1=sessionStorage.getItem(SS.V1)||"";
+    const step=parseInt(sessionStorage.getItem(SS.STEP)||"0");
+    if(!selRaw||!v1||step===0)return null;
+    return{
+      sel:JSON.parse(selRaw),
+      v1,
+      v2:sessionStorage.getItem(SS.V2)||"",
+      jd:sessionStorage.getItem(SS.JD)||"",
+      v1ats:JSON.parse(sessionStorage.getItem(SS.V1ATS)||"null"),
+      v2ats:JSON.parse(sessionStorage.getItem(SS.V2ATS)||"null"),
+      step,
+    };
+  }catch{return null;}
+}
 function saveSS(q:string,f:JobFilter,jobs:Job[],src:Record<string,number>){
   try{
     sessionStorage.setItem(SS.Q,q);
@@ -344,9 +350,12 @@ export default function JobsPage(){
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
   const [filtersOpen,setFiltersOpen]=useState(false);
+  const [sort,setSort]=useState<"date_desc"|"date_asc"|"company_desc"|"company_asc">("company_desc");
 
   const [selected,setSelected]=useState<Job|null>(null);
-  const [resume,setResume]=useState(BASE_RESUME);
+  const [resume,setResume]=useState("");
+  const [resumeEditing,setResumeEditing]=useState(false);
+  const [resumeSaved,setResumeSaved]=useState(false);
   const [v1Resume,setV1Resume]=useState("");
   const [v2Resume,setV2Resume]=useState("");
   const [v1Ats,setV1Ats]=useState<ATSResult|null>(null);
@@ -359,27 +368,58 @@ export default function JobsPage(){
   const [copied,setCopied]=useState(false);
   const [panelCollapsed,setPanelCollapsed]=useState(false);
   const [jd,setJd]=useState("");
-  const [noExpOpen,setNoExpOpen]=useState(false);
+
 
   // Restore from sessionStorage (cleared on tab close)
   useEffect(()=>{
     const saved=loadSS();
     if(saved){setQuery(saved.query);setJobs(saved.jobs);setSources(saved.sources);}
-    // Note: filters are NOT restored — always start fresh per session
+    // Load shared base resume
+    setResume(getBaseResume());
+    // Restore panel state (survives tab switching)
+    const panel=loadPanel();
+    if(panel){
+      setSelected(panel.sel);
+      setV1Resume(panel.v1);
+      setV2Resume(panel.v2 as string);
+      setJd(panel.jd);
+      setV1Ats(panel.v1ats as ATSResult|null);
+      setV2Ats(panel.v2ats as ATSResult|null);
+      setStep(panel.step as 0|1|2);
+    }
   },[]);
 
   // ── Client-side filtering ─────────────────────────────────────────────
-  const {filteredJobs,noExpJobs}=useMemo(()=>{
+  const {filteredJobs}=useMemo(()=>{
     let list=jobs;
+
+    // Fix 9: Client-side date filter (covers Greenhouse/Lever/Remotive which ignore API date param)
+    if(filters.datePosted!=="any"){
+      const now=Date.now();
+      const cutoffs:Record<string,number>={"24h":now-86400000,"7d":now-604800000,"30d":now-2592000000};
+      const cutoff=cutoffs[filters.datePosted];
+      if(cutoff) list=list.filter(j=>{
+        const ts=(j as Job&{postedTimestamp?:number}).postedTimestamp;
+        if(!ts)return false; // no timestamp = exclude when date filter active
+        return ts*1000>=cutoff;
+      });
+    }
+
     if(filters.sponsorship==="yes")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag==="mentioned");
     if(filters.sponsorship==="no_info")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag!=="mentioned");
     if(filters.companies.size>0)list=list.filter(j=>filters.companies.has(j.company));
     if(filters.sources.size>0)list=list.filter(j=>filters.sources.has((j as Job&{sourceType?:string}).sourceType as SourceType||"other"));
-    const withExp=list.filter(j=>(j as Job&{experience?:string}).experience);
-    const noExp=list.filter(j=>!(j as Job&{experience?:string}).experience);
-    let expFiltered=withExp;
-    if(filters.experience.size>0)expFiltered=withExp.filter(j=>filters.experience.has((j as Job&{experience?:string}).experience as ExpFilter));
-    return{filteredJobs:expFiltered,noExpJobs:noExp};
+
+    // Experience filter — jobs with no exp data mixed in, filtered only when exp filter active
+    if(filters.experience.size>0){
+      list=list.filter(j=>{
+        const exp=(j as Job&{experience?:string}).experience;
+        if(!exp) return true; // no exp data: always include (mix with results)
+        return filters.experience.has(exp as ExpFilter);
+      });
+    }
+
+    return{filteredJobs:list};
   },[jobs,filters]);
 
   const activeFilterCount=countActiveFilters(filters);
@@ -391,7 +431,7 @@ export default function JobsPage(){
     if(!query.trim())return;
     setLoading(true);setJobs([]);setSelected(null);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setSearchErr("");setFilters(DEFAULT_FILTERS);
     try{
-      const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}`);
+      const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}&sort=${sort}`);
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||"Search failed");
       const nj=data.jobs||[],ns=data.sources||{};
@@ -400,6 +440,13 @@ export default function JobsPage(){
       if(nj.length===0)setSearchErr("No jobs found. Try a different query or time filter.");
     }catch(e:unknown){setSearchErr(e instanceof Error?e.message:"Search failed");}
     setLoading(false);
+  };
+
+  const handleSaveResume=()=>{
+    saveBaseResume(resume);
+    setResumeEditing(false);
+    setResumeSaved(true);
+    setTimeout(()=>setResumeSaved(false),2000);
   };
 
   // ── Tailor ────────────────────────────────────────────────────────────────
@@ -414,6 +461,11 @@ export default function JobsPage(){
     }catch(e:unknown){setTailorErr(e instanceof Error?e.message:"Tailoring failed");}
     setTailoring(false);
   };
+
+  // Save panel state to sessionStorage whenever it changes (fix tab switching)
+  useEffect(()=>{
+    if(step>0) savePanel(selected,v1Resume,v2Resume,jd,v1Ats,v2Ats,step);
+  },[selected,v1Resume,v2Resume,jd,v1Ats,v2Ats,step]);
 
   // ── Improve ───────────────────────────────────────────────────────────────
   const handleImprove=async()=>{
@@ -449,6 +501,13 @@ export default function JobsPage(){
           ⚙️ Filters
           {activeFilterCount>0&&<span style={{position:"absolute",top:-6,right:-6,background:"var(--accent)",color:"#fff",borderRadius:"50%",width:18,height:18,fontSize:10,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{activeFilterCount}</span>}
         </button>
+        <select value={sort} onChange={e=>setSort(e.target.value as typeof sort)}
+          style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"11px 14px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:13,outline:"none",cursor:"pointer"}}>
+          <option value="company_desc">🏆 Top Companies First</option>
+          <option value="date_desc">🕐 Newest First</option>
+          <option value="date_asc">🕐 Oldest First</option>
+          <option value="company_asc">📋 All Companies</option>
+        </select>
         <button onClick={handleSearch} disabled={loading||!query.trim()}
           style={{...S.btn("var(--accent2)","#0a0a0f"),opacity:loading||!query.trim()?0.5:1,cursor:loading||!query.trim()?"not-allowed":"pointer"}}>
           {loading?<><span className="spinner dark"/>Searching...</>:"🔍 Search Jobs"}
@@ -458,7 +517,7 @@ export default function JobsPage(){
       {/* Results count + source breakdown */}
       {jobs.length>0&&(
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
-          <span style={{fontSize:12,color:"var(--muted)"}}>{filteredJobs.length+noExpJobs.length} showing / {jobs.length} total</span>
+          <span style={{fontSize:12,color:"var(--muted)"}}>{filteredJobs.length} showing / {jobs.length} total</span>
           {Object.entries(sources).filter(([,v])=>v>0).map(([s,c])=>(
             <span key={s} style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"var(--surface2)",color:"var(--muted)",border:"1px solid var(--border)"}}>{s}:{c}</span>
           ))}
@@ -482,29 +541,12 @@ export default function JobsPage(){
               </div>
             )}
 
-            {/* Jobs with experience data */}
+            {/* All jobs — no-exp jobs mixed in */}
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
               {filteredJobs.map(job=>(
                 <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
               ))}
             </div>
-
-            {/* No experience data collapsible */}
-            {noExpJobs.length>0&&(
-              <div style={{marginTop:12,border:"1px solid var(--border)",borderRadius:12,overflow:"hidden"}}>
-                <div onClick={()=>setNoExpOpen(o=>!o)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",cursor:"pointer",background:"var(--surface2)",userSelect:"none"}}>
-                  <span style={{fontSize:13,fontWeight:600,color:"var(--muted)"}}>📂 No experience data available <span style={{fontSize:11,fontWeight:400}}>({noExpJobs.length} jobs)</span></span>
-                  <span style={{fontSize:11,color:"var(--muted)"}}>{noExpOpen?"▲":"▼"}</span>
-                </div>
-                {noExpOpen&&(
-                  <div style={{padding:"10px",display:"flex",flexDirection:"column",gap:10}}>
-                    {noExpJobs.map(job=>(
-                      <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
 
@@ -539,10 +581,32 @@ export default function JobsPage(){
                   <div style={{fontSize:10,color:"#ff9500",fontWeight:600,marginBottom:3}}>⚠️ Skills to add</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{selected.skills.map((s,i)=><span key={i} style={{fontSize:10,padding:"2px 7px",borderRadius:100,background:"rgba(255,149,0,0.1)",color:"#ff9500",border:"1px solid rgba(255,149,0,0.3)"}}>{s}</span>)}</div>
                 </div>}
-                {/* Base resume */}
-                <label style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:4}}>Your Resume</label>
-                <textarea value={resume} onChange={e=>setResume(e.target.value)} rows={10}
-                  style={{width:"100%",background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:9,padding:11,color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:11,resize:"vertical",outline:"none",lineHeight:1.5,marginBottom:10}}/>
+                {/* Base resume with edit/save/collapse */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+                  <label style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1}}>Your Resume</label>
+                  <div style={{display:"flex",gap:5}}>
+                    {!resumeEditing?(
+                      <button onClick={()=>setResumeEditing(true)}
+                        style={{padding:"3px 9px",borderRadius:7,border:"1px solid var(--border)",background:"var(--surface2)",color:"var(--muted)",fontSize:10,fontWeight:600,cursor:"pointer"}}>
+                        ✏️ Edit
+                      </button>
+                    ):(
+                      <>
+                        <button onClick={handleSaveResume}
+                          style={{padding:"3px 9px",borderRadius:7,border:"none",background:"var(--accent)",color:"#fff",fontSize:10,fontWeight:600,cursor:"pointer"}}>
+                          {resumeSaved?"✅":"💾 Save"}
+                        </button>
+                        <button onClick={()=>{setResume(getBaseResume());setResumeEditing(false);}}
+                          style={{padding:"3px 9px",borderRadius:7,border:"1px solid var(--border)",background:"transparent",color:"var(--muted)",fontSize:10,cursor:"pointer"}}>
+                          Cancel
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <textarea value={resume} onChange={e=>resumeEditing&&setResume(e.target.value)}
+                  rows={10} readOnly={!resumeEditing}
+                  style={{width:"100%",background:resumeEditing?"var(--surface2)":"var(--bg)",border:"1px solid var(--border)",borderRadius:9,padding:11,color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:11,resize:"vertical",outline:"none",lineHeight:1.5,marginBottom:10,opacity:resumeEditing?1:0.85,cursor:resumeEditing?"text":"default"}}/>
                 {/* Loading */}
                 {tailoring&&<div style={{textAlign:"center",padding:"28px 0"}}>
                   <div className="spinner" style={{width:26,height:26,borderWidth:3,borderTopColor:"var(--accent)",margin:"0 auto 8px"}}/>
