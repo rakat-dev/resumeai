@@ -1,5 +1,4 @@
-// ── Saved Jobs Storage ──────────────────────────────────────────────────────
-// Cross-search persistence for bookmarked job postings.
+// Saved Jobs — localStorage persistence across sessions
 
 export interface SavedJob {
   id: string;
@@ -20,31 +19,29 @@ export interface SavedJob {
   savedAt: number;
 }
 
-const SAVED_KEY = "resumeai_saved_jobs";
+const KEY = "resumeai_saved_jobs";
 
 export function getSavedJobs(): SavedJob[] {
   if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(SAVED_KEY);
-    return raw ? (JSON.parse(raw) as SavedJob[]) : [];
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch { return []; }
+}
+
+export function getSavedIds(): Set<string> {
+  return new Set(getSavedJobs().map(j => j.id));
 }
 
 export function saveJob(job: SavedJob): void {
   if (typeof window === "undefined") return;
   const list = getSavedJobs().filter(j => j.id !== job.id);
   list.unshift(job);
-  localStorage.setItem(SAVED_KEY, JSON.stringify(list));
+  localStorage.setItem(KEY, JSON.stringify(list));
 }
 
 export function unsaveJob(id: string): void {
   if (typeof window === "undefined") return;
-  const list = getSavedJobs().filter(j => j.id !== id);
-  localStorage.setItem(SAVED_KEY, JSON.stringify(list));
+  localStorage.setItem(KEY, JSON.stringify(getSavedJobs().filter(j => j.id !== id)));
 }
 
-export function getSavedJobIds(): Set<string> {
-  return new Set(getSavedJobs().map(j => j.id));
+export function isJobSaved(id: string): boolean {
+  return getSavedIds().has(id);
 }
