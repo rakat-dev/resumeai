@@ -26,23 +26,20 @@ export interface Job {
 
 // ── Fortune 500 ranking for sort ───────────────────────────────────────────
 const FORTUNE_RANK: Record<string, number> = {
-  "walmart":1,"amazon":2,"apple":3,"unitedhealth":4,"berkshire":5,
-  "exxon":6,"cvs":7,"elevance":8,"mckesson":9,"at&t":10,
-  "cigna":11,"costco":12,"cardinal health":13,"microsoft":14,"kroger":15,
-  "home depot":16,"Goldman sachs":17,"jpmorgan":18,"verizon":19,"ford":20,
-  "chevron":21,"centene":22,"meta":23,"comcast":24,"target":25,
-  "fedex":26,"wellpoint":27,"pfizer":28,"bank of america":29,
-  "johnson":30,"general motors":31,"alphabet":32,"google":33,
-  "wells fargo":34,"ups":35,"lowe's":36,"lowes":37,"cigna":38,
-  "morgan stanley":39,"ibm":40,"intel":41,"cisco":42,"nike":43,
-  "oracle":44,"salesforce":45,"adobe":46,"sap":47,"workday":48,
-  "servicenow":49,"atlassian":50,"nvidia":51,"capital one":52,
-  "t-mobile":53,"stripe":54,"databricks":55,"snowflake":56,
-  "cloudflare":57,"mongodb":58,"confluent":59,"hashicorp":60,
-  "openai":61,"anthropic":62,"accenture":63,"infosys":64,
-  "cognizant":65,"tata consultancy":66,"tcs":66,"capgemini":67,
-  "paypal":68,"visa":69,"mastercard":70,"ups":71,"fedex":72,
-  "jpmorgan chase":18,
+  "walmart":1,"amazon":2,"apple":3,"unitedhealth":4,"microsoft":5,
+  "cvs":6,"elevance":7,"at&t":8,"cigna":9,"costco":10,
+  "home depot":11,"jpmorgan":12,"jpmorgan chase":12,"verizon":13,
+  "meta":14,"target":15,"fedex":16,"bank of america":17,
+  "wells fargo":18,"ups":19,"lowe's":20,"lowes":20,
+  "morgan stanley":21,"ibm":22,"intel":23,"cisco":24,
+  "oracle":25,"salesforce":26,"adobe":27,"sap":28,"workday":29,
+  "servicenow":30,"atlassian":31,"nvidia":32,"capital one":33,
+  "t-mobile":34,"google":35,"alphabet":35,
+  "stripe":36,"databricks":37,"snowflake":38,
+  "cloudflare":39,"mongodb":40,"confluent":41,"hashicorp":42,
+  "openai":43,"anthropic":44,"accenture":45,"infosys":46,
+  "cognizant":47,"tata consultancy":48,"tcs":48,"capgemini":49,
+  "paypal":50,"visa":51,"mastercard":52,
 };
 
 function getFortuneTier(company: string): number {
