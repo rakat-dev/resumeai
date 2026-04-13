@@ -85,6 +85,48 @@ function countActiveFilters(f:Filters):number{
 // ── Diff ───────────────────────────────────────────────────────────────────
 interface DiffLine{type:"added"|"removed"|"modified";old?:string;new?:string;text?:string;}
 interface DiffSection{section:string;sub?:string;changes:DiffLine[];}
+// ── Fortune rank + client-side sort ──────────────────────────────────────
+const FORTUNE: Record<string,number> = {
+  "walmart":1,"amazon":2,"apple":3,"unitedhealth":4,"microsoft":5,
+  "cvs":6,"elevance":7,"at&t":8,"cigna":9,"costco":10,
+  "home depot":11,"jpmorgan":12,"jpmorgan chase":12,"verizon":13,
+  "meta":14,"target":15,"fedex":16,"bank of america":17,
+  "wells fargo":18,"ups":19,"lowe's":20,"lowes":20,
+  "morgan stanley":21,"ibm":22,"intel":23,"cisco":24,
+  "oracle":25,"salesforce":26,"adobe":27,"sap":28,"workday":29,
+  "servicenow":30,"atlassian":31,"nvidia":32,"capital one":33,
+  "t-mobile":34,"google":35,"alphabet":35,"stripe":36,
+  "databricks":37,"snowflake":38,"cloudflare":39,"mongodb":40,
+  "confluent":41,"hashicorp":42,"openai":43,"anthropic":44,
+  "accenture":45,"infosys":46,"cognizant":47,"tata consultancy":48,
+  "tcs":48,"capgemini":49,"paypal":50,"visa":51,"mastercard":52,
+};
+function fortuneRank(company:string):number{
+  const lc=company.toLowerCase();
+  for(const [k,v] of Object.entries(FORTUNE)){if(lc===k||lc.includes(k))return v;}
+  return 9999;
+}
+type SortOption="date_desc"|"date_asc"|"company_desc"|"company_asc";
+function clientSort(jobs:Job[],sort:SortOption):Job[]{
+  return [...jobs].sort((a,b)=>{
+    const ats=(a as Job&{postedTimestamp?:number}).postedTimestamp||0;
+    const bts=(b as Job&{postedTimestamp?:number}).postedTimestamp||0;
+    if(sort==="date_desc") return bts-ats;
+    if(sort==="date_asc") return ats-bts;
+    if(sort==="company_desc"){
+      const ra=fortuneRank(a.company),rb=fortuneRank(b.company);
+      if(ra!==rb) return ra-rb;
+      return bts-ats;
+    }
+    if(sort==="company_asc"){
+      const ra=fortuneRank(a.company),rb=fortuneRank(b.company);
+      if(ra!==rb) return rb-ra;
+      return bts-ats;
+    }
+    return bts-ats;
+  });
+}
+
 function wordOverlap(a:string,b:string):number{
   const wa=new Set(a.toLowerCase().split(/\s+/));
   const wb=b.toLowerCase().split(/\s+/);
@@ -350,7 +392,7 @@ export default function JobsPage(){
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
   const [filtersOpen,setFiltersOpen]=useState(false);
-  const [sort,setSort]=useState<"date_desc"|"date_asc"|"company_desc"|"company_asc">("company_desc");
+  const [sort,setSort]=useState<SortOption>("company_desc");
 
   const [selected,setSelected]=useState<Job|null>(null);
   const [resume,setResume]=useState("");
@@ -419,8 +461,8 @@ export default function JobsPage(){
       });
     }
 
-    return{filteredJobs:list};
-  },[jobs,filters]);
+    return{filteredJobs:clientSort(list,sort)};
+  },[jobs,filters,sort]);
 
   const activeFilterCount=countActiveFilters(filters);
   const currentResume=step===2?v2Resume:v1Resume;
@@ -431,7 +473,7 @@ export default function JobsPage(){
     if(!query.trim())return;
     setLoading(true);setJobs([]);setSelected(null);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setSearchErr("");setFilters(DEFAULT_FILTERS);
     try{
-      const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}&sort=${sort}`);
+      const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}`);
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||"Search failed");
       const nj=data.jobs||[],ns=data.sources||{};
