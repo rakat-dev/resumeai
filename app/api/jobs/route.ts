@@ -298,22 +298,16 @@ const DATE_MAP: Record<JobFilter,string> = {
 };
 
 // ── JSearch ────────────────────────────────────────────────────────────────
-async function fetchJSearch(query: string, filter: JobFilter, page=1, companyOverride=""): Promise<Job[]> {
+async function fetchJSearchRaw(query: string, filter: JobFilter, page=1, companyOverride=""): Promise<Job[]> {
   const apiKey = process.env.RAPIDAPI_KEY;
   if (!apiKey) return [];
-
-  const searchQuery = companyOverride
-    ? `${query} at ${companyOverride}`
-    : `${query} in USA`;
-
+  const searchQuery = companyOverride ? `${query} at ${companyOverride}` : `${query} in USA`;
   const params = new URLSearchParams({
-    query: searchQuery,
-    page: String(page),
-    num_pages: companyOverride ? "1" : "3",
-    country: "us",
+    query: searchQuery, page: String(page),
+    num_pages: companyOverride ? "1" : "3", country: "us",
     ...(DATE_MAP[filter] && !companyOverride && { date_posted: DATE_MAP[filter] }),
   });
-
+  let raw: Record<string,unknown>[] = [];
   try {
     const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
       headers: { "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "jsearch.p.rapidapi.com" },
@@ -321,12 +315,8 @@ async function fetchJSearch(query: string, filter: JobFilter, page=1, companyOve
     });
     if (!res.ok) return [];
     const data = await res.json();
-    return (data.data||[]) as Record<string,unknown>[];
+    raw = (data.data||[]) as Record<string,unknown>[];
   } catch { return []; }
-}
-
-async function fetchJSearchRaw(query: string, filter: JobFilter, page=1, companyOverride=""): Promise<Job[]> {
-  const raw = await fetchJSearch(query, filter, page, companyOverride) as unknown as Record<string,unknown>[];
   const aiCount = { n: 0 };
   return raw
     .map((j,i): Job => {
