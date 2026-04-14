@@ -4,6 +4,7 @@ import AppLayout from "@/components/AppLayout";
 import type { Job, JobFilter } from "@/app/api/jobs/route";
 import type { ATSResult } from "@/app/api/tailor/route";
 import { downloadPDF } from "@/lib/downloadPDF";
+import InterviewPanel from "@/components/InterviewPanel";
 import { saveJob, unsaveJob, isJobSaved, type SavedJob } from "@/lib/savedJobs";
 import { getBaseResume, saveBaseResume } from "@/lib/baseResume";
 
@@ -665,6 +666,16 @@ export default function JobsPage(){
                   {step===2&&v2Resume&&v1Resume&&<DiffCard original={v1Resume} modified={v2Resume} label="Changes: v1 → v2"/>}
                   {currentAts&&<ATSDropdown ats={currentAts} onImprove={handleImprove} improving={improving}/>}
                   {improveErr&&<div style={{background:"rgba(255,107,107,.1)",border:"1px solid rgba(255,107,107,.3)",color:"var(--accent3)",borderRadius:9,padding:"9px 12px",fontSize:11,marginTop:8}}>⚠️ {improveErr}</div>}
+                  {step>0&&currentResume&&(
+                    <div style={{marginTop:10}}>
+                      <InterviewPanel
+                        tailoredResume={currentResume}
+                        jobDescription={jd}
+                        jobTitle={selected.title}
+                        company={selected.company}
+                      />
+                    </div>
+                  )}
                   {selected.applyUrl&&selected.applyUrl!=="#"&&<a href={selected.applyUrl} target="_blank" rel="noopener noreferrer"
                     style={{...S.btn("var(--accent2)","#0a0a0f"),textDecoration:"none",display:"inline-flex",width:"100%",justifyContent:"center",marginTop:10}}>🚀 Apply Now</a>}
                 </>}
