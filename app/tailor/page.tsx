@@ -1,6 +1,7 @@
 "use client";
 import { useState, useCallback } from "react";
 import AppLayout from "@/components/AppLayout";
+import InterviewPanel from "@/components/InterviewPanel";
 import type { ATSResult } from "@/app/api/tailor/route";
 import {
   saveHistoryEntry, generateId, formatDate, extractJobInfoFromJD,
@@ -445,6 +446,18 @@ export default function TailorPage() {
           {applyErr&&(
             <div style={{ background:"rgba(255,107,107,.1)",border:"1px solid rgba(255,107,107,.3)",color:"var(--accent3)",borderRadius:12,padding:"12px 16px",fontSize:13,marginTop:12 }}>
               ⚠️ {applyErr}
+            </div>
+          )}
+
+          {/* ── Interview Question Predictor ─────────────────────── */}
+          {step>0&&currentResume&&(
+            <div style={{ marginTop:16 }}>
+              <InterviewPanel
+                tailoredResume={currentResume}
+                jobDescription={jd}
+                jobTitle={jobTitleField || ""}
+                company={companyField || ""}
+              />
             </div>
           )}
 
