@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useMemo } from "react";
 import AppLayout from "@/components/AppLayout";
-import type { Job, JobFilter } from "@/app/api/jobs/route";
+import type { Job, JobFilter, SourceDiagnostic } from "@/app/api/jobs/route";
 import type { ATSResult } from "@/app/api/tailor/route";
 import { downloadPDF } from "@/lib/downloadPDF";
 import InterviewPanel from "@/components/InterviewPanel";
@@ -397,6 +397,8 @@ export default function JobsPage(){
   const [query,setQuery]=useState("");
   const [jobs,setJobs]=useState<Job[]>([]);
   const [sources,setSources]=useState<Record<string,number>>({});
+  const [diagnostics,setDiagnostics]=useState<SourceDiagnostic[]>([]);
+  const [diagOpen,setDiagOpen]=useState(false);
   const [loading,setLoading]=useState(false);
   const [searchErr,setSearchErr]=useState("");
 
@@ -486,8 +488,8 @@ export default function JobsPage(){
       const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}`);
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||"Search failed");
-      const nj=data.jobs||[],ns=data.sources||{};
-      setJobs(nj);setSources(ns);
+      const nj=data.jobs||[],ns=data.sources||{},nd=(data.sourceDiagnostics||[]) as SourceDiagnostic[];
+      setJobs(nj);setSources(ns);setDiagnostics(nd);
       saveSS(query,"any",nj,ns);
       if(nj.length===0)setSearchErr("No jobs found. Try a different query or time filter.");
     }catch(e:unknown){setSearchErr(e instanceof Error?e.message:"Search failed");}
@@ -568,22 +570,65 @@ export default function JobsPage(){
 
       {/* Results count + source breakdown */}
       {jobs.length>0&&(
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
-          <span style={{fontSize:12,color:"var(--muted)"}}>{filteredJobs.length} showing / {jobs.length} total</span>
-          {Object.entries(sources).filter(([,v])=>v>0).map(([s,c])=>{
-            const SC:Record<string,{bg:string;color:string}>={
-              jsearch:{bg:"rgba(112,112,160,0.12)",color:"#7070a0"},
-              greenhouse:{bg:"rgba(0,200,100,0.12)",color:"#00c864"},
-              lever:{bg:"rgba(0,150,255,0.12)",color:"#0096ff"},
-              remotive:{bg:"rgba(150,100,255,0.12)",color:"#9664ff"},
-              theirstack:{bg:"rgba(255,140,0,0.12)",color:"#ff8c00"},
-              fantasticjobs:{bg:"rgba(0,200,180,0.12)",color:"#00c8b4"},
-            };
-            const label=s==="jsearch"?"JSearch":s==="other"?"Remotive":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Adzuna":s.charAt(0).toUpperCase()+s.slice(1);
-            const st=SC[s]||{bg:"var(--surface2)",color:"var(--muted)"};
-            return <span key={s} style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:st.bg,color:st.color,border:`1px solid ${st.color}30`,fontWeight:600}}>{label}:{c}</span>;
-          })}
-          {activeFilterCount>0&&<button onClick={()=>setFilters(DEFAULT_FILTERS)} style={{fontSize:11,color:"var(--accent3)",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>✕ Clear filters</button>}
+        <div style={{marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:6}}>
+            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length} / {jobs.length}</span>
+            {(diagnostics.length>0
+              ? diagnostics
+              : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
+            ).map(d=>{
+              const COL:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",workday:"#cf4500",goldman:"#00a3e0",morganstanley:"#003087",cisco:"#1ba0d7",oracle:"#f80000",remotive:"#9664ff",adzuna:"#00c8b4",theirstack:"#ff8c00"};
+              const LBL:Record<string,string>={jsearch:"JSearch",greenhouse:"Greenhouse",lever:"Lever",workday:"Workday",goldman:"Goldman",morganstanley:"MS",cisco:"Cisco",oracle:"Oracle",remotive:"Remotive",adzuna:"Adzuna",theirstack:"TheirStack"};
+              const col=COL[d.source]||"#888";
+              const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"?"🟡":"🔴";
+              return(
+                <span key={d.source} title={`${d.status}${d.error?`: ${d.error}`:""}`}
+                  style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:`${col}15`,
+                    color:d.postFilterCount>0?col:"var(--muted)",
+                    border:`1px solid ${col}${d.postFilterCount>0?"50":"20"}`,
+                    fontWeight:600,opacity:d.postFilterCount>0?1:0.5,cursor:"default"}}>
+                  {dot} {LBL[d.source]||d.source}:{d.postFilterCount}
+                </span>
+              );
+            })}
+            {activeFilterCount>0&&<button onClick={()=>setFilters(DEFAULT_FILTERS)} style={{fontSize:11,color:"var(--accent3)",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>✕ Clear</button>}
+            {diagnostics.length>0&&(
+              <button onClick={()=>setDiagOpen(o=>!o)}
+                style={{marginLeft:"auto",fontSize:10,color:"var(--muted)",background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:7,padding:"2px 8px",cursor:"pointer"}}>
+                🔬 Debug {diagOpen?"▲":"▼"}
+              </button>
+            )}
+          </div>
+          {diagOpen&&diagnostics.length>0&&(
+            <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:12,padding:"10px 12px",marginBottom:8,overflowX:"auto"}}>
+              <div style={{fontSize:11,fontWeight:700,fontFamily:"'Syne',sans-serif",marginBottom:6}}>🔬 Source Diagnostics</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,whiteSpace:"nowrap"}}>
+                <thead>
+                  <tr style={{color:"var(--muted)",textAlign:"left"}}>
+                    {["Source","Called","Status","Raw","Kept","Error"].map(h=>(
+                      <th key={h} style={{padding:"3px 8px",borderBottom:"1px solid var(--border)",fontWeight:600,textTransform:"uppercase",letterSpacing:0.5}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {diagnostics.map(d=>{
+                    const sColor={success:"#00c864",degraded:"#ff9500",error:"#ff6b6b",skipped:"#7070a0",timeout:"#ff9500"}[d.status]||"#888";
+                    const sIcon={success:"✅",degraded:"⚠️",error:"❌",skipped:"⏭️",timeout:"⏱"}[d.status]||"❓";
+                    return(
+                      <tr key={d.source} style={{borderBottom:"1px solid var(--border)",opacity:d.called?1:0.45}}>
+                        <td style={{padding:"4px 8px",fontWeight:600,color:"var(--text)"}}>{d.source}</td>
+                        <td style={{padding:"4px 8px",color:d.called?"#00c864":"#ff6b6b"}}>{d.called?"yes":"no"}</td>
+                        <td style={{padding:"4px 8px",color:sColor,fontWeight:600}}>{sIcon} {d.status}</td>
+                        <td style={{padding:"4px 8px",color:"var(--muted)"}}>{d.rawCount}</td>
+                        <td style={{padding:"4px 8px",color:d.postFilterCount>0?"#00c864":"var(--muted)",fontWeight:d.postFilterCount>0?700:400}}>{d.postFilterCount}</td>
+                        <td style={{padding:"4px 8px",color:"#ff6b6b",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis"}} title={d.error||undefined}>{d.error||"—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

@@ -38,6 +38,15 @@ export interface SourceStatus {
   error?: string;
 }
 
+export interface SourceDiagnostic {
+  source: string;
+  called: boolean;
+  status: "success"|"degraded"|"error"|"skipped"|"timeout";
+  rawCount: number;
+  postFilterCount: number;
+  error: string|null;
+}
+
 // ── Fortune 500 ranking ────────────────────────────────────────────────────
 const FORTUNE_RANK: Record<string,number> = {
   "walmart":1,"amazon":2,"apple":3,"unitedhealth":4,"microsoft":5,
@@ -1005,23 +1014,48 @@ export async function GET(req: NextRequest) {
     // Global cap 450
     const final = sorted.slice(0, 450);
 
-    // Build source diagnostics
+    // Build full diagnostics
     const sourceStatus: Record<string,SourceStatus> = {};
     sourceKeys.forEach((k,i) => { sourceStatus[k] = results[i].status; });
 
-    // Build source counts for UI
+    // Build source counts for UI (all sources, including zeros)
     const sources: Record<string,number> = {};
     sourceKeys.forEach(k => {
       sources[k] = final.filter(j=>j.sourceType===k||(k==="theirstack"&&j.sourceType==="other")).length;
     });
 
-    console.log(`Jobs "${query}" (${expansion.mode}) → ${final.length} | ${JSON.stringify(sources)}`);
+    // Build rich sourceDiagnostics array
+    const sourceDiagnostics: SourceDiagnostic[] = sourceKeys.map((k, i) => {
+      const st = results[i].status;
+      const rawCount = st.fetched;
+      const postFilterCount = sources[k];
+      const called = st.status !== "skipped";
+      let status: SourceDiagnostic["status"];
+      if (st.status === "skipped") status = "skipped";
+      else if (st.error === "timeout") status = "timeout";
+      else if (st.status === "healthy" && rawCount > 0) status = "success";
+      else if (st.status === "degraded" && rawCount > 0) status = "success";
+      else if (st.status === "degraded") status = "degraded";
+      else status = "error";
+      return {
+        source: k,
+        called,
+        status,
+        rawCount,
+        postFilterCount,
+        error: st.error || null,
+      };
+    });
+
+    console.log(`Jobs "${query}" (${expansion.mode}) → ${final.length}`);
+    console.log("Diagnostics:", JSON.stringify(sourceDiagnostics.map(d=>({s:d.source,st:d.status,raw:d.rawCount,err:d.error}))));
 
     return NextResponse.json({
       jobs: final,
       count: final.length,
       sources,
       sourceStatus,
+      sourceDiagnostics,
       queryMode: expansion.mode,
       expandedTerms: expansion.terms.length,
     });
