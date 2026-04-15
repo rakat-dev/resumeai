@@ -62,7 +62,7 @@ function loadSS():{query:string;filter:JobFilter;jobs:Job[];sources:Record<strin
 // ── Filter types ───────────────────────────────────────────────────────────
 type SponsorFilter = "all"|"yes"|"no_info";
 type ExpFilter = "0-1yr"|"1-3yr"|"4-6yr"|"6+yr";
-type SourceType = "jsearch"|"greenhouse"|"lever"|"remotive"|"other";
+type SourceType = "jsearch"|"greenhouse"|"lever"|"remotive"|"theirstack"|"fantasticjobs"|"other";
 
 interface Filters {
   datePosted: JobFilter;
@@ -241,7 +241,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs}:FiltersModalProps){
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
   const allCompanies=useMemo(()=>Array.from(new Set(allJobs.map(j=>j.company).filter(Boolean))).sort(),[allJobs]);
-  const allSources:SourceType[]=["jsearch","greenhouse","lever","remotive","other"];
+  const allSources:SourceType[]=["jsearch","greenhouse","lever","remotive","theirstack","fantasticjobs","other"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
   const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
 
@@ -312,12 +312,20 @@ function FiltersModal({open,onClose,filters,onSave,allJobs}:FiltersModalProps){
               </button>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {allSources.map(s=>(
+              {allSources.map(s=>{
+                const srcCount=sources[s===("other" as string)?"other":s]||0;
+                const srcLabel=s==="jsearch"?"Job Boards (JSearch)":s==="other"?"Remotive / Other":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Fantastic.Jobs":s.charAt(0).toUpperCase()+s.slice(1);
+                const SC:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",remotive:"#9664ff",theirstack:"#ff8c00",fantasticjobs:"#00c8b4",other:"#7070a0"};
+                const dotColor=SC[s]||"#7070a0";
+                return (
                 <label key={s} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",padding:"8px 12px",borderRadius:10,background:draft.sources.has(s)?"rgba(108,99,255,0.08)":"var(--surface2)",border:`1px solid ${draft.sources.has(s)?"var(--accent)":"var(--border)"}`}}>
                   <input type="checkbox" checked={draft.sources.has(s)} onChange={()=>setDraft(d=>({...d,sources:toggle(d.sources as Set<string>,s) as Set<SourceType>}))} style={{accentColor:"var(--accent)"}}/>
-                  <span style={{fontSize:13,color:"var(--text)",textTransform:"capitalize"}}>{s==="jsearch"?"Job Boards (JSearch)":s==="other"?"Remotive / Other":s.charAt(0).toUpperCase()+s.slice(1)}</span>
+                  <span style={{width:8,height:8,borderRadius:"50%",background:dotColor,flexShrink:0}}/>
+                  <span style={{fontSize:13,color:"var(--text)",flex:1}}>{srcLabel}</span>
+                  {srcCount>0&&<span style={{fontSize:11,color:dotColor,fontWeight:600,background:`${dotColor}18`,padding:"1px 7px",borderRadius:100}}>{srcCount}</span>}
                 </label>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -363,7 +371,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs}:FiltersModalProps){
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function SourceBadge({source,sourceType}:{source:string;sourceType?:string}){
-  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},lever:{bg:"rgba(0,150,255,0.1)",color:"#0096ff"},remotive:{bg:"rgba(150,100,255,0.1)",color:"#9664ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
+  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},lever:{bg:"rgba(0,150,255,0.1)",color:"#0096ff"},remotive:{bg:"rgba(150,100,255,0.1)",color:"#9664ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},theirstack:{bg:"rgba(255,140,0,0.1)",color:"#ff8c00"},fantasticjobs:{bg:"rgba(0,200,180,0.1)",color:"#00c8b4"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
   const c=C[sourceType||"other"]||C.other;
   return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:c.bg,color:c.color,border:`1px solid ${c.color}40`}}>{source}</span>;
 }
@@ -561,9 +569,19 @@ export default function JobsPage(){
       {jobs.length>0&&(
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
           <span style={{fontSize:12,color:"var(--muted)"}}>{filteredJobs.length} showing / {jobs.length} total</span>
-          {Object.entries(sources).filter(([,v])=>v>0).map(([s,c])=>(
-            <span key={s} style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"var(--surface2)",color:"var(--muted)",border:"1px solid var(--border)"}}>{s}:{c}</span>
-          ))}
+          {Object.entries(sources).filter(([,v])=>v>0).map(([s,c])=>{
+            const SC:Record<string,{bg:string;color:string}>={
+              jsearch:{bg:"rgba(112,112,160,0.12)",color:"#7070a0"},
+              greenhouse:{bg:"rgba(0,200,100,0.12)",color:"#00c864"},
+              lever:{bg:"rgba(0,150,255,0.12)",color:"#0096ff"},
+              remotive:{bg:"rgba(150,100,255,0.12)",color:"#9664ff"},
+              theirstack:{bg:"rgba(255,140,0,0.12)",color:"#ff8c00"},
+              fantasticjobs:{bg:"rgba(0,200,180,0.12)",color:"#00c8b4"},
+            };
+            const label=s==="jsearch"?"JSearch":s==="other"?"Remotive":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Fantastic.Jobs":s.charAt(0).toUpperCase()+s.slice(1);
+            const st=SC[s]||{bg:"var(--surface2)",color:"var(--muted)"};
+            return <span key={s} style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:st.bg,color:st.color,border:`1px solid ${st.color}30`,fontWeight:600}}>{label}:{c}</span>;
+          })}
           {activeFilterCount>0&&<button onClick={()=>setFilters(DEFAULT_FILTERS)} style={{fontSize:11,color:"var(--accent3)",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>✕ Clear filters</button>}
         </div>
       )}

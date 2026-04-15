@@ -16,7 +16,7 @@ export interface Job {
   postedDate: string;
   postedTimestamp: number;
   source: string;
-  sourceType: "jsearch" | "greenhouse" | "lever" | "remotive" | "other";
+  sourceType: "jsearch" | "greenhouse" | "lever" | "remotive" | "theirstack" | "fantasticjobs" | "other";
   skills: string[];
   sponsorshipTag: "mentioned" | "not_mentioned";
   experience?: string;
@@ -504,6 +504,143 @@ async function fetchRemotive(query: string): Promise<Job[]> {
   } catch { return []; }
 }
 
+// ── TheirStack ─────────────────────────────────────────────────────────────
+async function fetchTheirStack(query: string, filter: JobFilter): Promise<Job[]> {
+  const apiKey = process.env.THEIRSTACK_API_KEY;
+  if (!apiKey) return [];
+
+  const maxAgeDays: Record<JobFilter, number|undefined> = {
+    "24h": 1, "7d": 7, "30d": 30, "any": undefined,
+  };
+  const ageDays = maxAgeDays[filter];
+
+  const body: Record<string, unknown> = {
+    job_title_or: [query],
+    job_country_code_or: ["US"],
+    order_by: [{ desc: true, field: "date_posted" }],
+    page: 0,
+    limit: 25,
+  };
+  if (ageDays) body.posted_at_max_age_days = ageDays;
+
+  try {
+    const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const jobs = (data.data || []) as Record<string, unknown>[];
+    const aiCount = { n: 0 };
+    return jobs
+      .map((j, i): Job => {
+        const rawDesc = (j.description as string) || "";
+        const desc = cleanDescription(rawDesc).slice(0, 800);
+        const datePosted = (j.date_posted as string) || "";
+        const ts = datePosted ? Math.floor(new Date(datePosted).getTime() / 1000) : 0;
+        const companyObj = (j.company as Record<string, unknown>) || {};
+        const company = (companyObj.name as string) || (j.company_name as string) || "";
+        const location = (j.location as string) ||
+          (Array.isArray(j.locations) && (j.locations as string[]).join(", ")) ||
+          "Remote";
+        return {
+          id: `ts-${j.id ?? i}`,
+          title: (j.job_title as string) || "",
+          company,
+          location,
+          type: "Full-time",
+          salary: j.salary_string ? (j.salary_string as string) : undefined,
+          description: desc,
+          applyUrl: (j.url as string) || (j.final_url as string) || "#",
+          postedAt: datePosted,
+          postedDate: ts ? formatPostedDate(ts) : "Recently",
+          postedTimestamp: ts,
+          source: "TheirStack",
+          sourceType: "theirstack",
+          skills: extractMissingSkills(rawDesc),
+          sponsorshipTag: detectSponsorship(rawDesc),
+          experience: extractExperience(rawDesc),
+          priorityTier: getPriorityTier(company),
+          fortuneRank: getFortuneTier(company),
+        };
+      })
+      .filter(j =>
+        j.title && j.company &&
+        (isRelevantTitle(j.title) || isTitleRelevantToQuery(j.title, query)) &&
+        shouldKeepJob(j.title, j.description, j.type, j.location, aiCount)
+      );
+  } catch { return []; }
+}
+
+// ── Fantastic.Jobs (RapidAPI) ──────────────────────────────────────────────
+async function fetchFantasticJobs(query: string): Promise<Job[]> {
+  const apiKey = process.env.RAPIDAPI_KEY;
+  if (!apiKey) return [];
+
+  try {
+    const params = new URLSearchParams({
+      title_filter: `"${query}"`,
+      location_filter: '"United States"',
+      description_type: "text",
+    });
+    const res = await fetch(
+      `https://active-jobs-db.p.rapidapi.com/active-ats-7d?${params}`,
+      {
+        headers: {
+          "X-RapidAPI-Key": apiKey,
+          "X-RapidAPI-Host": "active-jobs-db.p.rapidapi.com",
+        },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return [];
+    const jobs = await res.json() as Record<string, unknown>[];
+    if (!Array.isArray(jobs)) return [];
+    const aiCount = { n: 0 };
+    return jobs
+      .map((j, i): Job => {
+        const rawDesc = (j.description as string) || "";
+        const desc = cleanDescription(rawDesc).slice(0, 800);
+        const datePosted = (j.date_posted as string) || "";
+        const ts = datePosted ? Math.floor(new Date(datePosted).getTime() / 1000) : 0;
+        const company = (j.organization as string) || "";
+        const location = (j.cities_derived as string[])?.join(", ") ||
+          (j.locations_derived as string[])?.join(", ") ||
+          (j.location as string) || "Remote";
+        return {
+          id: `fj-${j.id ?? i}`,
+          title: (j.title as string) || "",
+          company,
+          location,
+          type: "Full-time",
+          salary: j.salary_raw ? String(j.salary_raw) : undefined,
+          description: desc,
+          applyUrl: (j.url as string) || "#",
+          postedAt: datePosted,
+          postedDate: ts ? formatPostedDate(ts) : "Recently",
+          postedTimestamp: ts,
+          source: "Fantastic.Jobs",
+          sourceType: "fantasticjobs",
+          skills: extractMissingSkills(rawDesc),
+          sponsorshipTag: detectSponsorship(rawDesc),
+          experience: extractExperience(rawDesc),
+          priorityTier: getPriorityTier(company),
+          fortuneRank: getFortuneTier(company),
+        };
+      })
+      .filter(j =>
+        j.title && j.company &&
+        (isRelevantTitle(j.title) || isTitleRelevantToQuery(j.title, query)) &&
+        shouldKeepJob(j.title, j.description, j.type, j.location, aiCount)
+      );
+  } catch { return []; }
+}
+
 // ── Main Handler ───────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -527,6 +664,8 @@ export async function GET(req: NextRequest) {
       rGH,             // Greenhouse
       rLV,             // Lever
       rRM,             // Remotive
+      rTS,             // TheirStack
+      rFJ,             // Fantastic.Jobs
     ] = await Promise.allSettled([
       withTimeout(fetchJSearchRaw(query, filter, 1), 15000, []),
       withTimeout(fetchJSearchRaw(query, filter, 2), 15000, []),
@@ -536,6 +675,8 @@ export async function GET(req: NextRequest) {
       withTimeout(fetchGreenhouse(query), 25000, []),
       withTimeout(fetchLever(query), 25000, []),
       withTimeout(fetchRemotive(query), 15000, []),
+      withTimeout(fetchTheirStack(query, filter), 20000, []),
+      withTimeout(fetchFantasticJobs(query), 20000, []),
     ]);
 
     const allJobs: Job[] = [
@@ -547,16 +688,20 @@ export async function GET(req: NextRequest) {
       ...(rGH.status==="fulfilled"?rGH.value:[]),
       ...(rLV.status==="fulfilled"?rLV.value:[]),
       ...(rRM.status==="fulfilled"?rRM.value:[]),
+      ...(rTS.status==="fulfilled"?rTS.value:[]),
+      ...(rFJ.status==="fulfilled"?rFJ.value:[]),
     ].filter(j=>j.title&&j.company);
 
     const unique = deduplicateJobs(allJobs);
     const sorted = sortJobs(unique, sort);
 
     const sources = {
-      jsearch:    unique.filter(j=>j.sourceType==="jsearch").length,
-      greenhouse: unique.filter(j=>j.sourceType==="greenhouse").length,
-      lever:      unique.filter(j=>j.sourceType==="lever").length,
-      remotive:   unique.filter(j=>j.sourceType==="other").length,
+      jsearch:       unique.filter(j=>j.sourceType==="jsearch").length,
+      greenhouse:    unique.filter(j=>j.sourceType==="greenhouse").length,
+      lever:         unique.filter(j=>j.sourceType==="lever").length,
+      remotive:      unique.filter(j=>j.sourceType==="other").length,
+      theirstack:    unique.filter(j=>j.sourceType==="theirstack").length,
+      fantasticjobs: unique.filter(j=>j.sourceType==="fantasticjobs").length,
     };
 
     console.log(`Jobs "${query}" sort:${sort} → ${unique.length} jobs | ${JSON.stringify(sources)}`);
