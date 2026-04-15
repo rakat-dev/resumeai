@@ -462,12 +462,24 @@ async function fetchLever(query: string): Promise<Job[]> {
   return results;
 }
 
+// ── Query normalizer ──────────────────────────────────────────────────────
+// Cleans user queries like "software engineer + full stack" → "software engineer"
+// Returns the primary term (before any + or OR) for APIs that don't handle operators
+function primaryQuery(query: string): string {
+  return query.split(/\s*[+|]\s*/)[0].trim();
+}
+// Returns all terms split by + or OR for multi-title APIs
+function queryTerms(query: string): string[] {
+  return query.split(/\s*[+|]\s*/).map(t=>t.trim()).filter(Boolean);
+}
+
 // ── Remotive ───────────────────────────────────────────────────────────────
 async function fetchRemotive(query: string): Promise<Job[]> {
   const aiCount = { n: 0 };
+  const q = primaryQuery(query); // Remotive doesn't handle + operators
   try {
     const res = await fetch(
-      `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(query)}&limit=50`,
+      `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=50`,
       { next: { revalidate: 1800 } }
     );
     if (!res.ok) return [];
@@ -513,9 +525,10 @@ async function fetchTheirStack(query: string, filter: JobFilter): Promise<Job[]>
     "24h": 1, "7d": 7, "30d": 30, "any": undefined,
   };
   const ageDays = maxAgeDays[filter];
+  const titles = queryTerms(query); // supports "software engineer + full stack engineer"
 
   const body: Record<string, unknown> = {
-    job_title_or: [query],
+    job_title_or: titles,
     job_country_code_or: ["US"],
     order_by: [{ desc: true, field: "date_posted" }],
     page: 0,
@@ -577,55 +590,62 @@ async function fetchTheirStack(query: string, filter: JobFilter): Promise<Job[]>
   } catch { return []; }
 }
 
-// ── Fantastic.Jobs (RapidAPI) ──────────────────────────────────────────────
-async function fetchFantasticJobs(query: string): Promise<Job[]> {
-  const apiKey = process.env.RAPIDAPI_KEY;
-  if (!apiKey) return [];
+// ── Adzuna (free, no extra key needed — uses ADZUNA_APP_ID + ADZUNA_APP_KEY) ─────────
+async function fetchAdzuna(query: string, filter: JobFilter): Promise<Job[]> {
+  const appId = process.env.ADZUNA_APP_ID;
+  const appKey = process.env.ADZUNA_APP_KEY;
+  if (!appId || !appKey) return [];
+
+  const q = primaryQuery(query);
+  const maxDays: Record<JobFilter, number|undefined> = {
+    "24h": 1, "7d": 7, "30d": 30, "any": undefined,
+  };
+  const maxDaysOld = maxDays[filter];
 
   try {
     const params = new URLSearchParams({
-      title_filter: `"${query}"`,
-      location_filter: '"United States"',
-      description_type: "text",
+      app_id: appId,
+      app_key: appKey,
+      results_per_page: "50",
+      what: q,
+      where: "united states",
+      "content-type": "application/json",
+      full_time: "1",
+      ...(maxDaysOld ? { max_days_old: String(maxDaysOld) } : {}),
     });
     const res = await fetch(
-      `https://active-jobs-db.p.rapidapi.com/active-ats-7d?${params}`,
-      {
-        headers: {
-          "X-RapidAPI-Key": apiKey,
-          "X-RapidAPI-Host": "active-jobs-db.p.rapidapi.com",
-        },
-        cache: "no-store",
-      }
+      `https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`,
+      { cache: "no-store" }
     );
     if (!res.ok) return [];
-    const jobs = await res.json() as Record<string, unknown>[];
-    if (!Array.isArray(jobs)) return [];
+    const data = await res.json();
+    const jobs = (data.results || []) as Record<string, unknown>[];
     const aiCount = { n: 0 };
     return jobs
       .map((j, i): Job => {
         const rawDesc = (j.description as string) || "";
         const desc = cleanDescription(rawDesc).slice(0, 800);
-        const datePosted = (j.date_posted as string) || "";
-        const ts = datePosted ? Math.floor(new Date(datePosted).getTime() / 1000) : 0;
-        const company = (j.organization as string) || "";
-        const location = (j.cities_derived as string[])?.join(", ") ||
-          (j.locations_derived as string[])?.join(", ") ||
-          (j.location as string) || "Remote";
+        const createdAt = (j.created as string) || "";
+        const ts = createdAt ? Math.floor(new Date(createdAt).getTime() / 1000) : 0;
+        const company = ((j.company as Record<string,unknown>)?.display_name as string) || "";
+        const locationObj = (j.location as Record<string,unknown>) || {};
+        const location = (locationObj.display_name as string) || "United States";
+        const salaryMin = j.salary_min ? Math.round(Number(j.salary_min) / 1000) : 0;
+        const salaryMax = j.salary_max ? Math.round(Number(j.salary_max) / 1000) : 0;
         return {
-          id: `fj-${j.id ?? i}`,
+          id: `az-${j.id ?? i}`,
           title: (j.title as string) || "",
           company,
           location,
           type: "Full-time",
-          salary: j.salary_raw ? String(j.salary_raw) : undefined,
+          salary: salaryMin > 0 ? `${salaryMin}k–${salaryMax}k` : undefined,
           description: desc,
-          applyUrl: (j.url as string) || "#",
-          postedAt: datePosted,
+          applyUrl: (j.redirect_url as string) || "#",
+          postedAt: createdAt,
           postedDate: ts ? formatPostedDate(ts) : "Recently",
           postedTimestamp: ts,
-          source: "Fantastic.Jobs",
-          sourceType: "fantasticjobs",
+          source: "Adzuna",
+          sourceType: "fantasticjobs", // reuses the existing badge slot
           skills: extractMissingSkills(rawDesc),
           sponsorshipTag: detectSponsorship(rawDesc),
           experience: extractExperience(rawDesc),
@@ -676,7 +696,7 @@ export async function GET(req: NextRequest) {
       withTimeout(fetchLever(query), 25000, []),
       withTimeout(fetchRemotive(query), 15000, []),
       withTimeout(fetchTheirStack(query, filter), 20000, []),
-      withTimeout(fetchFantasticJobs(query), 20000, []),
+      withTimeout(fetchAdzuna(query, filter), 20000, []),
     ]);
 
     const allJobs: Job[] = [

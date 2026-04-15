@@ -315,7 +315,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {allSources.map(s=>{
                 const srcCount=sources[s===("other" as string)?"other":s]||0;
-                const srcLabel=s==="jsearch"?"Job Boards (JSearch)":s==="other"?"Remotive / Other":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Fantastic.Jobs":s.charAt(0).toUpperCase()+s.slice(1);
+                const srcLabel=s==="jsearch"?"Job Boards (JSearch)":s==="other"?"Remotive / Other":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Adzuna":s.charAt(0).toUpperCase()+s.slice(1);
                 const SC:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",remotive:"#9664ff",theirstack:"#ff8c00",fantasticjobs:"#00c8b4",other:"#7070a0"};
                 const dotColor=SC[s]||"#7070a0";
                 return (
@@ -579,7 +579,7 @@ export default function JobsPage(){
               theirstack:{bg:"rgba(255,140,0,0.12)",color:"#ff8c00"},
               fantasticjobs:{bg:"rgba(0,200,180,0.12)",color:"#00c8b4"},
             };
-            const label=s==="jsearch"?"JSearch":s==="other"?"Remotive":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Fantastic.Jobs":s.charAt(0).toUpperCase()+s.slice(1);
+            const label=s==="jsearch"?"JSearch":s==="other"?"Remotive":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Adzuna":s.charAt(0).toUpperCase()+s.slice(1);
             const st=SC[s]||{bg:"var(--surface2)",color:"var(--muted)"};
             return <span key={s} style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:st.bg,color:st.color,border:`1px solid ${st.color}30`,fontWeight:600}}>{label}:{c}</span>;
           })}
