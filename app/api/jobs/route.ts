@@ -4,6 +4,7 @@ import {
   scoreTitleRelevance, scoreRecency,
 } from "@/lib/queryExpansion";
 
+export const maxDuration = 60; // Vercel max: 60s on hobby, 300s on pro
 export type JobFilter = "24h" | "7d" | "30d" | "any";
 export type SortOption = "date_desc" | "date_asc" | "company_desc" | "company_asc";
 
@@ -747,14 +748,16 @@ async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{j
 // ── Oracle Cloud HCM ──────────────────────────────────────────────────────
 async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   try {
+    // Oracle Fusion HCM — correct endpoint with required fields
     const params = new URLSearchParams({
-      q: expansion.primary,
-      limit: "25",
-      offset: "0",
+      "q":       `TITLE='${expansion.primary}'`,
+      "limit":   "25",
+      "offset":  "0",
+      "expand":  "requisitionList",
+      "onlyData":"true",
     });
-    // Oracle uses Oracle Cloud Fusion HCM REST API for their own careers
     const res = await fetch(
-      `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?${params}&expand=requisitionList&onlyData=true`,
+      `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?${params}`,
       {
         headers: {
           "Accept": "application/json",
@@ -908,7 +911,8 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
       job_title_or: expansion.terms.slice(0,10),
       job_country_code_or: ["US"],
       order_by: [{desc:true,field:"date_posted"}],
-      page: 0, limit: 25,
+      page: 1,
+      limit: 25,
     };
     if (ageDays) body.posted_at_max_age_days = ageDays;
     const res = await fetch("https://api.theirstack.com/v1/jobs/search",{
