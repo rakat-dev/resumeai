@@ -289,70 +289,102 @@ const DATE_MAP: Record<JobFilter,string> = {
 };
 
 // ── JSearch ────────────────────────────────────────────────────────────────
+// Fallback logic: start with primary query only; if raw < threshold, try adjacent titles.
+// Location is passed as separate param, NOT appended to query string.
+const JSEARCH_MIN_THRESHOLD = 10;
+const JSEARCH_FALLBACK_TERMS = ["backend engineer","frontend engineer","full stack engineer","cloud engineer"];
+
+async function jsearchFetch(term: string, filter: JobFilter, apiKey: string): Promise<Record<string,unknown>[]> {
+  const params = new URLSearchParams({
+    query: term,          // clean title only — no "in USA"
+    page: "1",
+    num_pages: "2",
+    country: "us",        // location via API param
+    remote_jobs_only: "false",
+    ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
+  });
+  const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
+    headers: {
+      "X-RapidAPI-Key": apiKey,
+      "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
+    },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    console.error(`JSearch HTTP ${res.status} for term="${term}"`);
+    return [];
+  }
+  const data = await res.json();
+  return (data.data || []) as Record<string,unknown>[];
+}
+
+function jsearchMapJob(j: Record<string,unknown>, i: number): Job|null {
+  const rawDesc=(j.job_description as string)||"";
+  const desc=cleanDescription(rawDesc).slice(0,800);
+  const ts=(j.job_posted_at_timestamp as number)||0;
+  const loc=[j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
+  const company=(j.employer_name as string)||"";
+  const title=(j.job_title as string)||"";
+  if (!title||!company||!shouldKeepJob(title,desc,(j.job_employment_type as string)||"",loc)) return null;
+  return {
+    id:(j.job_id as string)||`js-${i}`,
+    title, company, location:loc,
+    type:(j.job_employment_type as string)||"Full-time",
+    salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
+    description:desc,
+    applyUrl:(j.job_apply_link as string)||"#",
+    postedAt:(j.job_posted_at_datetime_utc as string)||"",
+    postedDate:ts?formatPostedDate(ts):"Recently",
+    postedTimestamp:ts,
+    source:(j.job_publisher as string)||"Job Board",
+    sourceType:"jsearch",
+    skills:extractMissingSkills(rawDesc),
+    sponsorshipTag:detectSponsorship(rawDesc),
+    experience:extractExperience(rawDesc),
+    priorityTier:getPriorityTier(company),
+    fortuneRank:getFortuneTier(company),
+  };
+}
+
 async function fetchJSearch(query: string, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
   const apiKey = process.env.RAPIDAPI_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"RAPIDAPI_KEY not set"}};
 
   const expansion = expandQuery(query);
   const allJobs: Job[] = [];
+  let totalFetched = 0;
 
-  // For broad mode: use a representative subset of terms to avoid too many API calls
-  // For focused/exact: use all terms
-  const termsToSearch = expansion.mode === "broad"
-    ? ["software engineer","backend engineer","frontend engineer","full stack engineer","cloud engineer","devops engineer"].slice(0,4)
-    : expansion.terms.slice(0,6);
-
-  let fetched = 0;
   try {
-    await Promise.allSettled(
-      termsToSearch.slice(0,3).map(async (term) => {
-        const params = new URLSearchParams({
-          query: `${term} in USA`, page: "1",
-          num_pages: "2", country: "us",
-          ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
+    // Step 1: try primary term first
+    const primaryRaw = await jsearchFetch(expansion.primary, filter, apiKey);
+    totalFetched += primaryRaw.length;
+    console.log(`JSearch primary="${expansion.primary}" → ${primaryRaw.length} raw`);
+
+    primaryRaw.forEach((j,i) => {
+      const job = jsearchMapJob(j, i);
+      if (job) allJobs.push(job);
+    });
+
+    // Step 2: if below threshold, try fallback terms one at a time
+    if (primaryRaw.length < JSEARCH_MIN_THRESHOLD) {
+      const fallbacks = expansion.mode === "broad"
+        ? JSEARCH_FALLBACK_TERMS
+        : expansion.terms.filter(t => t !== expansion.primary).slice(0,3);
+
+      for (const term of fallbacks) {
+        if (allJobs.length >= 30) break; // enough results, stop
+        const raw = await jsearchFetch(term, filter, apiKey);
+        totalFetched += raw.length;
+        console.log(`JSearch fallback="${term}" → ${raw.length} raw`);
+        raw.forEach((j,i) => {
+          const job = jsearchMapJob(j, totalFetched + i);
+          if (job) allJobs.push(job);
         });
-        try {
-          const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`,{
-            headers:{"X-RapidAPI-Key":apiKey,"X-RapidAPI-Host":"jsearch.p.rapidapi.com"},
-            cache:"no-store",
-          });
-          if (!res.ok) return;
-          const data = await res.json();
-          const raw = (data.data||[]) as Record<string,unknown>[];
-          fetched += raw.length;
-          raw.forEach((j,i) => {
-            const rawDesc=(j.job_description as string)||"";
-            const desc=cleanDescription(rawDesc).slice(0,800);
-            const ts=(j.job_posted_at_timestamp as number)||0;
-            const loc=[j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
-            const company=(j.employer_name as string)||"";
-            const title=(j.job_title as string)||"";
-            if (!title||!company||!shouldKeepJob(title,desc,(j.job_employment_type as string)||"",loc)) return;
-            const job: Job = {
-              id:(j.job_id as string)||`js-${i}`,
-              title, company, location:loc,
-              type:(j.job_employment_type as string)||"Full-time",
-              salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
-              description:desc,
-              applyUrl:(j.job_apply_link as string)||"#",
-              postedAt:(j.job_posted_at_datetime_utc as string)||"",
-              postedDate:ts?formatPostedDate(ts):"Recently",
-              postedTimestamp:ts,
-              source:(j.job_publisher as string)||"Job Board",
-              sourceType:"jsearch",
-              skills:extractMissingSkills(rawDesc),
-              sponsorshipTag:detectSponsorship(rawDesc),
-              experience:extractExperience(rawDesc),
-              priorityTier:getPriorityTier(company),
-              fortuneRank:getFortuneTier(company),
-            };
-            allJobs.push(job);
-          });
-        } catch { /**/ }
-      })
-    );
+      }
+    }
+
     const kept = allJobs.length;
-    return {jobs:allJobs,status:{status:kept>0?"healthy":"degraded",fetched,kept}};
+    return {jobs:allJobs,status:{status:kept>0?"healthy":"degraded",fetched:totalFetched,kept}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
   }
@@ -426,55 +458,85 @@ const LEVER_COMPANIES = [
   "stripe","figma","notion","brex","gusto","ramp","plaid",
 ];
 
+// Module-level cache: key=company, value={jobs, ts}
+const LEVER_CACHE = new Map<string, {jobs:Record<string,unknown>[], ts:number}>();
+const LEVER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function fetchLeverCompany(company: string): Promise<Record<string,unknown>[]> {
+  const cached = LEVER_CACHE.get(company);
+  if (cached && Date.now() - cached.ts < LEVER_CACHE_TTL) {
+    return cached.jobs;
+  }
+  try {
+    const res = await fetch(
+      `https://api.lever.co/v0/postings/${company}?mode=json`,
+      { next: { revalidate: 300 } }
+    );
+    if (!res.ok) return [];
+    const jobs = await res.json();
+    if (!Array.isArray(jobs)) return [];
+    LEVER_CACHE.set(company, { jobs, ts: Date.now() });
+    return jobs;
+  } catch {
+    return [];
+  }
+}
+
+// Run promises in batches of N to limit concurrency
+async function batchedAllSettled<T>(items: (() => Promise<T>)[], batchSize: number): Promise<T[]> {
+  const results: T[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize).map(fn => fn());
+    const settled = await Promise.allSettled(batch);
+    settled.forEach(r => { if (r.status === "fulfilled") results.push(r.value); });
+  }
+  return results;
+}
+
 async function fetchLever(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   const results: Job[] = [];
   let fetched = 0;
-  await Promise.allSettled(
-    LEVER_COMPANIES.map(async company => {
-      try {
-        const res = await fetch(
-          `https://api.lever.co/v0/postings/${company}?mode=json`,
-          { next: { revalidate: 3600 } }
-        );
-        if (!res.ok) return;
-        const jobs = await res.json();
-        if (!Array.isArray(jobs)) return;
-        fetched += jobs.length;
-        let kept = 0;
-        for (const j of jobs as Record<string,unknown>[]) {
-          if (kept >= PER_COMPANY_CAP) break;
-          const title=(j.text as string)||"";
-          const plainDesc=(j.descriptionPlain as string)||"";
-          const rawDesc=(j.description as string)||plainDesc;
-          const desc=cleanDescription(plainDesc||rawDesc).slice(0,800);
-          const cats=(j.categories as Record<string,unknown>)||{};
-          const commitment=(cats.commitment as string)||"";
-          const location=(cats.location as string)||"Remote";
-          if (!shouldKeepJob(title,desc,commitment,location)) continue;
-          const tl=title.toLowerCase();
-          const relevant=expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
-          if (!relevant) continue;
-          const url=(j.hostedUrl as string)||"#";
-          const createdAt=(j.createdAt as number)||0;
-          const ts=createdAt>1e10?Math.floor(createdAt/1000):createdAt;
-          const displayName=company.charAt(0).toUpperCase()+company.slice(1).replace(/-/g," ");
-          results.push({
-            id:`lever-${company}-${j.id??Math.random()}`,
-            title,company:displayName,location,type:commitment||"Full-time",
-            description:desc,applyUrl:url,
-            postedAt:createdAt?new Date(createdAt>1e10?createdAt:createdAt*1000).toISOString():"",
-            postedDate:ts?formatPostedDate(ts):"Recently",
-            postedTimestamp:ts,source:"Lever",sourceType:"lever",
-            skills:extractMissingSkills(rawDesc),
-            sponsorshipTag:detectSponsorship(rawDesc),
-            experience:extractExperience(rawDesc),
-            priorityTier:getPriorityTier(displayName),
-            fortuneRank:getFortuneTier(displayName),
-          });
-          kept++;
-        }
-      } catch { /**/ }
-    })
+
+  // Fetch 6 companies at a time to avoid timeout
+  await batchedAllSettled(
+    LEVER_COMPANIES.map(company => async () => {
+      const rawJobs = await fetchLeverCompany(company);
+      fetched += rawJobs.length;
+      let kept = 0;
+      for (const j of rawJobs as Record<string,unknown>[]) {
+        if (kept >= PER_COMPANY_CAP) break;
+        const title=(j.text as string)||"";
+        const plainDesc=(j.descriptionPlain as string)||"";
+        const rawDesc=(j.description as string)||plainDesc;
+        const desc=cleanDescription(plainDesc||rawDesc).slice(0,800);
+        const cats=(j.categories as Record<string,unknown>)||{};
+        const commitment=(cats.commitment as string)||"";
+        const location=(cats.location as string)||"Remote";
+        if (!shouldKeepJob(title,desc,commitment,location)) continue;
+        const tl=title.toLowerCase();
+        const relevant=expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
+        if (!relevant) continue;
+        const url=(j.hostedUrl as string)||"#";
+        const createdAt=(j.createdAt as number)||0;
+        const ts=createdAt>1e10?Math.floor(createdAt/1000):createdAt;
+        const displayName=company.charAt(0).toUpperCase()+company.slice(1).replace(/-/g," ");
+        results.push({
+          id:`lever-${company}-${j.id??Math.random()}`,
+          title,company:displayName,location,type:commitment||"Full-time",
+          description:desc,applyUrl:url,
+          postedAt:createdAt?new Date(createdAt>1e10?createdAt:createdAt*1000).toISOString():"",
+          postedDate:ts?formatPostedDate(ts):"Recently",
+          postedTimestamp:ts,source:"Lever",sourceType:"lever",
+          skills:extractMissingSkills(rawDesc),
+          sponsorshipTag:detectSponsorship(rawDesc),
+          experience:extractExperience(rawDesc),
+          priorityTier:getPriorityTier(displayName),
+          fortuneRank:getFortuneTier(displayName),
+        });
+        kept++;
+      }
+    }),
+    6  // batch size: 6 companies at a time
   );
   return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched,kept:results.length}};
 }
@@ -755,41 +817,57 @@ async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{j
 }
 
 // ── Oracle Cloud HCM ──────────────────────────────────────────────────────
+// Strategy: fetch broad raw results first (no custom query syntax),
+// then do all title/location filtering on our side after normalization.
 async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   try {
-    // Oracle Fusion HCM — correct endpoint with required fields
-    const params = new URLSearchParams({
-      "q":       `TITLE='${expansion.primary}'`,
-      "limit":   "25",
-      "offset":  "0",
-      "expand":  "requisitionList",
-      "onlyData":"true",
+    // Use Oracle's public careers search — simple keyword, no OData syntax
+    const reqUrl = `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?limit=25&offset=0&expand=requisitionList&onlyData=true`;
+    console.log(`Oracle fetch URL: ${reqUrl}`);
+
+    const res = await fetch(reqUrl, {
+      headers: {
+        "Accept": "application/json",
+        "Accept-Language": "en-US",
+        "User-Agent": "Mozilla/5.0",
+      },
+      cache: "no-store",
     });
-    const res = await fetch(
-      `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?${params}`,
-      {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-        },
-        cache: "no-store",
-      }
-    );
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`Oracle HTTP ${res.status}: ${body.slice(0,200)}`);
+      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    }
+
     const data = await res.json();
     const items = (data.items||[]) as Record<string,unknown>[];
+    console.log(`Oracle raw items: ${items.length}`);
+
     const jobs: Job[] = [];
+    let rawCount = 0;
+
     for (const item of items) {
       const reqs = (item.requisitionList as Record<string,unknown>[])||[];
+      rawCount += reqs.length;
       for (const r of reqs) {
-        const title=(r.Title as string)||"";
-        const rawDesc=(r.ExternalDescriptionStr as string)||"";
+        const title=(r.Title as string)||(r.Name as string)||"";
+        const rawDesc=(r.ExternalDescriptionStr as string)||(r.Description as string)||"";
         const desc=cleanDescription(rawDesc).slice(0,800);
-        const location=(r.PrimaryLocation as string)||"United States";
+        const location=(r.PrimaryLocation as string)||(r.Locations as string)||"United States";
+
+        // Backend filtering — skip clearance/contract/non-US/wrong titles
         if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+
+        // Relevance: title must loosely match expansion
+        const tl = title.toLowerCase();
+        const relevant = expansion.terms.some(t => tl.includes(t.split(" ")[0]));
+        if (!relevant) continue;
+
         const postedDate=(r.PostedDate as string)||"";
         const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
-        const reqId=(r.Id as string)||String(Math.random());
+        const reqId=(r.Id as string)||(r.RequisitionId as string)||String(Math.random());
+
         jobs.push({
           id:`oracle-${reqId}`,
           title, company:"Oracle", location, type:"Full-time",
@@ -804,7 +882,9 @@ async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{
         });
       }
     }
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:items.length,kept:jobs.length}};
+
+    console.log(`Oracle: ${rawCount} raw reqs → ${jobs.length} kept`);
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:rawCount,kept:jobs.length}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
   }
@@ -916,20 +996,39 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
   const maxAgeDays: Record<JobFilter,number|undefined> = {"24h":1,"7d":7,"30d":30,"any":undefined};
   const ageDays = maxAgeDays[filter];
   try {
+    // TheirStack v1 API body — verified schema
+    // job_title_or: array of strings
+    // job_country_code_or: array of ISO-2 country codes
+    // order_by: array of {desc, field} objects
+    // page: 0-indexed (NOT 1-indexed)
     const body: Record<string,unknown> = {
       job_title_or: expansion.terms.slice(0,10),
       job_country_code_or: ["US"],
-      order_by: [{desc:true,field:"date_posted"}],
-      page: 1,
+      order_by: [{ desc: true, field: "date_posted" }],
+      page: 0,
       limit: 25,
     };
     if (ageDays) body.posted_at_max_age_days = ageDays;
-    const res = await fetch("https://api.theirstack.com/v1/jobs/search",{
-      method:"POST",
-      headers:{"Authorization":`Bearer ${apiKey}`,"Content-Type":"application/json"},
-      body:JSON.stringify(body),cache:"no-store",
+
+    const reqBody = JSON.stringify(body);
+    console.log(`TheirStack request: ${reqBody.slice(0,300)}`);
+
+    const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: reqBody,
+      cache: "no-store",
     });
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.error(`TheirStack HTTP ${res.status}: ${errBody.slice(0,300)}`);
+      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}: ${errBody.slice(0,100)}`}};
+    }
     const data = await res.json();
     const raw = (data.data||[]) as Record<string,unknown>[];
     const jobs: Job[] = [];
@@ -981,7 +1080,7 @@ export async function GET(req: NextRequest) {
     ] = await Promise.allSettled([
       withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchGreenhouse(expansion), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchLever(expansion), 25000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchLever(expansion), 50000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchWorkday(expansion, filter), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchGoldmanSachs(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchMorganStanley(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
