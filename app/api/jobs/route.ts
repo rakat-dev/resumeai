@@ -562,7 +562,7 @@ async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: J
           }
 
           results.push({
-            id:`wd-${tenant}-${j.bulletFields?.[0]||Math.random()}`,
+            id:`wd-${tenant}-${(j.bulletFields as string[]|undefined)?.[0]||Math.random()}`,
             title, company:name, location:locArr, type:"Full-time",
             description:desc, applyUrl, postedAt:"",
             postedDate:ts?formatPostedDate(ts):postedOn||"Recently",
