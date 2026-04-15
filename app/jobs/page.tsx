@@ -235,8 +235,9 @@ interface FiltersModalProps{
   open:boolean; onClose:()=>void;
   filters:Filters; onSave:(f:Filters)=>void;
   allJobs:Job[];
+  sources:Record<string,number>;
 }
-function FiltersModal({open,onClose,filters,onSave,allJobs}:FiltersModalProps){
+function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModalProps){
   const [draft,setDraft]=useState<Filters>(filters);
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
@@ -704,7 +705,7 @@ export default function JobsPage(){
       </div>
 
       {/* Filters Modal */}
-      <FiltersModal open={filtersOpen} onClose={()=>setFiltersOpen(false)} filters={filters} onSave={setFilters} allJobs={jobs}/>
+      <FiltersModal open={filtersOpen} onClose={()=>setFiltersOpen(false)} filters={filters} onSave={setFilters} allJobs={jobs} sources={sources}/>
     </AppLayout>
   );
 }
