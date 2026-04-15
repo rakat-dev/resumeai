@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  expandQuery, shouldExcludeTitle, scoreSponsorshipSignal,
+  scoreTitleRelevance, scoreRecency,
+} from "@/lib/queryExpansion";
 
 export type JobFilter = "24h" | "7d" | "30d" | "any";
 export type SortOption = "date_desc" | "date_asc" | "company_desc" | "company_asc";
@@ -16,16 +20,25 @@ export interface Job {
   postedDate: string;
   postedTimestamp: number;
   source: string;
-  sourceType: "jsearch" | "greenhouse" | "lever" | "remotive" | "theirstack" | "fantasticjobs" | "other";
+  sourceType: "jsearch"|"greenhouse"|"lever"|"remotive"|"workday"|"goldman"|"morganstanley"|"cisco"|"oracle"|"adzuna"|"other";
   skills: string[];
-  sponsorshipTag: "mentioned" | "not_mentioned";
+  sponsorshipTag: "mentioned"|"not_mentioned";
   experience?: string;
-  priorityTier?: "highest" | "high" | "must_apply";
+  priorityTier?: "highest"|"high"|"must_apply";
   fortuneRank?: number;
+  relevanceScore?: number;
 }
 
-// ── Fortune 500 ranking for sort ───────────────────────────────────────────
-const FORTUNE_RANK: Record<string, number> = {
+// ── Source diagnostics ─────────────────────────────────────────────────────
+export interface SourceStatus {
+  status: "healthy"|"degraded"|"broken"|"skipped";
+  fetched: number;
+  kept: number;
+  error?: string;
+}
+
+// ── Fortune 500 ranking ────────────────────────────────────────────────────
+const FORTUNE_RANK: Record<string,number> = {
   "walmart":1,"amazon":2,"apple":3,"unitedhealth":4,"microsoft":5,
   "cvs":6,"elevance":7,"at&t":8,"cigna":9,"costco":10,
   "home depot":11,"jpmorgan":12,"jpmorgan chase":12,"verizon":13,
@@ -40,6 +53,7 @@ const FORTUNE_RANK: Record<string, number> = {
   "openai":43,"anthropic":44,"accenture":45,"infosys":46,
   "cognizant":47,"tata consultancy":48,"tcs":48,"capgemini":49,
   "paypal":50,"visa":51,"mastercard":52,
+  "goldman sachs":53,"s&p":54,"sp global":54,
 };
 
 function getFortuneTier(company: string): number {
@@ -51,7 +65,7 @@ function getFortuneTier(company: string): number {
 }
 
 // ── Priority tiers ─────────────────────────────────────────────────────────
-const PRIORITY_MAP: Record<string, "highest"|"high"|"must_apply"> = {
+const PRIORITY_MAP: Record<string,"highest"|"high"|"must_apply"> = {
   "microsoft":"highest","amazon":"highest","google":"highest","apple":"highest",
   "meta":"highest","oracle":"highest","intel":"highest","cisco":"highest","ibm":"highest",
   "salesforce":"highest","walmart":"highest","jpmorgan":"highest","goldman sachs":"highest",
@@ -62,12 +76,12 @@ const PRIORITY_MAP: Record<string, "highest"|"high"|"must_apply"> = {
   "nvidia":"high","databricks":"high","snowflake":"high","hashicorp":"high",
   "cloudflare":"high","mongodb":"high","confluent":"high","servicenow":"high",
   "workday":"high","atlassian":"high","sap":"high","adobe":"high",
-  "t-mobile":"high","at&t":"high",
+  "t-mobile":"high","at&t":"high","verizon":"high","s&p":"high","sp global":"high",
   "cigna":"must_apply","openai":"must_apply","anthropic":"must_apply",
   "accenture":"must_apply","cognizant":"must_apply","infosys":"must_apply",
   "tata consultancy":"must_apply","tcs":"must_apply","capgemini":"must_apply",
   "paypal":"must_apply","visa":"must_apply","mastercard":"must_apply",
-  "stripe":"must_apply","ups":"must_apply","fedex":"must_apply","verizon":"must_apply",
+  "stripe":"must_apply","ups":"must_apply","fedex":"must_apply",
 };
 
 function getPriorityTier(company: string): "highest"|"high"|"must_apply"|undefined {
@@ -77,15 +91,6 @@ function getPriorityTier(company: string): "highest"|"high"|"must_apply"|undefin
   }
   return undefined;
 }
-
-// Priority companies that need dedicated JSearch calls (not on Greenhouse/Lever)
-const JSEARCH_PRIORITY_COMPANIES = [
-  "Microsoft","Amazon","Google","Apple","Meta","Oracle","Intel","Cisco","IBM",
-  "Walmart","JPMorgan Chase","Goldman Sachs","Morgan Stanley","Bank of America",
-  "Wells Fargo","Capital One","Target","Home Depot","Costco",
-  "UnitedHealth Group","Elevance Health","CVS Health","NVIDIA","SAP",
-  "T-Mobile","AT&T","Salesforce",
-];
 
 // ── Text helpers ───────────────────────────────────────────────────────────
 function cleanDescription(html: string): string {
@@ -155,55 +160,6 @@ function formatPostedDate(ts: number): string {
   return `${Math.floor(days/30)}mo ago`;
 }
 
-// ── Job quality filters ────────────────────────────────────────────────────
-function isContractOrPartTime(type: string, desc: string): boolean {
-  const lc=(type+" "+desc.slice(0,300)).toLowerCase();
-  return /\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/.test(lc);
-}
-
-function requiresSecurityClearance(title: string, desc: string): boolean {
-  const text=(title+" "+desc).toLowerCase();
-  return /\b(security\s+clearance|secret\s+clearance|top\s+secret|ts\/sci|ts-sci|clearance\s+required|active\s+clearance|dod\s+clearance|public\s+trust|nato\s+secret|classified|polygraph)\b/.test(text);
-}
-
-function requiresMachineLearning(title: string, desc: string): boolean {
-  // Remove job if ML is in the title OR mentioned 3+ times in description
-  if (/\b(machine\s+learning|ml\s+engineer|deep\s+learning|data\s+scientist|nlp\s+engineer|computer\s+vision)\b/i.test(title)) return true;
-  const mlMatches = (desc.match(/\b(machine\s+learning|deep\s+learning|neural\s+network|pytorch|tensorflow|scikit|ml\s+model)\b/gi)||[]).length;
-  return mlMatches >= 3;
-}
-
-function requiresGrpc(title: string, desc: string): boolean {
-  // Remove if gRPC in title OR mentioned 2+ times in description as primary requirement
-  if (/\bgrpc\b/i.test(title)) return true;
-  const matches = (desc.match(/\bgrpc\b/gi)||[]).length;
-  return matches >= 2;
-}
-
-function hasBackgroundMismatch(title: string): boolean {
-  return /\b(data\s+scientist|data\s+analyst|bi\s+analyst|business\s+analyst|business\s+intelligence|security\s+engineer|cybersecurity|penetration\s+test|pentest|infosec|network\s+engineer|sysadmin|systems\s+administrator|research\s+scientist|ai\s+researcher)\b/i.test(title);
-}
-
-function isAIJob(title: string, desc: string): boolean {
-  return /\b(ai\s+engineer|llm|large\s+language|generative\s+ai|gen\s+ai|foundation\s+model|prompt\s+engineer|ai\s+platform|agentic)\b/i.test(title+" "+desc.slice(0,200));
-}
-
-// Master filter — returns true if job should be KEPT
-function shouldKeepJob(title: string, desc: string, type: string, location: string, aiCount: {n: number}): boolean {
-  if (isContractOrPartTime(type, desc)) return false;
-  if (!isUSLocation(location)) return false;
-  if (requiresSecurityClearance(title, desc)) return false;
-  if (requiresMachineLearning(title, desc)) return false;
-  if (requiresGrpc(title, desc)) return false;
-  if (hasBackgroundMismatch(title)) return false;
-  // AI jobs: allow up to 15
-  if (isAIJob(title, desc)) {
-    if (aiCount.n >= 15) return false;
-    aiCount.n++;
-  }
-  return true;
-}
-
 // ── US location ────────────────────────────────────────────────────────────
 const US_STATES = new Set([
   "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
@@ -229,23 +185,41 @@ function isUSLocation(location: string): boolean {
   return parts.some(p=>US_STATES.has(p.trim())||US_STATES.has(p.trim().toUpperCase()));
 }
 
-// ── Title relevance ────────────────────────────────────────────────────────
-// ── Title filtering — broad allowlist, tight blocklist ────────────────────
-// Allowlist: any title indicating software/tech development work
-const TITLE_ALLOWLIST = /(engineer|developer|programmer|architect|devops|sre|reliability|infrastructure|platform|backend|back.?end|frontend|front.?end|full.?stack|fullstack|software|systems|cloud|api|integration|distributed|scalable|swe|java|python|javascript|typescript|node\.?js|golang|go|rust|ruby|scala|kotlin|swift|c\+\+|c#|\.net|php|spring|react|angular|vue|ember|next\.?js|nestjs|rails|laravel|django|flask|fastapi|express|mobile|ios|android|embedded|firmware|web\s|web$|application|apps?\s|apps?$)/i;
-
-// Blocklist: non-SWE roles or roles that don't match background
-const TITLE_BLOCKLIST = /(manager|director|vp|vice\s+president|head\s+of|staff\s+engineer|principal\s+engineer|distinguished\s+engineer|fellow|machine\s+learning\s+engineer|ml\s+engineer|data\s+scientist|data\s+science|data\s+engineer|data\s+analyst|research\s+scientist|ai\s+researcher|nlp\s+engineer|computer\s+vision|security\s+engineer|cybersecurity|penetration\s+test|pentest|infosec|information\s+security|network\s+engineer|sysadmin|systems\s+administrator|database\s+administrator|dba|recruiter|recruitment|talent\s+acquisition|hr|sales|account\s+executive|account\s+manager|marketing|finance|auditor|accountant|program\s+manager|product\s+manager|product\s+designer|ux\s+designer|ui\s+designer|apprentice|intern|internship|business\s+analyst|scrum\s+master|project\s+manager|relationship\s+manager|chief|officer|legal|web3|blockchain|crypto|defi|nft|solidity|smart\s+contract|salesforce\s+developer|site\s+reliability\s+engineer)/i;
-
-function isRelevantTitle(title: string): boolean {
-  return TITLE_ALLOWLIST.test(title) && !TITLE_BLOCKLIST.test(title);
+// ── Job quality filters ────────────────────────────────────────────────────
+function isContractOrPartTime(type: string, desc: string): boolean {
+  const lc=(type+" "+desc.slice(0,300)).toLowerCase();
+  return /\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/.test(lc);
 }
 
-function isTitleRelevantToQuery(title: string, query: string): boolean {
-  if (!query) return false;
-  const qWords = query.toLowerCase().split(/\s+/).filter(w=>w.length>2);
-  const tl = title.toLowerCase();
-  return qWords.filter(w=>tl.includes(w)).length >= Math.ceil(qWords.length/2);
+function requiresSecurityClearance(title: string, desc: string): boolean {
+  const text=(title+" "+desc).toLowerCase();
+  return /\b(security\s+clearance|secret\s+clearance|top\s+secret|ts\/sci|clearance\s+required|dod\s+clearance|classified|polygraph)\b/.test(text);
+}
+
+// Master filter
+function shouldKeepJob(title: string, desc: string, type: string, location: string): boolean {
+  if (shouldExcludeTitle(title)) return false;
+  if (isContractOrPartTime(type, desc)) return false;
+  if (!isUSLocation(location)) return false;
+  if (requiresSecurityClearance(title, desc)) return false;
+  return true;
+}
+
+// ── Relevance scoring ──────────────────────────────────────────────────────
+function computeRelevanceScore(job: Job): number {
+  let score = 0;
+  score += scoreTitleRelevance(job.title) * 3;          // 0–30
+  score += scoreSponsorshipSignal(job.description);     // -20 to +15
+  score += scoreRecency(job.postedTimestamp);            // 0–10
+  // Company priority bonus
+  const tier = job.priorityTier;
+  if (tier==="highest") score += 5;
+  else if (tier==="high") score += 3;
+  else if (tier==="must_apply") score += 2;
+  // Source trust
+  if (job.sourceType==="greenhouse"||job.sourceType==="lever"||job.sourceType==="workday") score += 3;
+  else if (job.sourceType==="jsearch"||job.sourceType==="adzuna") score += 1;
+  return score;
 }
 
 // ── Dedup + sort ───────────────────────────────────────────────────────────
@@ -261,31 +235,38 @@ function deduplicateJobs(jobs: Job[]): Job[] {
 }
 
 function sortJobs(jobs: Job[], sort: SortOption): Job[] {
-  const TIER_SCORE: Record<string, number> = { highest: 0, high: 1, must_apply: 2 };
   return [...jobs].sort((a, b) => {
     switch (sort) {
-      case "date_desc":
-        return (b.postedTimestamp||0)-(a.postedTimestamp||0);
-      case "date_asc":
-        return (a.postedTimestamp||0)-(b.postedTimestamp||0);
+      case "date_desc": return (b.postedTimestamp||0)-(a.postedTimestamp||0);
+      case "date_asc":  return (a.postedTimestamp||0)-(b.postedTimestamp||0);
       case "company_desc": {
-        // Fortune 500 rank ascending (lower = better), then newest
-        const ra = getFortuneTier(a.company), rb = getFortuneTier(b.company);
+        const ra=getFortuneTier(a.company),rb=getFortuneTier(b.company);
         if (ra!==rb) return ra-rb;
-        const ta = TIER_SCORE[a.priorityTier||""] ?? 3;
-        const tb = TIER_SCORE[b.priorityTier||""] ?? 3;
-        if (ta!==tb) return ta-tb;
         return (b.postedTimestamp||0)-(a.postedTimestamp||0);
       }
       case "company_asc": {
-        // Reverse — lowest priority first
-        const ra = getFortuneTier(a.company), rb = getFortuneTier(b.company);
+        const ra=getFortuneTier(a.company),rb=getFortuneTier(b.company);
         if (ra!==rb) return rb-ra;
         return (a.postedTimestamp||0)-(b.postedTimestamp||0);
       }
       default:
-        return (b.postedTimestamp||0)-(a.postedTimestamp||0);
+        // Default: relevance score desc
+        return (b.relevanceScore||0)-(a.relevanceScore||0);
     }
+  });
+}
+
+// ── Per-company cap ────────────────────────────────────────────────────────
+const PER_COMPANY_CAP = 30;
+
+function applyPerCompanyCap(jobs: Job[]): Job[] {
+  const counts = new Map<string,number>();
+  return jobs.filter(j => {
+    const co = j.company.toLowerCase().trim();
+    const n = counts.get(co)||0;
+    if (n >= PER_COMPANY_CAP) return false;
+    counts.set(co, n+1);
+    return true;
   });
 }
 
@@ -298,74 +279,88 @@ const DATE_MAP: Record<JobFilter,string> = {
 };
 
 // ── JSearch ────────────────────────────────────────────────────────────────
-async function fetchJSearchRaw(query: string, filter: JobFilter, page=1, companyOverride=""): Promise<Job[]> {
+async function fetchJSearch(query: string, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
   const apiKey = process.env.RAPIDAPI_KEY;
-  if (!apiKey) return [];
-  const searchQuery = companyOverride ? `${query} at ${companyOverride}` : `${query} in USA`;
-  const params = new URLSearchParams({
-    query: searchQuery, page: String(page),
-    num_pages: companyOverride ? "1" : "3", country: "us",
-    ...(DATE_MAP[filter] && !companyOverride && { date_posted: DATE_MAP[filter] }),
-  });
-  let raw: Record<string,unknown>[] = [];
+  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"RAPIDAPI_KEY not set"}};
+
+  const expansion = expandQuery(query);
+  const allJobs: Job[] = [];
+
+  // For broad mode: use a representative subset of terms to avoid too many API calls
+  // For focused/exact: use all terms
+  const termsToSearch = expansion.mode === "broad"
+    ? ["software engineer","backend engineer","frontend engineer","full stack engineer","cloud engineer","devops engineer"].slice(0,4)
+    : expansion.terms.slice(0,6);
+
+  let fetched = 0;
   try {
-    const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
-      headers: { "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "jsearch.p.rapidapi.com" },
-      cache: "no-store",
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    raw = (data.data||[]) as Record<string,unknown>[];
-  } catch { return []; }
-  const aiCount = { n: 0 };
-  return raw
-    .map((j,i): Job => {
-      const rawDesc=(j.job_description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const ts=(j.job_posted_at_timestamp as number)||0;
-      const loc=[j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
-      const company=(j.employer_name as string)||"";
-      return {
-        id:(j.job_id as string)||`js-${page}-${i}`,
-        title:(j.job_title as string)||"",
-        company, location:loc,
-        type:(j.job_employment_type as string)||"Full-time",
-        salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
-        description:desc,
-        applyUrl:(j.job_apply_link as string)||"#",
-        postedAt:(j.job_posted_at_datetime_utc as string)||"",
-        postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:(j.job_publisher as string)||"Job Board",
-        sourceType:"jsearch",
-        skills:extractMissingSkills(rawDesc),
-        sponsorshipTag:detectSponsorship(rawDesc),
-        experience:extractExperience(rawDesc),
-        priorityTier:getPriorityTier(company),
-        fortuneRank:getFortuneTier(company),
-      };
-    })
-    .filter(j=>
-      j.title && j.company &&
-      (isRelevantTitle(j.title)||isTitleRelevantToQuery(j.title,query)) &&
-      shouldKeepJob(j.title,j.description,j.type,j.location,aiCount)
+    await Promise.allSettled(
+      termsToSearch.slice(0,3).map(async (term) => {
+        const params = new URLSearchParams({
+          query: `${term} in USA`, page: "1",
+          num_pages: "2", country: "us",
+          ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
+        });
+        try {
+          const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`,{
+            headers:{"X-RapidAPI-Key":apiKey,"X-RapidAPI-Host":"jsearch.p.rapidapi.com"},
+            cache:"no-store",
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          const raw = (data.data||[]) as Record<string,unknown>[];
+          fetched += raw.length;
+          raw.forEach((j,i) => {
+            const rawDesc=(j.job_description as string)||"";
+            const desc=cleanDescription(rawDesc).slice(0,800);
+            const ts=(j.job_posted_at_timestamp as number)||0;
+            const loc=[j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
+            const company=(j.employer_name as string)||"";
+            const title=(j.job_title as string)||"";
+            if (!title||!company||!shouldKeepJob(title,desc,(j.job_employment_type as string)||"",loc)) return;
+            const job: Job = {
+              id:(j.job_id as string)||`js-${i}`,
+              title, company, location:loc,
+              type:(j.job_employment_type as string)||"Full-time",
+              salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
+              description:desc,
+              applyUrl:(j.job_apply_link as string)||"#",
+              postedAt:(j.job_posted_at_datetime_utc as string)||"",
+              postedDate:ts?formatPostedDate(ts):"Recently",
+              postedTimestamp:ts,
+              source:(j.job_publisher as string)||"Job Board",
+              sourceType:"jsearch",
+              skills:extractMissingSkills(rawDesc),
+              sponsorshipTag:detectSponsorship(rawDesc),
+              experience:extractExperience(rawDesc),
+              priorityTier:getPriorityTier(company),
+              fortuneRank:getFortuneTier(company),
+            };
+            allJobs.push(job);
+          });
+        } catch { /**/ }
+      })
     );
+    const kept = allJobs.length;
+    return {jobs:allJobs,status:{status:kept>0?"healthy":"degraded",fetched,kept}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
 }
 
 // ── Greenhouse ─────────────────────────────────────────────────────────────
 const GREENHOUSE_COMPANIES = [
-  // Original
   "airbnb","stripe","doordash","openai","coinbase","gusto","brex","notion",
   "plaid","lattice","figma","robinhood","benchling","mixpanel","amplitude",
   "segment","flexport","mercury","ramp","checkr",
-  // Priority additions
   "confluent","cloudflare","mongodb","hashicorp","anthropic","databricks",
   "snowflake","atlassian","servicenow","workday","adobe","paypal","visa",
   "mastercard","verizon","infosys","cognizant","accenture","capgemini",
 ];
 
-async function fetchGreenhouse(query: string): Promise<Job[]> {
+async function fetchGreenhouse(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   const results: Job[] = [];
-  const aiCount = { n: 0 };
+  let fetched = 0;
   await Promise.allSettled(
     GREENHOUSE_COMPANIES.map(async company => {
       try {
@@ -375,49 +370,55 @@ async function fetchGreenhouse(query: string): Promise<Job[]> {
         );
         if (!res.ok) return;
         const data = await res.json();
-        for (const j of (data.jobs||[]) as Record<string,unknown>[]) {
+        const jobs = (data.jobs||[]) as Record<string,unknown>[];
+        fetched += jobs.length;
+        let kept = 0;
+        for (const j of jobs) {
+          if (kept >= PER_COMPANY_CAP) break;
           const title=(j.title as string)||"";
-          if (!isRelevantTitle(title)&&!isTitleRelevantToQuery(title,query)) continue;
           const rawContent=(j.content as string)||"";
           const desc=cleanDescription(rawContent).slice(0,800);
           const location=((j.location as Record<string,unknown>)?.name as string)||"Remote";
-          if (!shouldKeepJob(title,desc,"",location,aiCount)) continue;
+          if (!shouldKeepJob(title,desc,"",location)) continue;
+          // Query relevance check for Greenhouse (title must match expansion)
+          const tl=title.toLowerCase();
+          const relevant = expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
+          if (!relevant) continue;
           const url=(j.absolute_url as string)||"#";
           const updatedAt=(j.updated_at as string)||"";
           const ts=updatedAt?Math.floor(new Date(updatedAt).getTime()/1000):0;
           const displayName=company.charAt(0).toUpperCase()+company.slice(1);
           results.push({
             id:`gh-${company}-${j.id??Math.random()}`,
-            title, company:displayName, location, type:"Full-time",
-            description:desc, applyUrl:url, postedAt:updatedAt,
+            title,company:displayName,location,type:"Full-time",
+            description:desc,applyUrl:url,postedAt:updatedAt,
             postedDate:ts?formatPostedDate(ts):"Recently",
-            postedTimestamp:ts, source:"Greenhouse", sourceType:"greenhouse",
+            postedTimestamp:ts,source:"Greenhouse",sourceType:"greenhouse",
             skills:extractMissingSkills(rawContent),
             sponsorshipTag:detectSponsorship(rawContent),
             experience:extractExperience(rawContent),
             priorityTier:getPriorityTier(displayName),
             fortuneRank:getFortuneTier(displayName),
           });
+          kept++;
         }
       } catch { /**/ }
     })
   );
-  return results;
+  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched,kept:results.length}};
 }
 
 // ── Lever ──────────────────────────────────────────────────────────────────
 const LEVER_COMPANIES = [
-  // Original
   "netflix","reddit","webflow","miro","airtable","asana","attentive",
   "loom","superhuman","deel","remote","scale-ai","alchemy",
   "postman","vercel","neo4j","launchdarkly","envoy","sourcegraph",
-  // Priority additions
   "stripe","figma","notion","brex","gusto","ramp","plaid",
 ];
 
-async function fetchLever(query: string): Promise<Job[]> {
+async function fetchLever(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   const results: Job[] = [];
-  const aiCount = { n: 0 };
+  let fetched = 0;
   await Promise.allSettled(
     LEVER_COMPANIES.map(async company => {
       try {
@@ -428,237 +429,525 @@ async function fetchLever(query: string): Promise<Job[]> {
         if (!res.ok) return;
         const jobs = await res.json();
         if (!Array.isArray(jobs)) return;
+        fetched += jobs.length;
+        let kept = 0;
         for (const j of jobs as Record<string,unknown>[]) {
+          if (kept >= PER_COMPANY_CAP) break;
           const title=(j.text as string)||"";
-          if (!isRelevantTitle(title)&&!isTitleRelevantToQuery(title,query)) continue;
           const plainDesc=(j.descriptionPlain as string)||"";
           const rawDesc=(j.description as string)||plainDesc;
           const desc=cleanDescription(plainDesc||rawDesc).slice(0,800);
           const cats=(j.categories as Record<string,unknown>)||{};
           const commitment=(cats.commitment as string)||"";
           const location=(cats.location as string)||"Remote";
-          if (!shouldKeepJob(title,desc,commitment,location,aiCount)) continue;
+          if (!shouldKeepJob(title,desc,commitment,location)) continue;
+          const tl=title.toLowerCase();
+          const relevant=expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
+          if (!relevant) continue;
           const url=(j.hostedUrl as string)||"#";
           const createdAt=(j.createdAt as number)||0;
           const ts=createdAt>1e10?Math.floor(createdAt/1000):createdAt;
           const displayName=company.charAt(0).toUpperCase()+company.slice(1).replace(/-/g," ");
           results.push({
             id:`lever-${company}-${j.id??Math.random()}`,
-            title, company:displayName, location, type:commitment||"Full-time",
-            description:desc, applyUrl:url,
+            title,company:displayName,location,type:commitment||"Full-time",
+            description:desc,applyUrl:url,
             postedAt:createdAt?new Date(createdAt>1e10?createdAt:createdAt*1000).toISOString():"",
             postedDate:ts?formatPostedDate(ts):"Recently",
-            postedTimestamp:ts, source:"Lever", sourceType:"lever",
+            postedTimestamp:ts,source:"Lever",sourceType:"lever",
             skills:extractMissingSkills(rawDesc),
             sponsorshipTag:detectSponsorship(rawDesc),
             experience:extractExperience(rawDesc),
             priorityTier:getPriorityTier(displayName),
             fortuneRank:getFortuneTier(displayName),
           });
+          kept++;
         }
       } catch { /**/ }
     })
   );
-  return results;
+  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched,kept:results.length}};
 }
 
-// ── Query normalizer ──────────────────────────────────────────────────────
-// Cleans user queries like "software engineer + full stack" → "software engineer"
-// Returns the primary term (before any + or OR) for APIs that don't handle operators
-function primaryQuery(query: string): string {
-  return query.split(/\s*[+|]\s*/)[0].trim();
+// ── Workday adapter ────────────────────────────────────────────────────────
+// Config: tenant, site, server (wd1/wd3/wd5/wd12 etc)
+const WORKDAY_COMPANIES: Array<{name:string;tenant:string;site:string;server:string}> = [
+  {name:"Salesforce",       tenant:"salesforce",       site:"External_Career_Site",       server:"wd12"},
+  {name:"ServiceNow",       tenant:"servicenow",        site:"External",                  server:"wd12"},
+  {name:"Adobe",            tenant:"adobe",             site:"external_career",            server:"wd5"},
+  {name:"Intel",            tenant:"intel",             site:"External",                   server:"wd1"},
+  {name:"Wells Fargo",      tenant:"wellsfargo",        site:"WF_External_Careers",        server:"wd1"},
+  {name:"Bank of America",  tenant:"bofa",              site:"External",                   server:"wd1"},
+  {name:"Capital One",      tenant:"capitalone",        site:"Capital_One_External",       server:"wd1"},
+  {name:"AT&T",             tenant:"att",               site:"ATTCareers",                 server:"wd1"},
+  {name:"Verizon",          tenant:"verizon",           site:"External",                   server:"wd5"},
+  {name:"T-Mobile",         tenant:"tmobile",           site:"External",                   server:"wd1"},
+  {name:"S&P Global",       tenant:"spglobal",          site:"Careers",                    server:"wd1"},
+  {name:"CVS Health",       tenant:"cvshealth",         site:"CVS_Health_Careers",         server:"wd1"},
+  {name:"UnitedHealth",     tenant:"uhg",               site:"External",                   server:"wd5"},
+  {name:"Elevance Health",  tenant:"elevancehealth",    site:"ANT",                        server:"wd1"},
+  {name:"JPMorgan Chase",   tenant:"jpmc",              site:"External",                   server:"wd5"},
+  {name:"Amazon",           tenant:"amazon",            site:"External_Career_Site",       server:"wd1"},
+  {name:"Walmart",          tenant:"walmart",           site:"External",                   server:"wd5"},
+  {name:"Target",           tenant:"target",            site:"External",                   server:"wd1"},
+  {name:"Home Depot",       tenant:"homedepot",         site:"External",                   server:"wd5"},
+  {name:"NVIDIA",           tenant:"nvidia",            site:"NVIDIAExternalCareerSite",   server:"wd5"},
+];
+
+const WORKDAY_DATE_MAP: Record<JobFilter,number|undefined> = {
+  "24h":1,"7d":7,"30d":30,"any":undefined,
+};
+
+async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
+  const results: Job[] = [];
+  let totalFetched = 0;
+
+  // Use primary term for Workday search text
+  const searchText = expansion.primary;
+
+  await Promise.allSettled(
+    WORKDAY_COMPANIES.map(async ({name,tenant,site,server}) => {
+      try {
+        const url = `https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`;
+        const body: Record<string,unknown> = {
+          appliedFacets: {},
+          limit: 20,
+          offset: 0,
+          searchText,
+        };
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Language": "en-US",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+          },
+          body: JSON.stringify(body),
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const jobs = (data.jobPostings||[]) as Record<string,unknown>[];
+        totalFetched += jobs.length;
+        let kept = 0;
+        for (const j of jobs) {
+          if (kept >= PER_COMPANY_CAP) break;
+          const title=(j.title as string)||"";
+          const rawDesc=((j.jobDescription as Record<string,unknown>)?.jobDescription as string)||
+                        (j.shortDesc as string)||"";
+          const desc=cleanDescription(rawDesc).slice(0,800);
+          const locArr = (j.locationsText as string)||(j.location as string)||"United States";
+          if (!shouldKeepJob(title,desc,"Full-time",locArr)) continue;
+          const externalPath=(j.externalPath as string)||"";
+          const applyUrl=externalPath
+            ? `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}/job${externalPath}`
+            : `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}`;
+          const postedOn=(j.postedOn as string)||"";
+          // Workday postedOn format: "Posted 3 Days Ago" — extract approximate ts
+          let ts = 0;
+          const dMatch = postedOn.match(/(\d+)\s+day/i);
+          const wMatch = postedOn.match(/(\d+)\s+week/i);
+          const mMatch = postedOn.match(/(\d+)\s+month/i);
+          if (dMatch) ts = Math.floor(Date.now()/1000) - parseInt(dMatch[1])*86400;
+          else if (wMatch) ts = Math.floor(Date.now()/1000) - parseInt(wMatch[1])*604800;
+          else if (mMatch) ts = Math.floor(Date.now()/1000) - parseInt(mMatch[1])*2592000;
+          else if (postedOn.toLowerCase().includes("today")) ts = Math.floor(Date.now()/1000);
+
+          // Apply date filter
+          const maxDays = WORKDAY_DATE_MAP[filter];
+          if (maxDays && ts) {
+            const ageDays = (Date.now()/1000 - ts) / 86400;
+            if (ageDays > maxDays) continue;
+          }
+
+          results.push({
+            id:`wd-${tenant}-${j.bulletFields?.[0]||Math.random()}`,
+            title, company:name, location:locArr, type:"Full-time",
+            description:desc, applyUrl, postedAt:"",
+            postedDate:ts?formatPostedDate(ts):postedOn||"Recently",
+            postedTimestamp:ts, source:"Workday", sourceType:"workday",
+            skills:extractMissingSkills(rawDesc),
+            sponsorshipTag:detectSponsorship(rawDesc),
+            experience:extractExperience(rawDesc),
+            priorityTier:getPriorityTier(name),
+            fortuneRank:getFortuneTier(name),
+          });
+          kept++;
+        }
+      } catch { /**/ }
+    })
+  );
+  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched:totalFetched,kept:results.length}};
 }
-// Returns all terms split by + or OR for multi-title APIs
-function queryTerms(query: string): string[] {
-  return query.split(/\s*[+|]\s*/).map(t=>t.trim()).filter(Boolean);
+
+// ── Goldman Sachs GraphQL ─────────────────────────────────────────────────
+async function fetchGoldmanSachs(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
+  try {
+    const body = {
+      operationName: "RoleSearch",
+      variables: {
+        criteria: {
+          keyword: expansion.primary,
+          pageSize: 30,
+          pageNumber: 1,
+          locations: ["United States"],
+        },
+      },
+      query: `query RoleSearch($criteria: RoleSearchCriteriaInput!) {
+        roleSearch(criteria: $criteria) {
+          totalCount
+          roles {
+            id title location { city state country }
+            division team description
+            postedDate applyUrl
+          }
+        }
+      }`,
+    };
+    const res = await fetch("https://api-higher.gs.com/gateway/api/v1/graphql", {
+      method: "POST",
+      headers: {"Content-Type":"application/json","Accept":"application/json"},
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    const data = await res.json();
+    const roles = data?.data?.roleSearch?.roles as Record<string,unknown>[] || [];
+    const jobs: Job[] = [];
+    for (const r of roles) {
+      const title=(r.title as string)||"";
+      const locObj=(r.location as Record<string,unknown>)||{};
+      const location=[locObj.city,locObj.state,locObj.country].filter(Boolean).join(", ")||"United States";
+      const rawDesc=(r.description as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      const postedDate=(r.postedDate as string)||"";
+      const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
+      jobs.push({
+        id:`gs-${r.id??Math.random()}`,
+        title, company:"Goldman Sachs", location, type:"Full-time",
+        description:desc, applyUrl:(r.applyUrl as string)||"https://higher.gs.com/roles",
+        postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Goldman Sachs", sourceType:"goldman",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:"highest", fortuneRank:53,
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:roles.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
+}
+
+// ── Morgan Stanley Eightfold ───────────────────────────────────────────────
+async function fetchMorganStanley(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
+  try {
+    const params = new URLSearchParams({
+      domain: "morganstanley.com",
+      query: expansion.primary,
+      location: "United States",
+      start: "0",
+      num: "30",
+      sort_by: "timestamp",
+    });
+    const res = await fetch(
+      `https://morganstanley.eightfold.ai/api/pcsx/search?${params}`,
+      { headers:{"Accept":"application/json"}, cache:"no-store" }
+    );
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    const data = await res.json();
+    const positions = (data.positions||[]) as Record<string,unknown>[];
+    const jobs: Job[] = [];
+    for (const p of positions) {
+      const title=(p.name as string)||"";
+      const rawDesc=(p.description as string)||(p.skills_text as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      const location=(p.location as string)||(p.city as string)||"United States";
+      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      const ts=p.t_update?Math.floor(Number(p.t_update)/1000):0;
+      jobs.push({
+        id:`ms-${p.id??Math.random()}`,
+        title, company:"Morgan Stanley", location, type:"Full-time",
+        description:desc,
+        applyUrl:`https://morganstanley.eightfold.ai/careers?pid=${p.id}&domain=morganstanley.com`,
+        postedAt:"", postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Morgan Stanley", sourceType:"morganstanley",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:"highest", fortuneRank:21,
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:positions.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
+}
+
+// ── Cisco Phenom ───────────────────────────────────────────────────────────
+async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
+  try {
+    const body = {
+      operationName: "getPaginatedJobs",
+      variables: {
+        filter: {
+          keyword: expansion.primary,
+          country: ["United States"],
+        },
+        pageSize: 20,
+        pageNo: 0,
+        sortBy: "recent",
+      },
+      query: `query getPaginatedJobs($filter: JobSearchFilterInput, $pageSize: Int, $pageNo: Int, $sortBy: String) {
+        paginatedJobs(filter: $filter, pageSize: $pageSize, pageNo: $pageNo, sortBy: $sortBy) {
+          jobs { id title location description applyUrl postedDate }
+          totalCount
+        }
+      }`,
+    };
+    const res = await fetch("https://careers.cisco.com/widgets", {
+      method: "POST",
+      headers: {"Content-Type":"application/json","Accept":"application/json"},
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    const data = await res.json();
+    const raw = data?.data?.paginatedJobs?.jobs as Record<string,unknown>[] || [];
+    const jobs: Job[] = [];
+    for (const j of raw) {
+      const title=(j.title as string)||"";
+      const rawDesc=(j.description as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      const location=(j.location as string)||"United States";
+      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      const postedDate=(j.postedDate as string)||"";
+      const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
+      jobs.push({
+        id:`cisco-${j.id??Math.random()}`,
+        title, company:"Cisco", location, type:"Full-time",
+        description:desc, applyUrl:(j.applyUrl as string)||"https://careers.cisco.com",
+        postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Cisco", sourceType:"cisco",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:"highest", fortuneRank:24,
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
+}
+
+// ── Oracle Cloud HCM ──────────────────────────────────────────────────────
+async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
+  try {
+    const params = new URLSearchParams({
+      q: expansion.primary,
+      limit: "25",
+      offset: "0",
+    });
+    // Oracle uses Oracle Cloud Fusion HCM REST API for their own careers
+    const res = await fetch(
+      `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?${params}&expand=requisitionList&onlyData=true`,
+      {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    const data = await res.json();
+    const items = (data.items||[]) as Record<string,unknown>[];
+    const jobs: Job[] = [];
+    for (const item of items) {
+      const reqs = (item.requisitionList as Record<string,unknown>[])||[];
+      for (const r of reqs) {
+        const title=(r.Title as string)||"";
+        const rawDesc=(r.ExternalDescriptionStr as string)||"";
+        const desc=cleanDescription(rawDesc).slice(0,800);
+        const location=(r.PrimaryLocation as string)||"United States";
+        if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+        const postedDate=(r.PostedDate as string)||"";
+        const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
+        const reqId=(r.Id as string)||String(Math.random());
+        jobs.push({
+          id:`oracle-${reqId}`,
+          title, company:"Oracle", location, type:"Full-time",
+          description:desc,
+          applyUrl:`https://careers.oracle.com/en/sites/jobsearch/job/${reqId}`,
+          postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
+          postedTimestamp:ts, source:"Oracle", sourceType:"oracle",
+          skills:extractMissingSkills(rawDesc),
+          sponsorshipTag:detectSponsorship(rawDesc),
+          experience:extractExperience(rawDesc),
+          priorityTier:"highest", fortuneRank:25,
+        });
+      }
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:items.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
 }
 
 // ── Remotive ───────────────────────────────────────────────────────────────
-async function fetchRemotive(query: string): Promise<Job[]> {
-  const aiCount = { n: 0 };
-  const q = primaryQuery(query); // Remotive doesn't handle + operators
+async function fetchRemotive(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   try {
+    const q = expansion.primary;
     const res = await fetch(
       `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=50`,
       { next: { revalidate: 1800 } }
     );
-    if (!res.ok) return [];
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
     const data = await res.json();
-    return ((data.jobs||[]) as Record<string,unknown>[])
-      .filter(j => {
-        const title=(j.title as string)||"";
-        const loc=(j.candidate_required_location as string)||"";
-        const isUS=!loc||["usa","united states","us only","remote","worldwide","anywhere"].some(k=>loc.toLowerCase().includes(k));
-        return isRelevantTitle(title)&&isUS;
-      })
-      .map((j,i): Job => {
-        const rawDesc=(j.description as string)||"";
-        const desc=cleanDescription(rawDesc).slice(0,800);
-        const pubDate=(j.publication_date as string)||"";
-        const ts=pubDate?Math.floor(new Date(pubDate).getTime()/1000):0;
-        const company=(j.company_name as string)||"";
-        return {
-          id:`remotive-${j.id??i}`,
-          title:(j.title as string)||"",
-          company, location:(j.candidate_required_location as string)||"Remote",
-          type:(j.job_type as string)||"Full-time",
-          description:desc, applyUrl:(j.url as string)||"#",
-          postedAt:pubDate, postedDate:ts?formatPostedDate(ts):"Recently",
-          postedTimestamp:ts, source:"Remotive", sourceType:"other",
-          skills:extractMissingSkills(rawDesc),
-          sponsorshipTag:detectSponsorship(rawDesc),
-          experience:extractExperience(rawDesc),
-          priorityTier:getPriorityTier(company),
-          fortuneRank:getFortuneTier(company),
-        };
-      })
-      .filter(j=>shouldKeepJob(j.title,j.description,j.type,j.location,aiCount));
-  } catch { return []; }
-}
-
-// ── TheirStack ─────────────────────────────────────────────────────────────
-async function fetchTheirStack(query: string, filter: JobFilter): Promise<Job[]> {
-  const apiKey = process.env.THEIRSTACK_API_KEY;
-  if (!apiKey) return [];
-
-  const maxAgeDays: Record<JobFilter, number|undefined> = {
-    "24h": 1, "7d": 7, "30d": 30, "any": undefined,
-  };
-  const ageDays = maxAgeDays[filter];
-  const titles = queryTerms(query); // supports "software engineer + full stack engineer"
-
-  const body: Record<string, unknown> = {
-    job_title_or: titles,
-    job_country_code_or: ["US"],
-    order_by: [{ desc: true, field: "date_posted" }],
-    page: 0,
-    limit: 25,
-  };
-  if (ageDays) body.posted_at_max_age_days = ageDays;
-
-  try {
-    const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      cache: "no-store",
+    const raw = ((data.jobs||[]) as Record<string,unknown>[]).filter(j => {
+      const title=(j.title as string)||"";
+      const loc=(j.candidate_required_location as string)||"";
+      const isUS=!loc||["usa","united states","us only","remote","worldwide","anywhere"].some(k=>loc.toLowerCase().includes(k));
+      return isUS;
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const jobs = (data.data || []) as Record<string, unknown>[];
-    const aiCount = { n: 0 };
-    return jobs
-      .map((j, i): Job => {
-        const rawDesc = (j.description as string) || "";
-        const desc = cleanDescription(rawDesc).slice(0, 800);
-        const datePosted = (j.date_posted as string) || "";
-        const ts = datePosted ? Math.floor(new Date(datePosted).getTime() / 1000) : 0;
-        const companyObj = (j.company as Record<string, unknown>) || {};
-        const company = (companyObj.name as string) || (j.company_name as string) || "";
-        const location = (j.location as string) ||
-          (Array.isArray(j.locations) && (j.locations as string[]).join(", ")) ||
-          "Remote";
-        return {
-          id: `ts-${j.id ?? i}`,
-          title: (j.job_title as string) || "",
-          company,
-          location,
-          type: "Full-time",
-          salary: j.salary_string ? (j.salary_string as string) : undefined,
-          description: desc,
-          applyUrl: (j.url as string) || (j.final_url as string) || "#",
-          postedAt: datePosted,
-          postedDate: ts ? formatPostedDate(ts) : "Recently",
-          postedTimestamp: ts,
-          source: "TheirStack",
-          sourceType: "theirstack",
-          skills: extractMissingSkills(rawDesc),
-          sponsorshipTag: detectSponsorship(rawDesc),
-          experience: extractExperience(rawDesc),
-          priorityTier: getPriorityTier(company),
-          fortuneRank: getFortuneTier(company),
-        };
-      })
-      .filter(j =>
-        j.title && j.company &&
-        (isRelevantTitle(j.title) || isTitleRelevantToQuery(j.title, query)) &&
-        shouldKeepJob(j.title, j.description, j.type, j.location, aiCount)
-      );
-  } catch { return []; }
+    const jobs: Job[] = [];
+    for (const j of raw) {
+      const title=(j.title as string)||"";
+      const rawDesc=(j.description as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      const location=(j.candidate_required_location as string)||"Remote";
+      if (!shouldKeepJob(title,desc,(j.job_type as string)||"Full-time",location)) continue;
+      const pubDate=(j.publication_date as string)||"";
+      const ts=pubDate?Math.floor(new Date(pubDate).getTime()/1000):0;
+      const company=(j.company_name as string)||"";
+      jobs.push({
+        id:`remotive-${j.id??Math.random()}`,
+        title, company, location, type:(j.job_type as string)||"Full-time",
+        description:desc, applyUrl:(j.url as string)||"#",
+        postedAt:pubDate, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Remotive", sourceType:"remotive",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:getPriorityTier(company),
+        fortuneRank:getFortuneTier(company),
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
 }
 
-// ── Adzuna (free, no extra key needed — uses ADZUNA_APP_ID + ADZUNA_APP_KEY) ─────────
-async function fetchAdzuna(query: string, filter: JobFilter): Promise<Job[]> {
+// ── Adzuna ─────────────────────────────────────────────────────────────────
+async function fetchAdzuna(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
   const appId = process.env.ADZUNA_APP_ID;
   const appKey = process.env.ADZUNA_APP_KEY;
-  if (!appId || !appKey) return [];
-
-  const q = primaryQuery(query);
-  const maxDays: Record<JobFilter, number|undefined> = {
-    "24h": 1, "7d": 7, "30d": 30, "any": undefined,
-  };
+  if (!appId || !appKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"ADZUNA keys not set"}};
+  const maxDays: Record<JobFilter,number|undefined> = {"24h":1,"7d":7,"30d":30,"any":undefined};
   const maxDaysOld = maxDays[filter];
-
   try {
     const params = new URLSearchParams({
-      app_id: appId,
-      app_key: appKey,
+      app_id: appId, app_key: appKey,
       results_per_page: "50",
-      what: q,
+      what: expansion.primary,
       where: "united states",
       "content-type": "application/json",
       full_time: "1",
       ...(maxDaysOld ? { max_days_old: String(maxDaysOld) } : {}),
     });
-    const res = await fetch(
-      `https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`,
-      { cache: "no-store" }
-    );
-    if (!res.ok) return [];
+    const res = await fetch(`https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`,{cache:"no-store"});
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
     const data = await res.json();
-    const jobs = (data.results || []) as Record<string, unknown>[];
-    const aiCount = { n: 0 };
-    return jobs
-      .map((j, i): Job => {
-        const rawDesc = (j.description as string) || "";
-        const desc = cleanDescription(rawDesc).slice(0, 800);
-        const createdAt = (j.created as string) || "";
-        const ts = createdAt ? Math.floor(new Date(createdAt).getTime() / 1000) : 0;
-        const company = ((j.company as Record<string,unknown>)?.display_name as string) || "";
-        const locationObj = (j.location as Record<string,unknown>) || {};
-        const location = (locationObj.display_name as string) || "United States";
-        const salaryMin = j.salary_min ? Math.round(Number(j.salary_min) / 1000) : 0;
-        const salaryMax = j.salary_max ? Math.round(Number(j.salary_max) / 1000) : 0;
-        return {
-          id: `az-${j.id ?? i}`,
-          title: (j.title as string) || "",
-          company,
-          location,
-          type: "Full-time",
-          salary: salaryMin > 0 ? `${salaryMin}k–${salaryMax}k` : undefined,
-          description: desc,
-          applyUrl: (j.redirect_url as string) || "#",
-          postedAt: createdAt,
-          postedDate: ts ? formatPostedDate(ts) : "Recently",
-          postedTimestamp: ts,
-          source: "Adzuna",
-          sourceType: "fantasticjobs", // reuses the existing badge slot
-          skills: extractMissingSkills(rawDesc),
-          sponsorshipTag: detectSponsorship(rawDesc),
-          experience: extractExperience(rawDesc),
-          priorityTier: getPriorityTier(company),
-          fortuneRank: getFortuneTier(company),
-        };
-      })
-      .filter(j =>
-        j.title && j.company &&
-        (isRelevantTitle(j.title) || isTitleRelevantToQuery(j.title, query)) &&
-        shouldKeepJob(j.title, j.description, j.type, j.location, aiCount)
-      );
-  } catch { return []; }
+    const raw = (data.results||[]) as Record<string,unknown>[];
+    const jobs: Job[] = [];
+    for (const j of raw) {
+      const title=(j.title as string)||"";
+      const rawDesc=(j.description as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      const locObj=(j.location as Record<string,unknown>)||{};
+      const location=(locObj.display_name as string)||"United States";
+      const company=((j.company as Record<string,unknown>)?.display_name as string)||"";
+      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      const createdAt=(j.created as string)||"";
+      const ts=createdAt?Math.floor(new Date(createdAt).getTime()/1000):0;
+      const salaryMin=j.salary_min?Math.round(Number(j.salary_min)/1000):0;
+      const salaryMax=j.salary_max?Math.round(Number(j.salary_max)/1000):0;
+      jobs.push({
+        id:`az-${j.id??Math.random()}`,
+        title, company, location, type:"Full-time",
+        salary:salaryMin>0?`$${salaryMin}k–$${salaryMax}k`:undefined,
+        description:desc, applyUrl:(j.redirect_url as string)||"#",
+        postedAt:createdAt, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Adzuna", sourceType:"adzuna",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:getPriorityTier(company),
+        fortuneRank:getFortuneTier(company),
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
+}
+
+// ── TheirStack (optional) ─────────────────────────────────────────────────
+async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
+  const apiKey = process.env.THEIRSTACK_API_KEY;
+  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"THEIRSTACK_API_KEY not set"}};
+  const maxAgeDays: Record<JobFilter,number|undefined> = {"24h":1,"7d":7,"30d":30,"any":undefined};
+  const ageDays = maxAgeDays[filter];
+  try {
+    const body: Record<string,unknown> = {
+      job_title_or: expansion.terms.slice(0,10),
+      job_country_code_or: ["US"],
+      order_by: [{desc:true,field:"date_posted"}],
+      page: 0, limit: 25,
+    };
+    if (ageDays) body.posted_at_max_age_days = ageDays;
+    const res = await fetch("https://api.theirstack.com/v1/jobs/search",{
+      method:"POST",
+      headers:{"Authorization":`Bearer ${apiKey}`,"Content-Type":"application/json"},
+      body:JSON.stringify(body),cache:"no-store",
+    });
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+    const data = await res.json();
+    const raw = (data.data||[]) as Record<string,unknown>[];
+    const jobs: Job[] = [];
+    for (const j of raw) {
+      const title=(j.job_title as string)||"";
+      const rawDesc=(j.description as string)||"";
+      const desc=cleanDescription(rawDesc).slice(0,800);
+      const companyObj=(j.company as Record<string,unknown>)||{};
+      const company=(companyObj.name as string)||(j.company_name as string)||"";
+      const location=(j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote";
+      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      const datePosted=(j.date_posted as string)||"";
+      const ts=datePosted?Math.floor(new Date(datePosted).getTime()/1000):0;
+      jobs.push({
+        id:`ts-${j.id??Math.random()}`,
+        title, company, location, type:"Full-time",
+        salary:j.salary_string?(j.salary_string as string):undefined,
+        description:desc, applyUrl:(j.url as string)||(j.final_url as string)||"#",
+        postedAt:datePosted, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"TheirStack", sourceType:"other",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:getPriorityTier(company),
+        fortuneRank:getFortuneTier(company),
+      });
+    }
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
+  } catch(e:unknown) {
+    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
+  }
 }
 
 // ── Main Handler ───────────────────────────────────────────────────────────
@@ -668,67 +957,71 @@ export async function GET(req: NextRequest) {
   const filter = (searchParams.get("filter") as JobFilter)||"any";
   const sort   = (searchParams.get("sort") as SortOption)||"company_desc";
 
-  if (!query.trim()) return NextResponse.json({ error:"query required" },{ status:400 });
+  if (!query.trim()) return NextResponse.json({error:"query required"},{status:400});
+
+  // Expand query
+  const expansion = expandQuery(query);
 
   try {
-    // Build JSearch priority company calls (1 per batch of companies)
-    const priorityBatches = [
-      JSEARCH_PRIORITY_COMPANIES.slice(0,9).join(" OR "),   // enterprise tech
-      JSEARCH_PRIORITY_COMPANIES.slice(9,18).join(" OR "),  // finance/retail
-      JSEARCH_PRIORITY_COMPANIES.slice(18).join(" OR "),    // telecom/health/other
-    ];
-
     const [
-      r1, r2,           // JSearch general pages
-      rP1, rP2, rP3,   // JSearch priority company batches
-      rGH,             // Greenhouse
-      rLV,             // Lever
-      rRM,             // Remotive
-      rTS,             // TheirStack
-      rFJ,             // Fantastic.Jobs
+      rJS, rGH, rLV, rWD, rGS, rMS, rCI, rOR, rRM, rAZ, rTS,
     ] = await Promise.allSettled([
-      withTimeout(fetchJSearchRaw(query, filter, 1), 15000, []),
-      withTimeout(fetchJSearchRaw(query, filter, 2), 15000, []),
-      withTimeout(fetchJSearchRaw(`${query} ${priorityBatches[0]}`, filter, 1), 15000, []),
-      withTimeout(fetchJSearchRaw(`${query} ${priorityBatches[1]}`, filter, 1), 15000, []),
-      withTimeout(fetchJSearchRaw(`${query} ${priorityBatches[2]}`, filter, 1), 15000, []),
-      withTimeout(fetchGreenhouse(query), 25000, []),
-      withTimeout(fetchLever(query), 25000, []),
-      withTimeout(fetchRemotive(query), 15000, []),
-      withTimeout(fetchTheirStack(query, filter), 20000, []),
-      withTimeout(fetchAdzuna(query, filter), 20000, []),
+      withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchGreenhouse(expansion), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchLever(expansion), 25000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchWorkday(expansion, filter), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchGoldmanSachs(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchMorganStanley(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchCisco(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchOracle(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchRemotive(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchAdzuna(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchTheirStack(expansion, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
     ]);
 
-    const allJobs: Job[] = [
-      ...(r1.status==="fulfilled"?r1.value:[]),
-      ...(r2.status==="fulfilled"?r2.value:[]),
-      ...(rP1.status==="fulfilled"?rP1.value:[]),
-      ...(rP2.status==="fulfilled"?rP2.value:[]),
-      ...(rP3.status==="fulfilled"?rP3.value:[]),
-      ...(rGH.status==="fulfilled"?rGH.value:[]),
-      ...(rLV.status==="fulfilled"?rLV.value:[]),
-      ...(rRM.status==="fulfilled"?rRM.value:[]),
-      ...(rTS.status==="fulfilled"?rTS.value:[]),
-      ...(rFJ.status==="fulfilled"?rFJ.value:[]),
-    ].filter(j=>j.title&&j.company);
+    const getResult = (r: typeof rJS) => r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"promise rejected"}};
 
-    const unique = deduplicateJobs(allJobs);
-    const sorted = sortJobs(unique, sort);
+    const results = [rJS,rGH,rLV,rWD,rGS,rMS,rCI,rOR,rRM,rAZ,rTS].map(getResult);
+    const sourceKeys = ["jsearch","greenhouse","lever","workday","goldman","morganstanley","cisco","oracle","remotive","adzuna","theirstack"];
 
-    const sources = {
-      jsearch:       unique.filter(j=>j.sourceType==="jsearch").length,
-      greenhouse:    unique.filter(j=>j.sourceType==="greenhouse").length,
-      lever:         unique.filter(j=>j.sourceType==="lever").length,
-      remotive:      unique.filter(j=>j.sourceType==="other").length,
-      theirstack:    unique.filter(j=>j.sourceType==="theirstack").length,
-      fantasticjobs: unique.filter(j=>j.sourceType==="fantasticjobs").length,
-    };
+    const allJobs: Job[] = results.flatMap(r => r.jobs).filter(j=>j.title&&j.company);
 
-    console.log(`Jobs "${query}" sort:${sort} → ${unique.length} jobs | ${JSON.stringify(sources)}`);
+    // Score all jobs
+    const scored = allJobs.map(j => ({...j, relevanceScore: computeRelevanceScore(j)}));
 
-    return NextResponse.json({ jobs:sorted, count:sorted.length, sources });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error:message },{ status:500 });
+    // Deduplicate
+    const unique = deduplicateJobs(scored);
+
+    // Per-company cap
+    const capped = applyPerCompanyCap(unique);
+
+    // Sort
+    const sorted = sortJobs(capped, sort);
+
+    // Global cap 450
+    const final = sorted.slice(0, 450);
+
+    // Build source diagnostics
+    const sourceStatus: Record<string,SourceStatus> = {};
+    sourceKeys.forEach((k,i) => { sourceStatus[k] = results[i].status; });
+
+    // Build source counts for UI
+    const sources: Record<string,number> = {};
+    sourceKeys.forEach(k => {
+      sources[k] = final.filter(j=>j.sourceType===k||(k==="theirstack"&&j.sourceType==="other")).length;
+    });
+
+    console.log(`Jobs "${query}" (${expansion.mode}) → ${final.length} | ${JSON.stringify(sources)}`);
+
+    return NextResponse.json({
+      jobs: final,
+      count: final.length,
+      sources,
+      sourceStatus,
+      queryMode: expansion.mode,
+      expandedTerms: expansion.terms.length,
+    });
+  } catch(err:unknown) {
+    return NextResponse.json({error:err instanceof Error?err.message:"Unknown error"},{status:500});
   }
 }
