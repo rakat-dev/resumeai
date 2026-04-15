@@ -32,7 +32,7 @@ export interface Job {
 
 // ── Source diagnostics ─────────────────────────────────────────────────────
 export interface SourceStatus {
-  status: "healthy"|"degraded"|"broken"|"skipped";
+  status: "healthy"|"degraded"|"broken"|"skipped"|"rate_limited";
   fetched: number;
   kept: number;
   error?: string;
@@ -41,7 +41,7 @@ export interface SourceStatus {
 export interface SourceDiagnostic {
   source: string;
   called: boolean;
-  status: "success"|"degraded"|"error"|"skipped"|"timeout";
+  status: "success"|"degraded"|"error"|"skipped"|"timeout"|"rate_limited";
   rawCount: number;
   postFilterCount: number;
   error: string|null;
@@ -294,12 +294,18 @@ const DATE_MAP: Record<JobFilter,string> = {
 const JSEARCH_MIN_THRESHOLD = 10;
 const JSEARCH_FALLBACK_TERMS = ["backend engineer","frontend engineer","full stack engineer","cloud engineer"];
 
-async function jsearchFetch(term: string, filter: JobFilter, apiKey: string): Promise<Record<string,unknown>[]> {
+// 20-min module-level cache to survive repeated searches when rate-limited
+const JSEARCH_CACHE = new Map<string, {jobs:Job[], fetched:number, ts:number}>();
+const JSEARCH_CACHE_TTL = 20 * 60 * 1000; // 20 minutes
+
+async function jsearchFetch(
+  term: string, filter: JobFilter, apiKey: string
+): Promise<{ raw: Record<string,unknown>[], rateLimited: boolean }> {
   const params = new URLSearchParams({
     query: term,          // clean title only — no "in USA"
     page: "1",
     num_pages: "2",
-    country: "us",        // location via API param
+    country: "us",        // location via separate API param
     remote_jobs_only: "false",
     ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
   });
@@ -310,12 +316,16 @@ async function jsearchFetch(term: string, filter: JobFilter, apiKey: string): Pr
     },
     cache: "no-store",
   });
+  if (res.status === 429) {
+    console.error(`JSearch 429 RATE LIMITED for term="${term}" — stopping all fallbacks`);
+    return { raw: [], rateLimited: true };
+  }
   if (!res.ok) {
     console.error(`JSearch HTTP ${res.status} for term="${term}"`);
-    return [];
+    return { raw: [], rateLimited: false };
   }
   const data = await res.json();
-  return (data.data || []) as Record<string,unknown>[];
+  return { raw: (data.data || []) as Record<string,unknown>[], rateLimited: false };
 }
 
 function jsearchMapJob(j: Record<string,unknown>, i: number): Job|null {
@@ -350,40 +360,50 @@ async function fetchJSearch(query: string, filter: JobFilter): Promise<{jobs:Job
   const apiKey = process.env.RAPIDAPI_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"RAPIDAPI_KEY not set"}};
 
+  // Check 20-min cache first
+  const cacheKey = `${query}::${filter}`;
+  const cached = JSEARCH_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < JSEARCH_CACHE_TTL) {
+    console.log(`JSearch cache hit: "${query}" (${cached.jobs.length} jobs)`);
+    return {jobs:cached.jobs,status:{status:cached.jobs.length>0?"healthy":"degraded",fetched:cached.fetched,kept:cached.jobs.length}};
+  }
+
   const expansion = expandQuery(query);
   const allJobs: Job[] = [];
   let totalFetched = 0;
 
   try {
-    // Step 1: try primary term first
-    const primaryRaw = await jsearchFetch(expansion.primary, filter, apiKey);
+    // Step 1: primary term only
+    const { raw: primaryRaw, rateLimited: rl1 } = await jsearchFetch(expansion.primary, filter, apiKey);
+    if (rl1) {
+      return {jobs:[],status:{status:"rate_limited",fetched:0,kept:0,error:"HTTP 429 — rate limited, retry later"}};
+    }
     totalFetched += primaryRaw.length;
     console.log(`JSearch primary="${expansion.primary}" → ${primaryRaw.length} raw`);
+    primaryRaw.forEach((j,i) => { const job = jsearchMapJob(j,i); if (job) allJobs.push(job); });
 
-    primaryRaw.forEach((j,i) => {
-      const job = jsearchMapJob(j, i);
-      if (job) allJobs.push(job);
-    });
-
-    // Step 2: if below threshold, try fallback terms one at a time
+    // Step 2: fallback terms only if below threshold
     if (primaryRaw.length < JSEARCH_MIN_THRESHOLD) {
       const fallbacks = expansion.mode === "broad"
         ? JSEARCH_FALLBACK_TERMS
         : expansion.terms.filter(t => t !== expansion.primary).slice(0,3);
 
       for (const term of fallbacks) {
-        if (allJobs.length >= 30) break; // enough results, stop
-        const raw = await jsearchFetch(term, filter, apiKey);
+        if (allJobs.length >= 30) break;
+        const { raw, rateLimited } = await jsearchFetch(term, filter, apiKey);
+        if (rateLimited) {
+          console.warn(`JSearch 429 on fallback "${term}" — stopping`);
+          break; // stop immediately on 429
+        }
         totalFetched += raw.length;
         console.log(`JSearch fallback="${term}" → ${raw.length} raw`);
-        raw.forEach((j,i) => {
-          const job = jsearchMapJob(j, totalFetched + i);
-          if (job) allJobs.push(job);
-        });
+        raw.forEach((j,i) => { const job = jsearchMapJob(j,totalFetched+i); if (job) allJobs.push(job); });
       }
     }
 
     const kept = allJobs.length;
+    // Cache the result whether or not we got jobs (avoids hammering on empty results too)
+    JSEARCH_CACHE.set(cacheKey, { jobs: allJobs, fetched: totalFetched, ts: Date.now() });
     return {jobs:allJobs,status:{status:kept>0?"healthy":"degraded",fetched:totalFetched,kept}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
@@ -817,74 +837,94 @@ async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{j
 }
 
 // ── Oracle Cloud HCM ──────────────────────────────────────────────────────
-// Strategy: fetch broad raw results first (no custom query syntax),
-// then do all title/location filtering on our side after normalization.
+// Strategy: probe bare endpoint with minimal params first.
+// Log full response structure so we can identify the correct field names.
+// Do NOT assume items/expand/requisitionList structure is correct until verified.
 async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   try {
-    // Use Oracle's public careers search — simple keyword, no OData syntax
-    const reqUrl = `https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?limit=25&offset=0&expand=requisitionList&onlyData=true`;
-    console.log(`Oracle fetch URL: ${reqUrl}`);
+    // Minimal params — no OData syntax, no expand, just pagination
+    const reqUrl = "https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?limit=25&offset=0&onlyData=true";
+    console.log(`Oracle probe URL: ${reqUrl}`);
 
     const res = await fetch(reqUrl, {
       headers: {
         "Accept": "application/json",
         "Accept-Language": "en-US",
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (compatible)",
       },
       cache: "no-store",
     });
 
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error(`Oracle HTTP ${res.status}: ${body.slice(0,200)}`);
-      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
+      const errText = await res.text().catch(() => "");
+      console.error(`Oracle HTTP ${res.status}: ${errText.slice(0,300)}`);
+      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}: ${errText.slice(0,80)}`}};
     }
 
     const data = await res.json();
-    const items = (data.items||[]) as Record<string,unknown>[];
-    console.log(`Oracle raw items: ${items.length}`);
 
-    const jobs: Job[] = [];
-    let rawCount = 0;
+    // Log top-level keys and first-item keys to identify correct field names
+    const topKeys = Object.keys(data);
+    console.log(`Oracle top-level keys: ${JSON.stringify(topKeys)}`);
+    console.log(`Oracle count=${data.count}, totalResults=${data.totalResults}, items.length=${data.items?.length ?? 0}`);
 
-    for (const item of items) {
-      const reqs = (item.requisitionList as Record<string,unknown>[])||[];
-      rawCount += reqs.length;
-      for (const r of reqs) {
-        const title=(r.Title as string)||(r.Name as string)||"";
-        const rawDesc=(r.ExternalDescriptionStr as string)||(r.Description as string)||"";
-        const desc=cleanDescription(rawDesc).slice(0,800);
-        const location=(r.PrimaryLocation as string)||(r.Locations as string)||"United States";
-
-        // Backend filtering — skip clearance/contract/non-US/wrong titles
-        if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
-
-        // Relevance: title must loosely match expansion
-        const tl = title.toLowerCase();
-        const relevant = expansion.terms.some(t => tl.includes(t.split(" ")[0]));
-        if (!relevant) continue;
-
-        const postedDate=(r.PostedDate as string)||"";
-        const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
-        const reqId=(r.Id as string)||(r.RequisitionId as string)||String(Math.random());
-
-        jobs.push({
-          id:`oracle-${reqId}`,
-          title, company:"Oracle", location, type:"Full-time",
-          description:desc,
-          applyUrl:`https://careers.oracle.com/en/sites/jobsearch/job/${reqId}`,
-          postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
-          postedTimestamp:ts, source:"Oracle", sourceType:"oracle",
-          skills:extractMissingSkills(rawDesc),
-          sponsorshipTag:detectSponsorship(rawDesc),
-          experience:extractExperience(rawDesc),
-          priorityTier:"highest", fortuneRank:25,
-        });
-      }
+    if (!data.items || data.items.length === 0) {
+      // Log full raw response to diagnose shape
+      console.log(`Oracle 0 items — raw (first 600): ${JSON.stringify(data).slice(0,600)}`);
+      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`0 items. Top keys: [${topKeys.join(",")}]`}};
     }
 
-    console.log(`Oracle: ${rawCount} raw reqs → ${jobs.length} kept`);
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:rawCount,kept:jobs.length}};
+    // Log first item keys to understand field names
+    const firstItem = data.items[0] as Record<string,unknown>;
+    console.log(`Oracle items[0] keys: ${JSON.stringify(Object.keys(firstItem))}`);
+
+    const items = data.items as Record<string,unknown>[];
+    const jobs: Job[] = [];
+
+    for (const item of items) {
+      // Try multiple possible field name patterns Oracle may use
+      const title =
+        (item.Title as string) || (item.Name as string) ||
+        (item.JobTitle as string) || (item.title as string) || "";
+      const rawDesc =
+        (item.ExternalDescriptionStr as string) || (item.Description as string) ||
+        (item.ShortDescription as string) || (item.description as string) || "";
+      const desc = cleanDescription(rawDesc).slice(0, 800);
+      const location =
+        (item.PrimaryLocation as string) || (item.PrimaryWorkLocation as string) ||
+        (item.WorkLocation as string) || (item.location as string) || "United States";
+      const postedDate =
+        (item.PostedDate as string) || (item.CreationDate as string) ||
+        (item.postedDate as string) || "";
+      const reqId =
+        (item.Id as string) || (item.RequisitionNumber as string) ||
+        (item.RequisitionId as string) || (item.id as string) || String(Math.random());
+
+      if (!title) continue;
+      if (!shouldKeepJob(title, desc, "Full-time", location)) continue;
+
+      const tl = title.toLowerCase();
+      const relevant = expansion.terms.some(t => tl.includes(t.split(" ")[0]));
+      if (!relevant) continue;
+
+      const ts = postedDate ? Math.floor(new Date(postedDate).getTime() / 1000) : 0;
+
+      jobs.push({
+        id: `oracle-${reqId}`,
+        title, company: "Oracle", location, type: "Full-time",
+        description: desc,
+        applyUrl: `https://careers.oracle.com/en/sites/jobsearch/job/${reqId}`,
+        postedAt: postedDate, postedDate: ts ? formatPostedDate(ts) : "Recently",
+        postedTimestamp: ts, source: "Oracle", sourceType: "oracle",
+        skills: extractMissingSkills(rawDesc),
+        sponsorshipTag: detectSponsorship(rawDesc),
+        experience: extractExperience(rawDesc),
+        priorityTier: "highest", fortuneRank: 25,
+      });
+    }
+
+    console.log(`Oracle: ${items.length} raw items → ${jobs.length} kept`);
+    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:items.length,kept:jobs.length}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
   }
@@ -1008,7 +1048,8 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
       page: 0,
       limit: 25,
     };
-    if (ageDays) body.posted_at_max_age_days = ageDays;
+    // posted_at_max_age_days is required by TheirStack — use selected range or 90d default
+    body.posted_at_max_age_days = ageDays ?? 90;
 
     const reqBody = JSON.stringify(body);
     console.log(`TheirStack request: ${reqBody.slice(0,300)}`);
@@ -1131,6 +1172,7 @@ export async function GET(req: NextRequest) {
       const called = st.status !== "skipped";
       let status: SourceDiagnostic["status"];
       if (st.status === "skipped") status = "skipped";
+      else if (st.status === "rate_limited") status = "rate_limited";
       else if (st.error === "timeout") status = "timeout";
       else if (st.status === "healthy" && rawCount > 0) status = "success";
       else if (st.status === "degraded" && rawCount > 0) status = "success";
