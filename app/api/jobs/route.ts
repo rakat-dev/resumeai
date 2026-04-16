@@ -5,6 +5,11 @@ import { supabaseAdmin } from "@/lib/supabase";
 import type { JobRow } from "@/lib/supabase";
 
 export const maxDuration = 60;
+// Bypass Next.js App Router fetch cache — Supabase JS client uses fetch()
+// internally, and stale cached responses were hiding fresh DB writes from
+// the GET handler. force-dynamic runs the handler fresh every request.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export type JobFilter = "24h" | "3d" | "7d" | "any";
