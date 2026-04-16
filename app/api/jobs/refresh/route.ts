@@ -579,8 +579,14 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
   const results: RawJob[] = [];
   let totalFetched = 0;
 
-  const settled = await Promise.allSettled(
-    ADZUNA_TARGETED_COMPANIES.map(async (companyName) => {
+  // Sequential with 300ms throttle — 15 parallel calls were tripping Adzuna's
+  // rate limit, causing ~80% of companies to return 0 raw. Sequential takes
+  // ~6-8s total which is still well inside the 60s refresh budget.
+  type CallResult = { companyName: string; raw: Record<string, unknown>[] };
+  const settled: Array<{ status: "fulfilled"; value: CallResult } | { status: "rejected"; reason: Error; companyName: string }> = [];
+
+  for (const companyName of ADZUNA_TARGETED_COMPANIES) {
+    try {
       const params = new URLSearchParams({
         app_id: appId, app_key: appKey,
         results_per_page: "50", company: companyName,
@@ -589,12 +595,21 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
       });
       const url = `https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`;
       const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const raw  = (data.results ?? []) as Record<string, unknown>[];
-      return { companyName, raw };
-    })
-  );
+      if (!res.ok) {
+        console.warn(`[adzuna_targeted] ${companyName} HTTP ${res.status}`);
+        settled.push({ status: "rejected", reason: new Error(`HTTP ${res.status}`), companyName });
+      } else {
+        const data = await res.json();
+        const raw = (data.results ?? []) as Record<string, unknown>[];
+        settled.push({ status: "fulfilled", value: { companyName, raw } });
+      }
+    } catch (e) {
+      console.warn(`[adzuna_targeted] ${companyName} error ${(e as Error).message}`);
+      settled.push({ status: "rejected", reason: e as Error, companyName });
+    }
+    // Small throttle between calls to avoid tripping Adzuna's per-IP rate limit
+    await new Promise(r => setTimeout(r, 300));
+  }
 
   for (const result of settled) {
     if (result.status !== "fulfilled") continue;
