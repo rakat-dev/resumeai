@@ -497,31 +497,41 @@ interface FirecrawlTarget {
 // Tier A always runs first; Tier B only if Tier A kept < FC_TIER_B_THRESHOLD
 const FC_CONCURRENCY = 2;
 const FC_TIMEOUT_MS  = 25000;
-const FC_TIER_B_THRESHOLD = 20; // run Tier B if Tier A kept fewer than this
 
-// Module-level Firecrawl cache keyed by query+filter (10 min TTL)
-// Avoids re-scraping the same companies on repeated searches
-const FC_CACHE = new Map<string, {jobs:Job[]; status:SourceStatus; ts:number}>();
-const FC_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+// ── Firecrawl company-level cache ────────────────────────────────────────
+// Keyed by `company:query:filter` so each company's results age independently.
+// Tier A companies are always scraped live (3 companies × 25s = 50s max).
+// Tier B companies are NEVER scraped live — their cached results are merged in,
+// and a background refresh fires after the response is sent to the client.
+// This means Google / Meta / IBM etc. always appear from cache, never stale forever.
 
-// Tier A — 3 highest-priority companies only for live /api/jobs requests.
-// Kept small to fit inside the 60s Vercel budget (2 companies × 25s = 50s max).
-// Google is excluded — its careers page requires JS rendering, Firecrawl rarely extracts from it.
+interface FcCompanyCache { jobs: Job[]; raw: number; ts: number; filter: JobFilter; }
+const FC_COMPANY_CACHE = new Map<string, FcCompanyCache>();
+const FC_TIER_A_TTL = 10 * 60 * 1000;  // 10 min — live companies refresh often
+const FC_TIER_B_TTL = 30 * 60 * 1000;  // 30 min — background companies refresh less
+
+// Tier A — scraped LIVE every request (3 companies, fits in Vercel 60s budget)
 const FC_TIER_A: FirecrawlTarget[] = [
   { company:"Microsoft",     careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank:5  },
   { company:"Apple",         careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank:3  },
   { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
 ];
 
-// Tier B — scraped only if Tier A results are thin
+// Tier B — served from CACHE in live requests; refreshed in background after response
 const FC_TIER_B: FirecrawlTarget[] = [
-  { company:"IBM",          careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",            fortuneRank:22 },
-  { company:"Oracle",       careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",   fortuneRank:25 },
-  { company:"Cisco",        careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
-  { company:"Salesforce",   careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                 fortuneRank:26 },
-  { company:"Goldman Sachs",careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
+  { company:"Google",        careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                 fortuneRank:35 },
+  { company:"Meta",          careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                        fortuneRank:14 },
+  { company:"IBM",           careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",            fortuneRank:22 },
+  { company:"Oracle",        careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",   fortuneRank:25 },
+  { company:"Cisco",         careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
+  { company:"Salesforce",    careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                 fortuneRank:26 },
+  { company:"Goldman Sachs", careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
   { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
 ];
+
+// Legacy combined reference used nowhere except for type safety
+const FC_CACHE = new Map<string, {jobs:Job[]; status:SourceStatus; ts:number}>();
+const FC_CACHE_TTL = 10 * 60 * 1000;
 
 // Single-company fetch — 25s AbortController timeout, no outer Promise.all
 async function fetchFirecrawlCompany(
@@ -664,85 +674,111 @@ async function runFirecrawlBatch(
   return results;
 }
 
+// Refresh a single Tier B company into the per-company cache (called in background)
+async function refreshFirecrawlCompanyCache(
+  target: FirecrawlTarget,
+  query: string, filter: JobFilter, apiKey: string
+): Promise<void> {
+  const expansion = expandQuery(query);
+  const ck = `${target.company}:${expansion.primary}:${filter}`;
+  const result = await fetchFirecrawlCompany(
+    target.company, target.careerUrl, target.fortuneRank, expansion, filter, apiKey
+  );
+  FC_COMPANY_CACHE.set(ck, {
+    jobs: result.jobs, raw: result.raw, ts: Date.now(), filter,
+  });
+  console.log(`FC background cache updated: ${target.company} → ${result.jobs.length} jobs`);
+}
+
 async function fetchFirecrawl(
   expansion: ReturnType<typeof expandQuery>,
   filter: JobFilter,
-  budgetMs?: number  // remaining ms before Vercel timeout; skip Tier B if tight
+  budgetMs?: number  // remaining ms before Vercel timeout (passed from main handler)
 ): Promise<{jobs:Job[];status:SourceStatus}> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"FIRECRAWL_API_KEY not set"}};
 
-  // ── Cache check: avoid re-scraping on repeated searches ───────────────
-  const cacheKey = `fc:${expansion.primary}:${filter}`;
-  const cached = FC_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.ts < FC_CACHE_TTL) {
-    console.log(`Firecrawl cache hit: "${expansion.primary}" (${cached.jobs.length} jobs)`);
-    return {jobs: cached.jobs, status: cached.status};
-  }
+  // ── Tier A: always scraped LIVE (Microsoft, Apple, JPMorgan) ─────────
+  // Check per-company cache first for each Tier A company — if fresh, use it;
+  // otherwise scrape live. This means even Tier A benefits from caching on
+  // repeated searches within the TTL window.
+  const now = Date.now();
+  const tierAToScrape: FirecrawlTarget[] = [];
+  const tierACached: Job[] = [];
 
-  const fcStart = Date.now();
-
-  // ── Tier A: always run first, concurrency=2 ───────────────────────────
-  const tierAResults = await runFirecrawlBatch(FC_TIER_A, expansion, filter, apiKey);
-  const tierAJobs = tierAResults.flatMap(r => r.jobs);
-  const tierAKept = tierAJobs.length;
-  const tierAMs = Date.now() - fcStart;
-  console.log(`Firecrawl Tier A complete: ${tierAKept} kept (${tierAMs}ms)`);
-
-  // ── Tier B: only if Tier A thin AND we have budget left ───────────────
-  let tierBResults: Array<{jobs:Job[];raw:number;error:string|null}> = [];
-  const remainingBudget = budgetMs ? budgetMs - tierAMs : Infinity;
-  const tierBCost = FC_TIER_B.length * FC_TIMEOUT_MS; // worst case
-  if (tierAKept < FC_TIER_B_THRESHOLD && remainingBudget > tierBCost) {
-    console.log(`Firecrawl Tier A thin (${tierAKept}<${FC_TIER_B_THRESHOLD}) — running Tier B (budget=${remainingBudget}ms)`);
-    tierBResults = await runFirecrawlBatch(FC_TIER_B, expansion, filter, apiKey);
-  } else if (tierAKept < FC_TIER_B_THRESHOLD) {
-    console.log(`Firecrawl Tier A thin but budget too tight (${remainingBudget}ms < ${tierBCost}ms) — skipping Tier B`);
-  } else {
-    console.log(`Firecrawl Tier A sufficient (${tierAKept}>=${FC_TIER_B_THRESHOLD}) — skipping Tier B`);
-  }
-
-  // ── Collect results ───────────────────────────────────────────────────
-  const allResults = [...tierAResults, ...tierBResults];
-  const allTargets = [...FC_TIER_A, ...FC_TIER_B.slice(0, tierBResults.length)];
-
-  const allJobs: Job[] = [];
-  let totalFetched = 0;
-  let successCount = 0;
-  let failCount = 0;
-  const errors: string[] = [];
-
-  for (let i = 0; i < allResults.length; i++) {
-    const r = allResults[i];
-    const company = allTargets[i].company;
-    allJobs.push(...r.jobs);
-    totalFetched += r.raw;
-    if (r.error) {
-      failCount++;
-      errors.push(`${company}: ${r.error}`);
+  for (const target of FC_TIER_A) {
+    const ck = `${target.company}:${expansion.primary}:${filter}`;
+    const cached = FC_COMPANY_CACHE.get(ck);
+    if (cached && now - cached.ts < FC_TIER_A_TTL) {
+      console.log(`FC Tier A cache hit: ${target.company} (${cached.jobs.length} jobs)`);
+      tierACached.push(...cached.jobs);
     } else {
-      successCount++;
+      tierAToScrape.push(target);
     }
   }
 
-  const total = allResults.length;
-  let overallStatus: SourceStatus["status"];
-  if (failCount === 0)       overallStatus = "healthy";
-  else if (successCount > 0) overallStatus = "degraded";
-  else                       overallStatus = "broken";
+  let tierAScrapedJobs: Job[] = [];
+  if (tierAToScrape.length > 0) {
+    console.log(`FC Tier A scraping live: [${tierAToScrape.map(t=>t.company).join(", ")}]`);
+    const results = await runFirecrawlBatch(tierAToScrape, expansion, filter, apiKey);
+    results.forEach((r, i) => {
+      const target = tierAToScrape[i];
+      const ck = `${target.company}:${expansion.primary}:${filter}`;
+      FC_COMPANY_CACHE.set(ck, {jobs:r.jobs, raw:r.raw, ts:Date.now(), filter});
+      tierAScrapedJobs.push(...r.jobs);
+    });
+  }
 
-  const errorSummary = failCount > 0
-    ? `${failCount}/${total} failed: ${errors.slice(0,3).join("; ")}`
+  const tierAJobs = [...tierACached, ...tierAScrapedJobs];
+  const tierAMs = Date.now() - now;
+  console.log(`FC Tier A complete: ${tierAJobs.length} jobs (${tierAMs}ms, ${tierAToScrape.length} scraped, ${FC_TIER_A.length - tierAToScrape.length} from cache)`);
+
+  // ── Tier B: served from CACHE only — never scraped live ───────────────
+  // If cache is fresh, use it. If stale/missing, serve empty now and trigger
+  // a background refresh so next request benefits.
+  const tierBJobs: Job[] = [];
+  const tierBStale: FirecrawlTarget[] = [];
+
+  for (const target of FC_TIER_B) {
+    const ck = `${target.company}:${expansion.primary}:${filter}`;
+    const cached = FC_COMPANY_CACHE.get(ck);
+    if (cached && (Date.now() - cached.ts) < FC_TIER_B_TTL) {
+      console.log(`FC Tier B cache hit: ${target.company} (${cached.jobs.length} jobs)`);
+      tierBJobs.push(...cached.jobs);
+    } else {
+      console.log(`FC Tier B cache miss/stale: ${target.company} — queued for background refresh`);
+      tierBStale.push(target);
+    }
+  }
+
+  // Fire background refresh for stale Tier B companies (non-blocking)
+  // Uses Promise without await so it doesn't count against Vercel budget
+  if (tierBStale.length > 0 && apiKey) {
+    console.log(`FC background refresh: [${tierBStale.map(t=>t.company).join(", ")}]`);
+    // Don't await — intentionally fire-and-forget after response is sent
+    Promise.allSettled(
+      tierBStale.map(target =>
+        refreshFirecrawlCompanyCache(target, expansion.primary, filter, apiKey)
+      )
+    ).catch(() => {/* background errors are non-fatal */});
+  }
+
+  // ── Merge Tier A + Tier B ─────────────────────────────────────────────
+  const allJobs = [...tierAJobs, ...tierBJobs];
+  const totalFetched = allJobs.length; // approximation (raw not tracked per-company here)
+  const cacheHits = (FC_TIER_A.length - tierAToScrape.length) + (FC_TIER_B.length - tierBStale.length);
+  const cacheMisses = tierAToScrape.length + tierBStale.length;
+
+  const overallStatus: SourceStatus["status"] = allJobs.length > 0 ? "healthy" : "degraded";
+  const errorSummary = tierBStale.length > 0
+    ? `${tierBStale.length} Tier B companies refreshing in background`
     : undefined;
 
-  const result = {
+  console.log(`FC complete: ${allJobs.length} jobs (${cacheHits} cache hits, ${cacheMisses} misses/refreshing)`);
+  return {
     jobs: allJobs,
-    status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary} as SourceStatus,
+    status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary},
   };
-  // Cache the result (even partial) to serve repeated searches fast
-  FC_CACHE.set(cacheKey, {...result, ts: Date.now()});
-  console.log(`Firecrawl complete: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
-  return result;
 }
 
 // ── JSearch (fallback aggregator) ─────────────────────────────────────────
