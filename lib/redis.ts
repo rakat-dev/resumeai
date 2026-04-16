@@ -1,5 +1,5 @@
 import { Redis } from "@upstash/redis";
-import type { RefreshState, RefreshRun } from "./types";
+import type { RefreshState, RefreshRun } from "@/app/api/jobs/types";
 
 // ── Upstash Redis client ───────────────────────────────────────────────────
 // Lazy singleton — only instantiated when first called, so missing env vars
