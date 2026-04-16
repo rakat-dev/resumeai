@@ -487,13 +487,26 @@ export default function JobsPage(){
     setLoading(true);setJobs([]);setSelected(null);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setSearchErr("");setFilters(DEFAULT_FILTERS);
     try{
       const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}`);
-      const data=await res.json();
-      if(!res.ok)throw new Error(data.error||"Search failed");
-      const nj=data.jobs||[],ns=data.sources||{},nd=(data.sourceDiagnostics||[]) as SourceDiagnostic[];
-      setJobs(nj);setSources(ns);setDiagnostics(nd);
-      saveSS(query,"any",nj,ns);
+      if(!res.ok){
+        // Vercel timeout and other errors return plain text, not JSON
+        const text=await res.text().catch(()=>"");
+        const isTimeout=res.status===504||text.toLowerCase().includes("timeout")||text.startsWith("A");
+        throw new Error(isTimeout
+          ? "Search timed out — the pipeline took too long. Try again in a few seconds."
+          : `Search failed (HTTP ${res.status}): ${text.slice(0,120)}`
+        );
+      }
+      let data:Record<string,unknown>;
+      try{
+        data=await res.json();
+      }catch{
+        throw new Error("Search timed out — please try again.");
+      }
+      const nj=(data.jobs as unknown[])||[],ns=(data.sources as Record<string,number>)||{},nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
+      setJobs(nj as Job[]);setSources(ns);setDiagnostics(nd);
+      saveSS(query,"any",nj as Job[],ns);
       if(nj.length===0)setSearchErr("No jobs found. Try a different query or time filter.");
-    }catch(e:unknown){setSearchErr(e instanceof Error?e.message:"Search failed");}
+    }catch(e:unknown){setSearchErr(e instanceof Error?e.message:"Search failed — please try again.");}
     setLoading(false);
   };
 

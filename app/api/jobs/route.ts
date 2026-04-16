@@ -499,12 +499,17 @@ const FC_CONCURRENCY = 2;
 const FC_TIMEOUT_MS  = 25000;
 const FC_TIER_B_THRESHOLD = 20; // run Tier B if Tier A kept fewer than this
 
-// Tier A — highest priority, always scraped
+// Module-level Firecrawl cache keyed by query+filter (10 min TTL)
+// Avoids re-scraping the same companies on repeated searches
+const FC_CACHE = new Map<string, {jobs:Job[]; status:SourceStatus; ts:number}>();
+const FC_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+// Tier A — 3 highest-priority companies only for live /api/jobs requests.
+// Kept small to fit inside the 60s Vercel budget (2 companies × 25s = 50s max).
+// Google is excluded — its careers page requires JS rendering, Firecrawl rarely extracts from it.
 const FC_TIER_A: FirecrawlTarget[] = [
-  { company:"Microsoft",    careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank:5  },
-  { company:"Google",       careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                 fortuneRank:35 },
-  { company:"Apple",        careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank:3  },
-  { company:"Meta",         careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                        fortuneRank:14 },
+  { company:"Microsoft",     careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank:5  },
+  { company:"Apple",         careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank:3  },
   { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
 ];
 
@@ -661,22 +666,38 @@ async function runFirecrawlBatch(
 
 async function fetchFirecrawl(
   expansion: ReturnType<typeof expandQuery>,
-  filter: JobFilter
+  filter: JobFilter,
+  budgetMs?: number  // remaining ms before Vercel timeout; skip Tier B if tight
 ): Promise<{jobs:Job[];status:SourceStatus}> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"FIRECRAWL_API_KEY not set"}};
+
+  // ── Cache check: avoid re-scraping on repeated searches ───────────────
+  const cacheKey = `fc:${expansion.primary}:${filter}`;
+  const cached = FC_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < FC_CACHE_TTL) {
+    console.log(`Firecrawl cache hit: "${expansion.primary}" (${cached.jobs.length} jobs)`);
+    return {jobs: cached.jobs, status: cached.status};
+  }
+
+  const fcStart = Date.now();
 
   // ── Tier A: always run first, concurrency=2 ───────────────────────────
   const tierAResults = await runFirecrawlBatch(FC_TIER_A, expansion, filter, apiKey);
   const tierAJobs = tierAResults.flatMap(r => r.jobs);
   const tierAKept = tierAJobs.length;
-  console.log(`Firecrawl Tier A complete: ${tierAKept} kept`);
+  const tierAMs = Date.now() - fcStart;
+  console.log(`Firecrawl Tier A complete: ${tierAKept} kept (${tierAMs}ms)`);
 
-  // ── Tier B: only if Tier A came back thin ─────────────────────────────
+  // ── Tier B: only if Tier A thin AND we have budget left ───────────────
   let tierBResults: Array<{jobs:Job[];raw:number;error:string|null}> = [];
-  if (tierAKept < FC_TIER_B_THRESHOLD) {
-    console.log(`Firecrawl Tier A thin (${tierAKept}<${FC_TIER_B_THRESHOLD}) — running Tier B`);
+  const remainingBudget = budgetMs ? budgetMs - tierAMs : Infinity;
+  const tierBCost = FC_TIER_B.length * FC_TIMEOUT_MS; // worst case
+  if (tierAKept < FC_TIER_B_THRESHOLD && remainingBudget > tierBCost) {
+    console.log(`Firecrawl Tier A thin (${tierAKept}<${FC_TIER_B_THRESHOLD}) — running Tier B (budget=${remainingBudget}ms)`);
     tierBResults = await runFirecrawlBatch(FC_TIER_B, expansion, filter, apiKey);
+  } else if (tierAKept < FC_TIER_B_THRESHOLD) {
+    console.log(`Firecrawl Tier A thin but budget too tight (${remainingBudget}ms < ${tierBCost}ms) — skipping Tier B`);
   } else {
     console.log(`Firecrawl Tier A sufficient (${tierAKept}>=${FC_TIER_B_THRESHOLD}) — skipping Tier B`);
   }
@@ -714,11 +735,14 @@ async function fetchFirecrawl(
     ? `${failCount}/${total} failed: ${errors.slice(0,3).join("; ")}`
     : undefined;
 
-  console.log(`Firecrawl complete: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
-  return {
+  const result = {
     jobs: allJobs,
-    status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary},
+    status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary} as SourceStatus,
   };
+  // Cache the result (even partial) to serve repeated searches fast
+  FC_CACHE.set(cacheKey, {...result, ts: Date.now()});
+  console.log(`Firecrawl complete: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
+  return result;
 }
 
 // ── JSearch (fallback aggregator) ─────────────────────────────────────────
@@ -966,14 +990,18 @@ export async function GET(req: NextRequest) {
   if (!query.trim()) return NextResponse.json({error:"query required"},{status:400});
 
   const expansion = expandQuery(query);
+  // Track wall-clock time to guard against Vercel 60s limit
+  const requestStart = Date.now();
+  const VERCEL_BUDGET_MS = 55000; // leave 5s buffer before hard 60s cutoff
 
   try {
     // ── Tier 1: Primary sources (always run in parallel) ─────────────────
-    // Firecrawl runs per-company internally — no outer withTimeout needed
+    // Firecrawl receives the remaining budget so it can skip Tier B if too slow
+    const tier1Budget = Math.max(0, VERCEL_BUDGET_MS - (Date.now() - requestStart));
     const [rGHp, rWDp, rFCp] = await Promise.allSettled([
-      withTimeout(fetchGreenhouse(expansion, filter), 32000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-      withTimeout(fetchWorkday(expansion, filter),    32000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-      fetchFirecrawl(expansion, filter), // no outer timeout — managed per-company internally
+      withTimeout(fetchGreenhouse(expansion, filter), 30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      withTimeout(fetchWorkday(expansion, filter),    30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      fetchFirecrawl(expansion, filter, tier1Budget), // budget-aware; skips Tier B if tight
     ]);
 
     const getR = (r: PromiseSettledResult<SourceResult>): SourceResult =>
@@ -1003,24 +1031,32 @@ export async function GET(req: NextRequest) {
     let rAZ: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:`tier1=${tier1Visible}≥260`}};
     let rJB: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:`tier1=${tier1Visible}≥300`}};
 
+    // Runtime guard: if we're close to the Vercel limit, skip fallbacks
+    const elapsed = Date.now() - requestStart;
+    const remainingMs = VERCEL_BUDGET_MS - elapsed;
+    console.log(`Budget: elapsed=${elapsed}ms remaining=${remainingMs}ms`);
+    if (remainingMs < 5000) {
+      console.warn(`Budget exhausted (${remainingMs}ms left) — skipping all fallback sources`);
+    }
+
     // Run needed fallbacks in parallel
     const fallbackPromises: Promise<void>[] = [];
 
-    if (needsJSearch) {
+    if (needsJSearch && remainingMs >= 5000) {
       console.log(`Running JSearch (tier1=${tier1Visible}, ghShare=${(ghShare*100).toFixed(0)}%)`);
       fallbackPromises.push(
         withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
           .then(r => { rJS = r; })
       );
     }
-    if (needsAdzuna) {
+    if (needsAdzuna && remainingMs >= 5000) {
       console.log(`Running Adzuna (tier1=${tier1Visible})`);
       fallbackPromises.push(
         withTimeout(fetchAdzuna(query, filter), 15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
           .then(r => { rAZ = r; })
       );
     }
-    if (needsJooble) {
+    if (needsJooble && remainingMs >= 5000) {
       console.log(`Running Jooble (tier1=${tier1Visible})`);
       fallbackPromises.push(
         withTimeout(fetchJooble(query, filter), 15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
