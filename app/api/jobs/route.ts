@@ -365,7 +365,8 @@ async function jsearchFetch(
     cache: "no-store",
   });
   if (res.status === 429) {
-    console.error(`JSearch 429 RATE LIMITED for term="${term}" — stopping all fallbacks`);
+    const retryAfter = res.headers.get("retry-after") || res.headers.get("x-ratelimit-reset") || "unknown";
+    console.error(`JSearch 429 RATE LIMITED for term="${term}" — retry-after: ${retryAfter}s`);
     return { raw: [], rateLimited: true };
   }
   if (!res.ok) {
@@ -891,8 +892,8 @@ async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{j
 async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
   try {
     // Minimal params — no OData syntax, no expand, just pagination
+    // Oracle HCM — confirmed returns items:[], count:0 — deprioritized, kept for shape discovery
     const reqUrl = "https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?limit=25&offset=0&onlyData=true";
-    console.log(`Oracle probe URL: ${reqUrl}`);
 
     const res = await fetch(reqUrl, {
       headers: {
@@ -1100,7 +1101,9 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
     body.posted_at_max_age_days = ageDays ?? 90;
 
     const reqBody = JSON.stringify(body);
-    console.log(`TheirStack request: ${reqBody.slice(0,300)}`);
+    // Log full final payload — confirm posted_at_max_age_days is present
+    console.log(`TheirStack FULL payload: ${reqBody}`);
+    console.log(`TheirStack posted_at_max_age_days=${body.posted_at_max_age_days} filter=${filter}`);
 
     const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
       method: "POST",
@@ -1120,17 +1123,27 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
     }
     const data = await res.json();
     const raw = (data.data||[]) as Record<string,unknown>[];
-    console.log(`TheirStack raw count: ${raw.length}`);
+    console.log(`TheirStack raw count: ${raw.length}, total_results: ${data.total_results ?? "n/a"}`);
 
-    // Log rejection reasons for debugging (first call only, or when raw > 0)
     if (raw.length > 0) {
+      // Log first 10 raw jobs: title, location, employment type
+      const sample = raw.slice(0, 10).map(j => ({
+        title: (j.job_title as string)||"(no title)",
+        loc: (j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"(no loc)",
+        type: (j.employment_type as string)||(j.job_type as string)||"(no type)",
+      }));
+      console.log(`TheirStack first 10 raw: ${JSON.stringify(sample)}`);
+
+      // Log rejection reasons against relaxed filter
       logRejectedJobs(
         "theirstack", raw,
         j => (j.job_title as string)||"",
         j => (j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote",
-        j => "Full-time",
+        j => (j.employment_type as string)||(j.job_type as string)||"Full-time",
         j => (j.description as string)||""
       );
+    } else {
+      console.log(`TheirStack 0 raw — response keys: ${JSON.stringify(Object.keys(data))}`);
     }
 
     const jobs: Job[] = [];
