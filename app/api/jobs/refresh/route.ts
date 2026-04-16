@@ -704,7 +704,7 @@ export async function POST(req: NextRequest) {
   if (run("workday"))    tasks.push(ingestSource("workday",    fetchWorkdaySource,    "workday"   ).then(r => { results.workday    = r; }));
   if (run("jsearch"))    tasks.push(ingestSource("jsearch",    fetchJSearchSource,    "jsearch"   ).then(r => { results.jsearch    = r; }));
   if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaSource,     "adzuna"    ).then(r => { results.adzuna     = r; }));
-  if (run("adzuna"))     tasks.push(ingestSource("adzuna_targeted", fetchAdzunaTargetedSource, "adzuna").then(r => { results.adzuna_targeted = r; }));
+  if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaTargetedSource, "adzuna_targeted").then(r => { results.adzuna_targeted = r; }));
   if (run("jooble"))     tasks.push(ingestSource("jooble",     fetchJoobleSource,     "jooble"    ).then(r => { results.jooble     = r; }));
 
   if (run("playwright")) {
