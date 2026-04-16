@@ -449,7 +449,7 @@ export default function JobsPage(){
 
   // ── Load jobs from DB ──────────────────────────────────────────────────
   const loadJobs=async(dateFilter:JobFilter,sortOpt:SortOption)=>{
-    setLoading(true);setLoadErr("");setDisplayLimit(50);
+    setLoading(true);setLoadErr("");setDisplayLimit(50);setTotalJobs(0);
     try{
       const res=await fetch(`/api/jobs?filter=${dateFilter}&sort=${sortOpt}`);
       if(!res.ok)throw new Error(`HTTP ${res.status}`);
@@ -458,7 +458,7 @@ export default function JobsPage(){
       const ns=(data.sources as Record<string,number>)||{};
       const nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
       setJobs(nj);setSources(ns);setDiagnostics(nd);
-      setTotalJobs(data.total||nj.length);
+      setTotalJobs(nj.length); // use actual fetched count, not data.total which can be stale
       saveSS(dateFilter,nj,ns);
       if(nj.length===0)setLoadErr(data.message||"No jobs in DB yet — click \"Refresh Now\" to ingest jobs.");
     }catch(e:unknown){setLoadErr(e instanceof Error?e.message:"Failed to load jobs.");}
@@ -576,7 +576,7 @@ export default function JobsPage(){
         <div>
           <h1 style={{fontSize:26,fontWeight:800,marginBottom:2}}>💼 Job Board</h1>
           <p style={{color:"var(--muted)",fontSize:13}}>
-            {loading?"Loading...":totalJobs>0?`${totalJobs.toLocaleString()} stored jobs — Greenhouse, Workday, Playwright, JSearch, Adzuna, Jooble`:"No jobs yet — run a refresh"}
+            {loading?"Loading...":jobs.length>0?`${jobs.length.toLocaleString()} stored jobs — Greenhouse, Workday, Playwright, JSearch, Adzuna, Jooble`:"No jobs yet — run a refresh"}
           </p>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
