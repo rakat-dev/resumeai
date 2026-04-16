@@ -45,9 +45,18 @@ interface NormalizedJob {
 }
 
 // ── Title filter ───────────────────────────────────────────────────────────
-// INCLUDE: must contain at least one keyword or phrase
+// Strategy:
+//   1. Hard-exclude list checked FIRST — always wins
+//   2. Include list checked second — must match at least one term
+//   3. Default = exclude
+//
+// INCLUDE terms are intentionally broad single/double words so titles like
+// "Java Engineer", "Sr. Software Eng", "Cloud Infrastructure Engineer" all pass.
+
 const INCLUDE_KEYWORDS = [
-  "software engineer", "software developer",
+  // Core SWE
+  "software engineer", "software developer", "software eng",
+  // Specialisations
   "backend engineer", "backend developer",
   "frontend engineer", "frontend developer",
   "full stack", "fullstack",
@@ -55,16 +64,44 @@ const INCLUDE_KEYWORDS = [
   "site reliability", "sre",
   "distributed systems",
   "application engineer", "application developer",
-  "python developer", "java developer",
-  "ui engineer", "ui developer",
-  "api engineer", "integration engineer",
   "web developer", "product engineer",
+  "api engineer", "integration engineer",
+  // Language-named engineer/developer roles
+  "python engineer", "python developer",
+  "java engineer",   "java developer",
+  "golang engineer", "go engineer",
+  "ruby engineer",   "ruby developer",
+  "scala engineer",  "scala developer",
+  "kotlin engineer", "kotlin developer",
+  "ios engineer",    "ios developer",
+  "android engineer","android developer",
+  "ui engineer",     "ui developer",
+  // Infrastructure / data engineering
+  "data engineer",
+  "systems engineer",    // "Systems Engineer, Backend" etc.
+  "infrastructure engineer",
+  "reliability engineer",
+  // QA / test engineering
+  "qa engineer", "quality engineer", "test engineer", "automation engineer",
+  // Broad fallback: any title containing bare "engineer" or "developer"
+  // combined with a qualifying tech word handled below
 ];
 
-// EXCLUDE: hard reject if title contains any of these (substring match — checked
-// BEFORE include keywords, so these always win regardless of SWE context)
+// Single-word qualifiers: if the title contains one of these AND also contains
+// "engineer" or "developer", include it even without an exact phrase match.
+// Examples: "Kafka Engineer", "React Developer", "Spark Engineer"
+const INCLUDE_TECH_WORDS = [
+  "software", "backend", "frontend", "cloud", "devops", "platform",
+  "data", "infrastructure", "reliability", "distributed",
+  "java", "python", "golang", "go", "ruby", "scala", "kotlin",
+  "ios", "android", "react", "node", "typescript", "javascript",
+  "spark", "kafka", "kubernetes", "aws", "azure", "gcp",
+  "mobile", "embedded", "firmware",
+];
+
+// EXCLUDE: checked BEFORE includes — always wins
 const EXCLUDE_SUBSTRINGS = [
-  // Seniority levels we do not want in the board
+  // Seniority tiers to exclude (per spec)
   "principal",   // kills "Principal Software Engineer"
   "staff",       // kills "Staff Software Engineer"
   "lead",        // kills "Lead Software Engineer", "Tech Lead"
@@ -84,7 +121,7 @@ const EXCLUDE_SUBSTRINGS = [
   // Junk roles from retail / ops / physical
   "technician", "mechanic", "electrician", "machinist",
   "warehouse", "retail associate", "store associate",
-  "robotics engineer", "controls engineer", "automation engineer",
+  "robotics engineer", "controls engineer",
   "mechanical engineer", "electrical engineer", "civil engineer",
   "nurse", "pharmacist", "physician", "therapist",
   "sales representative", "account executive", "account manager",
@@ -92,24 +129,22 @@ const EXCLUDE_SUBSTRINGS = [
   "customer service", "customer support",
 ];
 
-// EXCLUDE whole-word only — must not match "mls", "vpn", etc.
+// Whole-word excludes
 const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
 
 function shouldIncludeTitle(title: string): boolean {
   const tl = title.toLowerCase();
 
-  // Hard excludes always win — checked before include keywords
+  // 1. Hard excludes always win
   for (const kw of EXCLUDE_SUBSTRINGS)  { if (tl.includes(kw))                     return false; }
   for (const kw of EXCLUDE_WHOLE_WORDS) { if (new RegExp(`\\b${kw}\\b`).test(tl)) return false; }
 
-  // Must match at least one SWE keyword
+  // 2. Direct phrase match
   if (INCLUDE_KEYWORDS.some(kw => tl.includes(kw))) return true;
 
-  // Bare "Engineer" / "Developer" with no qualifying keyword → exclude
-  const stripped = tl
-    .replace(/\b(senior|sr\.?|ii|iii|iv|2|3|4|junior|jr\.?)\b/gi, "")
-    .trim();
-  if (stripped === "engineer" || stripped === "developer") return false;
+  // 3. Broad fallback: title contains "engineer" or "developer" + a tech qualifier
+  const hasEngineerOrDev = tl.includes("engineer") || tl.includes("developer");
+  if (hasEngineerOrDev && INCLUDE_TECH_WORDS.some(w => tl.includes(w))) return true;
 
   return false;
 }
