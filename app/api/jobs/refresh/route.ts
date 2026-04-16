@@ -520,7 +520,7 @@ export async function POST(req: NextRequest) {
   // Deactivate jobs older than 30 days
   await deactivateStaleJobs();
 
-  const totalStored = Object.values(results).reduce(
+  const totalStored = Object.values(results).reduce<number>(
     (sum, r) => sum + ((r as { stored?: number }).stored ?? 0), 0
   );
 
