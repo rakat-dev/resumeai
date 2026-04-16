@@ -491,74 +491,81 @@ interface FirecrawlTarget {
   fortuneRank: number;
 }
 
-const FIRECRAWL_TARGETS: FirecrawlTarget[] = [
-  { company:"Microsoft",   careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States",   fortuneRank:5  },
-  { company:"Google",      careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                    fortuneRank:35 },
-  { company:"Apple",       careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",       fortuneRank:3  },
-  { company:"Meta",        careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                           fortuneRank:14 },
-  { company:"IBM",         careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",               fortuneRank:22 },
-  { company:"Oracle",      careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",      fortuneRank:25 },
-  { company:"Cisco",       careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
-  { company:"Salesforce",  careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                    fortuneRank:26 },
-  { company:"Goldman Sachs",careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
-  { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
+// ── Firecrawl config ─────────────────────────────────────────────────────
+// CONCURRENCY=2: run exactly 2 companies at a time (not all at once)
+// TIMEOUT=25000: 25s per company via AbortController
+// Tier A always runs first; Tier B only if Tier A kept < FC_TIER_B_THRESHOLD
+const FC_CONCURRENCY = 2;
+const FC_TIMEOUT_MS  = 25000;
+const FC_TIER_B_THRESHOLD = 20; // run Tier B if Tier A kept fewer than this
+
+// Tier A — highest priority, always scraped
+const FC_TIER_A: FirecrawlTarget[] = [
+  { company:"Microsoft",    careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank:5  },
+  { company:"Google",       careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                 fortuneRank:35 },
+  { company:"Apple",        careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank:3  },
+  { company:"Meta",         careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                        fortuneRank:14 },
   { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
 ];
 
-// Per-company Firecrawl fetch with individual 12s timeout so one slow company
-// never kills the entire batch. Partial successes are always preserved.
+// Tier B — scraped only if Tier A results are thin
+const FC_TIER_B: FirecrawlTarget[] = [
+  { company:"IBM",          careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",            fortuneRank:22 },
+  { company:"Oracle",       careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",   fortuneRank:25 },
+  { company:"Cisco",        careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
+  { company:"Salesforce",   careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                 fortuneRank:26 },
+  { company:"Goldman Sachs",careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
+  { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
+];
+
+// Single-company fetch — 25s AbortController timeout, no outer Promise.all
 async function fetchFirecrawlCompany(
   company: string, careerUrl: string, fortuneRank: number,
   expansion: ReturnType<typeof expandQuery>, filter: JobFilter, apiKey: string
 ): Promise<{jobs:Job[];raw:number;error:string|null}> {
   const url = careerUrl.replace("{query}", encodeURIComponent(expansion.primary));
-  console.log(`Firecrawl START ${company}`);
+  console.log(`Firecrawl START ${company} timeout=${FC_TIMEOUT_MS}ms`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FC_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000); // 12s per company
-    let res: Response;
-    try {
-      res = await fetch("https://api.firecrawl.dev/v1/scrape", {
-        method: "POST",
-        headers: {"Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json"},
-        body: JSON.stringify({
-          url,
-          formats: ["extract"],
-          extract: {
-            schema: {
-              type: "object",
-              properties: {
-                jobs: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      title:          { type: "string" },
-                      location:       { type: "string" },
-                      url:            { type: "string" },
-                      postedDate:     { type: "string" },
-                      description:    { type: "string" },
-                      employmentType: { type: "string" },
-                    },
+    const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: {"Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json"},
+      body: JSON.stringify({
+        url,
+        formats: ["extract"],
+        extract: {
+          schema: {
+            type: "object",
+            properties: {
+              jobs: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    title:          { type: "string" },
+                    location:       { type: "string" },
+                    url:            { type: "string" },
+                    postedDate:     { type: "string" },
+                    description:    { type: "string" },
+                    employmentType: { type: "string" },
                   },
                 },
               },
             },
-            prompt: "Extract all software engineering job listings. For each: title, location, apply URL, posted date, brief description, employment type.",
           },
-        }),
-        signal: controller.signal,
-        cache: "no-store",
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+          prompt: "Extract all software engineering job listings. For each: title, location, apply URL, posted date, brief description, employment type.",
+        },
+      }),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    clearTimeout(timer);
 
     if (!res.ok) {
       console.error(`Firecrawl ${company} HTTP ${res.status}`);
       return {jobs:[], raw:0, error:`HTTP ${res.status}`};
     }
-
     const data = await res.json();
     const rawJobs = (data?.data?.extract?.jobs || data?.extract?.jobs || []) as Record<string,unknown>[];
     console.log(`Firecrawl ${company}: ${rawJobs.length} raw`);
@@ -601,11 +608,55 @@ async function fetchFirecrawlCompany(
     console.log(`Firecrawl ${company}: ${rawJobs.length} raw → ${jobs.length} kept`);
     return {jobs, raw:rawJobs.length, error:null};
   } catch(e:unknown) {
-    const isTimeout = e instanceof Error && e.name === "AbortError";
-    const msg = isTimeout ? "timeout (12s)" : String(e);
-    console.error(`Firecrawl ${company} ${msg}`);
+    clearTimeout(timer);
+    const isAbort = e instanceof Error && e.name === "AbortError";
+    const msg = isAbort ? `timeout (${FC_TIMEOUT_MS}ms)` : String(e);
+    console.error(`Firecrawl ${company} FAILED: ${msg}`);
     return {jobs:[], raw:0, error:msg};
   }
+}
+
+// Run a list of FirecrawlTargets with strict concurrency=2 (queue-based)
+// Returns results in input order; never runs more than FC_CONCURRENCY at once
+async function runFirecrawlBatch(
+  targets: FirecrawlTarget[],
+  expansion: ReturnType<typeof expandQuery>,
+  filter: JobFilter,
+  apiKey: string
+): Promise<Array<{jobs:Job[];raw:number;error:string|null}>> {
+  const results: Array<{jobs:Job[];raw:number;error:string|null}> = new Array(targets.length);
+  const names = targets.map(t => t.company);
+  console.log(`Firecrawl config: concurrency=${FC_CONCURRENCY} timeout=${FC_TIMEOUT_MS}ms companies=[${names.join(", ")}]`);
+
+  // Process in chunks of FC_CONCURRENCY, sequentially between chunks
+  for (let i = 0; i < targets.length; i += FC_CONCURRENCY) {
+    const chunk = targets.slice(i, i + FC_CONCURRENCY);
+    const chunkNames = chunk.map(t => t.company);
+    console.log(`Firecrawl batch start: [${chunkNames.join(", ")}]`);
+
+    const settled = await Promise.allSettled(
+      chunk.map(({company, careerUrl, fortuneRank}) =>
+        fetchFirecrawlCompany(company, careerUrl, fortuneRank, expansion, filter, apiKey)
+      )
+    );
+
+    settled.forEach((r, j) => {
+      const idx = i + j;
+      if (r.status === "fulfilled") {
+        results[idx] = r.value;
+      } else {
+        results[idx] = {jobs:[], raw:0, error:"promise rejected"};
+      }
+    });
+
+    const chunkSummary = settled.map((r, j) => {
+      const name = chunk[j].company;
+      const val = r.status === "fulfilled" ? r.value : {raw:0, jobs:[], error:"rejected"};
+      return `${name}: raw=${val.raw} kept=${val.jobs.length}${val.error ? ` err=${val.error}` : ""}`;
+    }).join(" | ");
+    console.log(`Firecrawl batch done: ${chunkSummary}`);
+  }
+  return results;
 }
 
 async function fetchFirecrawl(
@@ -615,13 +666,24 @@ async function fetchFirecrawl(
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"FIRECRAWL_API_KEY not set"}};
 
-  // Run all companies in parallel, each with its own 12s timeout
-  // Partial successes are always preserved — one failure never kills the batch
-  const settled = await Promise.allSettled(
-    FIRECRAWL_TARGETS.map(({company, careerUrl, fortuneRank}) =>
-      fetchFirecrawlCompany(company, careerUrl, fortuneRank, expansion, filter, apiKey)
-    )
-  );
+  // ── Tier A: always run first, concurrency=2 ───────────────────────────
+  const tierAResults = await runFirecrawlBatch(FC_TIER_A, expansion, filter, apiKey);
+  const tierAJobs = tierAResults.flatMap(r => r.jobs);
+  const tierAKept = tierAJobs.length;
+  console.log(`Firecrawl Tier A complete: ${tierAKept} kept`);
+
+  // ── Tier B: only if Tier A came back thin ─────────────────────────────
+  let tierBResults: Array<{jobs:Job[];raw:number;error:string|null}> = [];
+  if (tierAKept < FC_TIER_B_THRESHOLD) {
+    console.log(`Firecrawl Tier A thin (${tierAKept}<${FC_TIER_B_THRESHOLD}) — running Tier B`);
+    tierBResults = await runFirecrawlBatch(FC_TIER_B, expansion, filter, apiKey);
+  } else {
+    console.log(`Firecrawl Tier A sufficient (${tierAKept}>=${FC_TIER_B_THRESHOLD}) — skipping Tier B`);
+  }
+
+  // ── Collect results ───────────────────────────────────────────────────
+  const allResults = [...tierAResults, ...tierBResults];
+  const allTargets = [...FC_TIER_A, ...FC_TIER_B.slice(0, tierBResults.length)];
 
   const allJobs: Job[] = [];
   let totalFetched = 0;
@@ -629,35 +691,30 @@ async function fetchFirecrawl(
   let failCount = 0;
   const errors: string[] = [];
 
-  for (let i = 0; i < settled.length; i++) {
-    const r = settled[i];
-    const company = FIRECRAWL_TARGETS[i].company;
-    if (r.status === "fulfilled") {
-      allJobs.push(...r.value.jobs);
-      totalFetched += r.value.raw;
-      if (r.value.error) {
-        failCount++;
-        errors.push(`${company}: ${r.value.error}`);
-      } else {
-        successCount++;
-      }
-    } else {
+  for (let i = 0; i < allResults.length; i++) {
+    const r = allResults[i];
+    const company = allTargets[i].company;
+    allJobs.push(...r.jobs);
+    totalFetched += r.raw;
+    if (r.error) {
       failCount++;
-      errors.push(`${company}: promise rejected`);
+      errors.push(`${company}: ${r.error}`);
+    } else {
+      successCount++;
     }
   }
 
-  const total = FIRECRAWL_TARGETS.length;
+  const total = allResults.length;
   let overallStatus: SourceStatus["status"];
-  if (failCount === 0)          overallStatus = "healthy";
-  else if (successCount > 0)    overallStatus = "degraded"; // partial success
-  else                          overallStatus = "broken";   // all failed
+  if (failCount === 0)       overallStatus = "healthy";
+  else if (successCount > 0) overallStatus = "degraded";
+  else                       overallStatus = "broken";
 
   const errorSummary = failCount > 0
-    ? `${failCount}/${total} companies failed: ${errors.slice(0,3).join("; ")}`
+    ? `${failCount}/${total} failed: ${errors.slice(0,3).join("; ")}`
     : undefined;
 
-  console.log(`Firecrawl: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
+  console.log(`Firecrawl complete: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
   return {
     jobs: allJobs,
     status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary},
