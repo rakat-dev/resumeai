@@ -505,6 +505,109 @@ const FIRECRAWL_TARGETS: FirecrawlTarget[] = [
   { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
 ];
 
+// Per-company Firecrawl fetch with individual 12s timeout so one slow company
+// never kills the entire batch. Partial successes are always preserved.
+async function fetchFirecrawlCompany(
+  company: string, careerUrl: string, fortuneRank: number,
+  expansion: ReturnType<typeof expandQuery>, filter: JobFilter, apiKey: string
+): Promise<{jobs:Job[];raw:number;error:string|null}> {
+  const url = careerUrl.replace("{query}", encodeURIComponent(expansion.primary));
+  console.log(`Firecrawl START ${company}`);
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000); // 12s per company
+    let res: Response;
+    try {
+      res = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {"Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json"},
+        body: JSON.stringify({
+          url,
+          formats: ["extract"],
+          extract: {
+            schema: {
+              type: "object",
+              properties: {
+                jobs: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      title:          { type: "string" },
+                      location:       { type: "string" },
+                      url:            { type: "string" },
+                      postedDate:     { type: "string" },
+                      description:    { type: "string" },
+                      employmentType: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            prompt: "Extract all software engineering job listings. For each: title, location, apply URL, posted date, brief description, employment type.",
+          },
+        }),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      console.error(`Firecrawl ${company} HTTP ${res.status}`);
+      return {jobs:[], raw:0, error:`HTTP ${res.status}`};
+    }
+
+    const data = await res.json();
+    const rawJobs = (data?.data?.extract?.jobs || data?.extract?.jobs || []) as Record<string,unknown>[];
+    console.log(`Firecrawl ${company}: ${rawJobs.length} raw`);
+
+    const jobs: Job[] = [];
+    for (const j of rawJobs) {
+      const title = (j.title as string)||"";
+      const rawDesc = (j.description as string)||"";
+      const desc = cleanDescription(rawDesc).slice(0,800);
+      const location = (j.location as string)||"United States";
+      const type = (j.employmentType as string)||"Full-time";
+      const postedDateStr = (j.postedDate as string)||"";
+      let ts = 0;
+      if (postedDateStr) {
+        const parsed = new Date(postedDateStr);
+        if (!isNaN(parsed.getTime())) {
+          ts = Math.floor(parsed.getTime()/1000);
+        } else {
+          const dM = postedDateStr.match(/(\d+)\s+day/i);
+          const wM = postedDateStr.match(/(\d+)\s+week/i);
+          if (dM) ts = Math.floor(Date.now()/1000) - parseInt(dM[1])*86400;
+          else if (wM) ts = Math.floor(Date.now()/1000) - parseInt(wM[1])*604800;
+        }
+      }
+      if (!shouldKeepJob(title, desc, type, location, ts, filter)) continue;
+      jobs.push({
+        id:`fc-${company.toLowerCase().replace(/\s+/g,"-")}-${Math.random().toString(36).slice(2,8)}`,
+        title, company, location, type, description:desc,
+        applyUrl:(j.url as string)||url,
+        postedAt:postedDateStr,
+        postedDate:ts?formatPostedDate(ts):postedDateStr||"Recently",
+        postedTimestamp:ts, source:"Firecrawl", sourceType:"firecrawl",
+        skills:extractMissingSkills(rawDesc),
+        sponsorshipTag:detectSponsorship(rawDesc),
+        experience:extractExperience(rawDesc),
+        priorityTier:getPriorityTier(company),
+        fortuneRank,
+      });
+    }
+    console.log(`Firecrawl ${company}: ${rawJobs.length} raw → ${jobs.length} kept`);
+    return {jobs, raw:rawJobs.length, error:null};
+  } catch(e:unknown) {
+    const isTimeout = e instanceof Error && e.name === "AbortError";
+    const msg = isTimeout ? "timeout (12s)" : String(e);
+    console.error(`Firecrawl ${company} ${msg}`);
+    return {jobs:[], raw:0, error:msg};
+  }
+}
+
 async function fetchFirecrawl(
   expansion: ReturnType<typeof expandQuery>,
   filter: JobFilter
@@ -512,104 +615,53 @@ async function fetchFirecrawl(
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"FIRECRAWL_API_KEY not set"}};
 
-  const results: Job[] = [];
-  let totalFetched = 0;
-
-  await Promise.allSettled(
-    FIRECRAWL_TARGETS.map(async ({company, careerUrl, fortuneRank}) => {
-      try {
-        const url = careerUrl.replace("{query}", encodeURIComponent(expansion.primary));
-        const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url,
-            formats: ["extract"],
-            extract: {
-              schema: {
-                type: "object",
-                properties: {
-                  jobs: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        title:    { type: "string" },
-                        location: { type: "string" },
-                        url:      { type: "string" },
-                        postedDate: { type: "string" },
-                        description: { type: "string" },
-                        employmentType: { type: "string" },
-                      },
-                    },
-                  },
-                },
-              },
-              prompt: `Extract all software engineering job listings from this career page. For each job return: title, location, apply URL, posted date, brief description, employment type.`,
-            },
-          }),
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          console.error(`Firecrawl ${company} HTTP ${res.status}`);
-          return;
-        }
-
-        const data = await res.json();
-        const jobs = (data?.data?.extract?.jobs || data?.extract?.jobs || []) as Record<string,unknown>[];
-        totalFetched += jobs.length;
-        console.log(`Firecrawl ${company}: ${jobs.length} raw`);
-
-        for (const j of jobs) {
-          const title = (j.title as string)||"";
-          const rawDesc = (j.description as string)||"";
-          const desc = cleanDescription(rawDesc).slice(0,800);
-          const location = (j.location as string)||"United States";
-          const type = (j.employmentType as string)||"Full-time";
-          // Parse posted date — try ISO first, then relative strings
-          const postedDateStr = (j.postedDate as string)||"";
-          let ts = 0;
-          if (postedDateStr) {
-            const parsed = new Date(postedDateStr);
-            if (!isNaN(parsed.getTime())) {
-              ts = Math.floor(parsed.getTime()/1000);
-            } else {
-              // Relative: "2 days ago", "1 week ago"
-              const dM = postedDateStr.match(/(\d+)\s+day/i);
-              const wM = postedDateStr.match(/(\d+)\s+week/i);
-              if (dM) ts = Math.floor(Date.now()/1000) - parseInt(dM[1])*86400;
-              else if (wM) ts = Math.floor(Date.now()/1000) - parseInt(wM[1])*604800;
-            }
-          }
-          if (!shouldKeepJob(title, desc, type, location, ts, filter)) continue;
-          results.push({
-            id:`fc-${company.toLowerCase().replace(/\s+/g,"-")}-${Math.random().toString(36).slice(2,8)}`,
-            title, company, location, type,
-            description:desc,
-            applyUrl:(j.url as string)||careerUrl.replace("{query}",encodeURIComponent(expansion.primary)),
-            postedAt:postedDateStr,
-            postedDate:ts?formatPostedDate(ts):postedDateStr||"Recently",
-            postedTimestamp:ts,
-            source:"Firecrawl",
-            sourceType:"firecrawl",
-            skills:extractMissingSkills(rawDesc),
-            sponsorshipTag:detectSponsorship(rawDesc),
-            experience:extractExperience(rawDesc),
-            priorityTier:getPriorityTier(company),
-            fortuneRank,
-          });
-        }
-      } catch(e) {
-        console.error(`Firecrawl ${company} error: ${e}`);
-      }
-    })
+  // Run all companies in parallel, each with its own 12s timeout
+  // Partial successes are always preserved — one failure never kills the batch
+  const settled = await Promise.allSettled(
+    FIRECRAWL_TARGETS.map(({company, careerUrl, fortuneRank}) =>
+      fetchFirecrawlCompany(company, careerUrl, fortuneRank, expansion, filter, apiKey)
+    )
   );
 
-  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched:totalFetched,kept:results.length}};
+  const allJobs: Job[] = [];
+  let totalFetched = 0;
+  let successCount = 0;
+  let failCount = 0;
+  const errors: string[] = [];
+
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    const company = FIRECRAWL_TARGETS[i].company;
+    if (r.status === "fulfilled") {
+      allJobs.push(...r.value.jobs);
+      totalFetched += r.value.raw;
+      if (r.value.error) {
+        failCount++;
+        errors.push(`${company}: ${r.value.error}`);
+      } else {
+        successCount++;
+      }
+    } else {
+      failCount++;
+      errors.push(`${company}: promise rejected`);
+    }
+  }
+
+  const total = FIRECRAWL_TARGETS.length;
+  let overallStatus: SourceStatus["status"];
+  if (failCount === 0)          overallStatus = "healthy";
+  else if (successCount > 0)    overallStatus = "degraded"; // partial success
+  else                          overallStatus = "broken";   // all failed
+
+  const errorSummary = failCount > 0
+    ? `${failCount}/${total} companies failed: ${errors.slice(0,3).join("; ")}`
+    : undefined;
+
+  console.log(`Firecrawl: ${successCount}/${total} ok, ${totalFetched} raw, ${allJobs.length} kept`);
+  return {
+    jobs: allJobs,
+    status: {status:overallStatus, fetched:totalFetched, kept:allJobs.length, error:errorSummary},
+  };
 }
 
 // ── JSearch (fallback aggregator) ─────────────────────────────────────────
@@ -832,9 +884,22 @@ async function fetchJooble(
 // ── Shared result type ────────────────────────────────────────────────────
 type SourceResult = { jobs: Job[]; status: SourceStatus };
 
-// ── Main Handler ───────────────────────────────────────────────────────────
-const FALLBACK_THRESHOLD = 150; // call JSearch/Adzuna/Jooble if primary sources < this
+// ── Per-source caps: prevent any single source from monopolizing results ──
+const SOURCE_CAPS: Record<string, number> = {
+  greenhouse: 140,
+  workday:     60,
+  firecrawl:   80,
+  jsearch:     60,
+  adzuna:      30,
+  jooble:      20,
+};
 
+function applySourceCap(jobs: Job[], sourceType: string): Job[] {
+  const cap = SOURCE_CAPS[sourceType] ?? 50;
+  return jobs.slice(0, cap);
+}
+
+// ── Main Handler ───────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const {searchParams} = new URL(req.url);
   const query  = searchParams.get("q")||"";
@@ -846,44 +911,77 @@ export async function GET(req: NextRequest) {
   const expansion = expandQuery(query);
 
   try {
-    // ── Tier 1: Primary sources (always run) ─────────────────────────────
-    const [rGH, rWD, rFC] = await Promise.allSettled([
-      withTimeout(fetchGreenhouse(expansion, filter), 30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-      withTimeout(fetchWorkday(expansion, filter),    30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-      withTimeout(fetchFirecrawl(expansion, filter),  25000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+    // ── Tier 1: Primary sources (always run in parallel) ─────────────────
+    // Firecrawl runs per-company internally — no outer withTimeout needed
+    const [rGHp, rWDp, rFCp] = await Promise.allSettled([
+      withTimeout(fetchGreenhouse(expansion, filter), 32000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      withTimeout(fetchWorkday(expansion, filter),    32000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      fetchFirecrawl(expansion, filter), // no outer timeout — managed per-company internally
     ]);
 
     const getR = (r: PromiseSettledResult<SourceResult>): SourceResult =>
       r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"promise rejected"}};
 
-    const tier1 = [rGH, rWD, rFC].map(getR);
-    const tier1Jobs = tier1.flatMap(r=>r.jobs).filter(j=>j.title&&j.company);
-    const tier1Count = tier1Jobs.length;
+    const rGH = getR(rGHp);
+    const rWD = getR(rWDp);
+    const rFC = getR(rFCp);
 
-    console.log(`Tier 1 (GH+WD+FC): ${tier1Count} jobs`);
+    // Apply per-source caps before threshold calculations
+    const ghJobs = applySourceCap(rGH.jobs.filter(j=>j.title&&j.company), "greenhouse");
+    const wdJobs = applySourceCap(rWD.jobs.filter(j=>j.title&&j.company), "workday");
+    const fcJobs = applySourceCap(rFC.jobs.filter(j=>j.title&&j.company), "firecrawl");
 
-    // ── Tier 2: Fallback aggregators (only if below threshold) ───────────
-    let rJS: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
-    let rAZ: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
-    let rJB: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
+    const tier1Visible = ghJobs.length + wdJobs.length + fcJobs.length;
+    const ghShare = ghJobs.length / Math.max(tier1Visible, 1);
 
-    if (tier1Count < FALLBACK_THRESHOLD) {
-      console.log(`Tier 1 < ${FALLBACK_THRESHOLD} — calling fallback sources`);
-      const [rJSp, rAZp, rJBp] = await Promise.allSettled([
-        withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-        withTimeout(fetchAdzuna(query, filter),  15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-        withTimeout(fetchJooble(query, filter),  15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
-      ]);
-      rJS = getR(rJSp);
-      rAZ = getR(rAZp);
-      rJB = getR(rJBp);
+    console.log(`Tier 1: GH=${ghJobs.length}(share=${(ghShare*100).toFixed(0)}%) WD=${wdJobs.length} FC=${fcJobs.length} total=${tier1Visible}`);
+
+    // ── Tiered fallback logic — prevents Greenhouse from blocking JSearch ─
+    // Run JSearch if: not enough results OR Greenhouse is dominating (>70%)
+    const needsJSearch  = tier1Visible < 220 || ghShare > 0.7;
+    const needsAdzuna   = tier1Visible < 260;  // computed before JSearch runs (conservative)
+    const needsJooble   = tier1Visible < 300;
+
+    let rJS: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:`tier1=${tier1Visible}≥220 and ghShare=${(ghShare*100).toFixed(0)}%≤70%`}};
+    let rAZ: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:`tier1=${tier1Visible}≥260`}};
+    let rJB: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:`tier1=${tier1Visible}≥300`}};
+
+    // Run needed fallbacks in parallel
+    const fallbackPromises: Promise<void>[] = [];
+
+    if (needsJSearch) {
+      console.log(`Running JSearch (tier1=${tier1Visible}, ghShare=${(ghShare*100).toFixed(0)}%)`);
+      fallbackPromises.push(
+        withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
+          .then(r => { rJS = r; })
+      );
+    }
+    if (needsAdzuna) {
+      console.log(`Running Adzuna (tier1=${tier1Visible})`);
+      fallbackPromises.push(
+        withTimeout(fetchAdzuna(query, filter), 15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
+          .then(r => { rAZ = r; })
+      );
+    }
+    if (needsJooble) {
+      console.log(`Running Jooble (tier1=${tier1Visible})`);
+      fallbackPromises.push(
+        withTimeout(fetchJooble(query, filter), 15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult)
+          .then(r => { rJB = r; })
+      );
     }
 
-    // ── Combine all results ───────────────────────────────────────────────
-    const sourceKeys = ["greenhouse","workday","firecrawl","jsearch","adzuna","jooble"] as const;
-    const allResults = [tier1[0], tier1[1], tier1[2], rJS, rAZ, rJB];
+    if (fallbackPromises.length > 0) await Promise.allSettled(fallbackPromises);
 
-    const allJobs = allResults.flatMap(r=>r.jobs).filter(j=>j.title&&j.company);
+    const jsJobs = applySourceCap(rJS.jobs.filter(j=>j.title&&j.company), "jsearch");
+    const azJobs = applySourceCap(rAZ.jobs.filter(j=>j.title&&j.company), "adzuna");
+    const jbJobs = applySourceCap(rJB.jobs.filter(j=>j.title&&j.company), "jooble");
+
+    const totalVisible = tier1Visible + jsJobs.length + azJobs.length + jbJobs.length;
+    console.log(`All sources: JS=${jsJobs.length} AZ=${azJobs.length} JB=${jbJobs.length} total=${totalVisible}`);
+
+    // ── Combine, deduplicate, sort ────────────────────────────────────────
+    const allJobs = [...ghJobs, ...wdJobs, ...fcJobs, ...jsJobs, ...azJobs, ...jbJobs];
     const scored  = allJobs.map(j=>({...j, relevanceScore:computeRelevanceScore(j)}));
     const unique  = deduplicateJobs(scored);
     const capped  = applyPerCompanyCap(unique);
@@ -891,6 +989,9 @@ export async function GET(req: NextRequest) {
     const final   = sorted.slice(0, 500);
 
     // ── Diagnostics ───────────────────────────────────────────────────────
+    const sourceKeys = ["greenhouse","workday","firecrawl","jsearch","adzuna","jooble"] as const;
+    const allResults: SourceResult[] = [rGH, rWD, rFC, rJS, rAZ, rJB];
+
     const sourceStatus: Record<string,SourceStatus> = {};
     sourceKeys.forEach((k,i) => { sourceStatus[k] = allResults[i].status; });
 
@@ -905,16 +1006,17 @@ export async function GET(req: NextRequest) {
       const postFilterCount = sources[k];
       const called = st.status !== "skipped";
       let status: SourceDiagnostic["status"];
-      if (st.status==="skipped")      status="skipped";
+      if (st.status==="skipped")           status="skipped";
       else if (st.status==="rate_limited") status="rate_limited";
-      else if (st.error==="timeout")  status="timeout";
-      else if (rawCount>0)            status="success";
-      else if (st.status==="degraded") status="degraded";
-      else                            status="error";
+      else if (st.error==="timeout")       status="timeout";
+      else if (st.status==="healthy" && rawCount>0) status="success";
+      else if (st.status==="degraded" && rawCount>0) status="success"; // partial firecrawl
+      else if (st.status==="degraded")     status="degraded";
+      else                                 status="error";
       return {source:k, called, status, rawCount, postFilterCount, error:st.error||null};
     });
 
-    console.log(`Final: ${final.length} jobs | Diag: ${JSON.stringify(sourceDiagnostics.map(d=>({s:d.source,st:d.status,raw:d.rawCount,kept:d.postFilterCount})))}`);
+    console.log(`Final: ${final.length} | Diag: ${JSON.stringify(sourceDiagnostics.map(d=>({s:d.source,st:d.status,raw:d.rawCount,kept:d.postFilterCount})))}`);
 
     return NextResponse.json({
       jobs: final,
@@ -924,8 +1026,10 @@ export async function GET(req: NextRequest) {
       sourceDiagnostics,
       queryMode: expansion.mode,
       expandedTerms: expansion.terms.length,
-      tier1Count,
-      usedFallback: tier1Count < FALLBACK_THRESHOLD,
+      tier1Visible,
+      totalVisible,
+      ghShare: Math.round(ghShare * 100),
+      usedFallback: needsJSearch || needsAdzuna || needsJooble,
     });
 
   } catch(err:unknown) {
