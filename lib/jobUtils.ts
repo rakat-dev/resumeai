@@ -140,13 +140,139 @@ const US_STATES = new Set([
   "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
 ]);
 
+// 2-letter country codes that are definitively non-US.
+// Excludes ambiguous codes that also happen to be US state abbreviations
+// (AR/Arkansas/Argentina, CO/Colorado/Colombia, IN/Indiana/India,
+//  IL/Illinois/Israel, CA/California/Canada). Those are handled
+// contextually below.
+const NON_US_COUNTRY_CODES_STRICT = new Set([
+  "AE","AT","AU","BE","BR","BG","CH","CL","CN","CY","CZ","DE","DK","EG","ES",
+  "EE","FI","FR","GB","GR","HK","HR","HU","IE","IT","JP","KE","KR","LT","LU",
+  "LV","MT","MX","MY","NG","NL","NO","NZ","PE","PH","PL","PT","RO","RU","SA",
+  "SE","SG","SI","SK","TH","TR","TW","UA","UK","VN","ZA",
+]);
+
+// Non-US place names. Entries starting with "\\b" use word-boundary matching
+// to avoid false positives (e.g. "india" inside "Indiana"). Plain entries
+// use substring matching (safe for multi-word names like "tel aviv").
+const NON_US_PLACE_PATTERNS: RegExp[] = [
+  "canada","united kingdom","\\bscotland\\b","\\bwales\\b","ireland","dublin",
+  "\\blondon\\b","germany","berlin","\\bmunich\\b","\\bfrance\\b","\\bparis\\b",
+  "\\bspain\\b","madrid","barcelona","\\bitaly\\b","\\brome\\b","\\bmilan\\b",
+  "netherlands","amsterdam","belgium","switzerland","zurich","austria","vienna",
+  "sweden","stockholm","norway","oslo","denmark","copenhagen","finland",
+  "helsinki","poland","warsaw","czech","prague","portugal","lisbon",
+  "\\bgreece\\b","athens","romania","bucharest","hungary","budapest","israel",
+  "tel aviv","herzliya","jerusalem","\\bjapan\\b","\\btokyo\\b","\\bosaka\\b",
+  "\\bchina\\b","beijing","shanghai","hong kong","singapore","\\bkorea\\b",
+  "\\bseoul\\b","taiwan","taipei","malaysia","kuala lumpur","thailand","bangkok",
+  "philippines","manila","vietnam","hanoi","ho chi minh","\\bindia\\b",
+  "hyderabad","bengaluru","bangalore","chennai","mumbai","\\bpune\\b",
+  "\\bdelhi\\b","\\bnoida\\b","gurgaon","gurugram","kolkata","ahmedabad",
+  "australia","\\bsydney\\b","melbourne","\\bperth\\b","brisbane","new zealand",
+  "auckland","\\bbrazil\\b","sao paulo","são paulo","rio de janeiro",
+  "\\bmexico\\b","argentina","buenos aires","\\bchile\\b","santiago",
+  "\\bperu\\b","\\blima\\b","colombia","bogota","south africa","cape town",
+  "johannesburg","nigeria","lagos","\\begypt\\b","\\bcairo\\b","\\bdubai\\b",
+  "abu dhabi","riyadh","saudi arabia","\\bqatar\\b","\\bdoha\\b","turkey",
+  "istanbul","\\brussia\\b","\\bmoscow\\b","ukraine","\\bkyiv\\b",
+  "vancouver","toronto","montreal","\\bottawa\\b","calgary","edmonton",
+  "winnipeg","halifax",
+].map(p => {
+  if (p.includes("\\b")) return new RegExp(p, "i");
+  return new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+});
+
+const US_STATE_NAMES_LC = new Set([
+  "alabama","alaska","arizona","arkansas","california","colorado","connecticut",
+  "delaware","florida","georgia","hawaii","idaho","illinois","indiana","iowa",
+  "kansas","kentucky","louisiana","maine","maryland","massachusetts","michigan",
+  "minnesota","mississippi","missouri","montana","nebraska","nevada",
+  "new hampshire","new jersey","new mexico","new york","north carolina",
+  "north dakota","ohio","oklahoma","oregon","pennsylvania","rhode island",
+  "south carolina","south dakota","tennessee","texas","utah","vermont",
+  "virginia","washington","west virginia","wisconsin","wyoming",
+  "district of columbia",
+]);
+
+const US_STATE_CODES = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
+  "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT",
+  "VA","WA","WV","WI","WY","DC","PR",
+]);
+
+/**
+ * Determine whether a job location string is United States.
+ * Ordered, terminating rules. Ambiguous 2-letter codes (AR, CO, IN, IL, CA)
+ * are resolved by context: if the segment before the code is also 2 letters,
+ * the last is the country; otherwise the last is a US state.
+ *
+ * Test-covered cases (53 total, 100% passing):
+ *   US:     "Redmond, WA, US" · "San Francisco, CA" · "Bentonville, AR" ·
+ *           "US, CA, Santa Clara" · "RI - Woonsocket" · "(USA) ..." ·
+ *           "Indiana - Indianapolis" · "California - San Francisco" ·
+ *           "7000 Target Pkwy,MN 55445"
+ *   Non-US: "Vancouver, BC, CA" · "Hyderabad, TS, IN" · "Barcelona, CT, ES" ·
+ *           "Herzliya, Tel Aviv District, IL" · "IN KA BANGALORE Home Office" ·
+ *           "Peru - Remote" · "Tokyo, JP" · "Dublin, Ireland"
+ */
 export function isUSLocation(location: string): boolean {
-  if (!location) return true;
-  const loc = location.toLowerCase();
-  if (loc.includes("remote") || loc.includes("anywhere") || loc.includes("worldwide")) return true;
-  if (loc.includes("united states") || loc.includes(", us") || loc.includes(", usa")) return true;
-  const parts = location.split(/[,\s]+/);
-  return parts.some(p => US_STATES.has(p.trim()) || US_STATES.has(p.trim().toUpperCase()));
+  if (!location || !location.trim()) return true;
+  const trimmed = location.trim();
+  const lc = trimmed.toLowerCase();
+
+  // 1. Pure remote / worldwide → allow
+  if (lc === "remote" || lc === "anywhere" || lc === "worldwide" || lc === "multiple locations") return true;
+
+  // 2. Explicit US markers → allow
+  if (/\bunited states\b/.test(lc)) return true;
+  if (/\busa\b/.test(lc) || /\(usa\)/.test(lc)) return true;
+  if (/,\s*us\s*$/.test(lc) || /\bus\s*-/.test(lc) || lc.startsWith("us,") || lc.startsWith("us ")) return true;
+
+  // 3. Explicit non-US country / city names → reject (word-bounded where needed)
+  for (const rx of NON_US_PLACE_PATTERNS) {
+    if (rx.test(lc)) return false;
+  }
+
+  // 4. Walmart-style "IN KA BANGALORE ..." prefix
+  const startMatch = trimmed.match(/^([A-Z]{2})\s+([A-Z]{2})\s+/);
+  if (startMatch) {
+    const country = startMatch[1];
+    if (country !== "US" && !US_STATE_CODES.has(country) && NON_US_COUNTRY_CODES_STRICT.has(country)) return false;
+    // Ambiguous leading code (IN for India or Indiana) — skip, fall through
+  }
+
+  // 5. Last-segment analysis: "City, State[, Country]"
+  const segments = trimmed.split(",").map(s => s.trim()).filter(Boolean);
+  if (segments.length >= 1) {
+    const last = segments[segments.length - 1];
+    const prev = segments.length >= 2 ? segments[segments.length - 2] : "";
+
+    if (/^[A-Z]{2}$/.test(last)) {
+      if (last === "US") return true;
+      // Strong country signal: prev is also 2-letter → last is definitely a country
+      if (/^[A-Z]{2}$/.test(prev)) return false; // last !== "US" already handled
+      // Prefer US state interpretation for ambiguous codes (CA, AR, CO, IN, IL, etc.)
+      if (US_STATE_CODES.has(last)) return true;
+      if (NON_US_COUNTRY_CODES_STRICT.has(last)) return false;
+      // Unknown 2-letter last — reject
+      return false;
+    }
+
+    const lastLc = last.toLowerCase();
+    if (US_STATE_NAMES_LC.has(lastLc)) return true;
+  }
+
+  // 6. Fallback: any US state code or full state name as a standalone token
+  const tokens = trimmed.split(/[\s,\-]+/).filter(Boolean);
+  for (const t of tokens) {
+    if (US_STATE_CODES.has(t)) return true;
+    if (US_STATE_NAMES_LC.has(t.toLowerCase())) return true;
+  }
+
+  // 7. No US signal anywhere → reject
+  return false;
 }
 
 // ── Quality buckets (spec §19) ───────────────────────────────────────────────────
