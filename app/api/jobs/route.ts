@@ -185,7 +185,11 @@ export async function GET(req: NextRequest) {
       offset += PAGE_SIZE;
     }
 
-    console.log(`[/api/jobs] rows=${rows.length} filter=${filter} sort=${sort}`);
+    // Diagnostic: count adzuna rows + batch-2 companies to verify pagination landed
+    const adzCount = rows.filter(r => r.source === 'adzuna').length;
+    const batch2Companies = ['IBM', 'Cigna Group', 'The Cigna Group', 'UnitedHealth Group', 'ServiceNow', 'UPS', 'Snowflake', 'Visa', 'Mastercard', 'Accenture', 'Cognizant', 'Capgemini', 'Maximus'];
+    const batch2Count = rows.filter(r => batch2Companies.includes(r.company)).length;
+    console.log(`[/api/jobs] rows=${rows.length} adzuna=${adzCount} batch2=${batch2Count} filter=${filter} sort=${sort}`);
 
     // Map -> score -> sort -> diversity cap -> paginate
     const jobs      = rows.map(rowToJob);
