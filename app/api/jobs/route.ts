@@ -1196,7 +1196,7 @@ export async function GET(req: NextRequest) {
       withTimeout(fetchGoldmanSachs(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchMorganStanley(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchCisco(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchOracle(expansion), 10000,  // deprioritized — kept for shape discovery {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchOracle(expansion), 10000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}), // deprioritized — kept for shape discovery
       withTimeout(fetchRemotive(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchAdzuna(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchTheirStack(expansion, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
