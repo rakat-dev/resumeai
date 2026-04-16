@@ -132,7 +132,7 @@ function sortJobs(jobs: Job[], sort: SortOption): Job[] {
 function applyDiversityCaps(jobs: Job[]): Job[] {
   const sourceCounts  = new Map<string, number>();
   const companyCounts = new Map<string, number>();
-  const MAX_PER_SOURCE  = 500; // raised from 100: was hiding ~309 valid jobs (greenhouse 275→100, playwright 147→100)
+  const MAX_PER_SOURCE  = 1000; // raised from 500: priority-company fixes pushed greenhouse+workday past 500 each
   const MAX_PER_COMPANY = 60;  // raised from 30
   return jobs.filter(j => {
     const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
@@ -152,7 +152,7 @@ export async function GET(req: NextRequest) {
   const filter   = (searchParams.get("filter") as JobFilter) || "any";
   const sort     = (searchParams.get("sort")   as SortOption) || "company_desc";
   const page     = 1;
-  const pageSize = 2000; // return all, UI handles scrolling
+  const pageSize = 3000; // return all, UI handles scrolling (raised from 2000 to accommodate priority-company expansion)
 
   try {
     // Paginate past PostgREST's 1000-row default cap.
