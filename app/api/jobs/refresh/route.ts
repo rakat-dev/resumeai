@@ -394,7 +394,7 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
           "Accept-Language": "en-US",
           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         },
-        body: JSON.stringify({ appliedFacets: {}, limit: WD_PAGE_SIZE, offset: page * WD_PAGE_SIZE, searchText: "software engineer" }),
+        body: JSON.stringify({ appliedFacets: {}, limit: WD_PAGE_SIZE, offset: page * WD_PAGE_SIZE, searchText: "" }),
         signal: AbortSignal.timeout(12_000),
       });
       if (!res.ok) break;
