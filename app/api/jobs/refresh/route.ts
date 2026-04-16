@@ -3,10 +3,13 @@ import { persistState, persistRun } from "@/app/api/jobs/refresh-store";
 import type { RefreshState, RefreshSource } from "@/app/api/jobs/types";
 import { supabaseAdmin } from "@/lib/supabase";
 import {
-  cleanDescription, formatPostedDate, extractMissingSkills,
-  detectSponsorship, extractExperience, isUSLocation,
-  getFortuneTier, getPriorityTier,
+  cleanDescription, detectSponsorship, isUSLocation,
 } from "@/lib/jobUtils";
+import {
+  fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
+  fetchMetaJobs, fetchAmazonJobs, fetchJPMJobs,
+  type ScrapedJob,
+} from "@/lib/playwrightScrapers";
 
 export const maxDuration = 60;
 
@@ -664,6 +667,86 @@ async function fetchJoobleSource(): Promise<{
   return { raw: results, fetched: totalFetched, error: null };
 }
 
+// ── 1f. fetchPlaywrightTierA ─────────────────────────────────────────────
+// Spec §7: One broad scrape per company, filter locally.
+// Spec §18: playwright total cap = 1500
+// Runs all 6 Tier A companies in parallel, aggregates results.
+
+const TIER_A_COMPANIES: Array<{
+  name: string;
+  source: RefreshSource;
+  fetcher: () => Promise<ScrapedJob[]>;
+}> = [
+  { name: "Microsoft",     source: "playwright_microsoft", fetcher: fetchMicrosoftJobs },
+  { name: "Google",        source: "playwright_google",    fetcher: fetchGoogleJobs    },
+  { name: "Apple",         source: "playwright_apple",     fetcher: fetchAppleJobs     },
+  { name: "Meta",          source: "playwright_meta",      fetcher: fetchMetaJobs      },
+  { name: "Amazon",        source: "playwright_amazon",    fetcher: fetchAmazonJobs    },
+  { name: "JPMorgan Chase",source: "playwright_jpmorgan",  fetcher: fetchJPMJobs       },
+];
+
+async function fetchPlaywrightTierA(): Promise<{
+  raw: RawJob[]; fetched: number; error: string | null;
+  companyResults: Record<string, { raw: number; kept: number; error: string | null }>;
+}> {
+  const allRaw: RawJob[] = [];
+  const companyResults: Record<string, { raw: number; kept: number; error: string | null }> = {};
+
+  // Run all Tier A companies in parallel
+  const settled = await Promise.allSettled(
+    TIER_A_COMPANIES.map(async ({ name, source, fetcher }) => {
+      const companyStart = Date.now();
+      persistState({
+        company: name, source, status: "running",
+        started_at: companyStart, finished_at: null, duration_ms: null,
+        raw_count: null, kept_count: null, error_message: null,
+        last_success_at: null, last_attempt_at: companyStart,
+      });
+      try {
+        const scraped = await fetcher();
+        const raw: RawJob[] = scraped.map(s => ({
+          id:          s.id,
+          source:      source as RefreshSource,
+          company:     s.company,
+          title:       s.title,
+          location:    s.location,
+          description: s.description,
+          applyUrl:    s.applyUrl,
+          postedAt:    s.postedAt,
+          type:        s.type,
+        }));
+        persistState({
+          company: name, source, status: "success",
+          started_at: companyStart, finished_at: Date.now(),
+          duration_ms: Date.now() - companyStart,
+          raw_count: raw.length, kept_count: raw.length, error_message: null,
+          last_success_at: Date.now(), last_attempt_at: companyStart,
+        });
+        companyResults[name] = { raw: raw.length, kept: raw.length, error: null };
+        return raw;
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        persistState({
+          company: name, source, status: "failed",
+          started_at: companyStart, finished_at: Date.now(),
+          duration_ms: Date.now() - companyStart,
+          raw_count: 0, kept_count: 0, error_message: msg,
+          last_success_at: null, last_attempt_at: companyStart,
+        });
+        companyResults[name] = { raw: 0, kept: 0, error: msg };
+        return [] as RawJob[];
+      }
+    })
+  );
+
+  settled.forEach(r => {
+    if (r.status === "fulfilled") allRaw.push(...r.value);
+  });
+
+  console.log(`[playwright] TierA total raw: ${allRaw.length}`);
+  return { raw: allRaw, fetched: allRaw.length, error: null, companyResults };
+}
+
 // ── Route handler ─────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
@@ -680,6 +763,7 @@ export async function POST(req: NextRequest) {
   const runJSearch    = sourceFilter === "all" || sourceFilter === "jsearch";
   const runAdzuna     = sourceFilter === "all" || sourceFilter === "adzuna";
   const runJooble     = sourceFilter === "all" || sourceFilter === "jooble";
+  const runPlaywright = sourceFilter === "all" || sourceFilter === "playwright";
 
   const tasks: Promise<void>[] = [];
 
@@ -720,6 +804,29 @@ export async function POST(req: NextRequest) {
       ingestSource("jooble", fetchJoobleSource, "jooble").then(r => {
         results.jooble = r;
       })
+    );
+  }
+
+  if (runPlaywright) {
+    tasks.push(
+      (async () => {
+        const startedAt = markRunning("playwright_tier_a", "playwright_microsoft");
+        try {
+          const { raw, fetched, companyResults } = await fetchPlaywrightTierA();
+          const normalized = normalizeJobs(raw);
+          const filtered   = filterJobs(normalized);
+          const deduped    = dedupeJobs(filtered);
+          const capped     = applySourceCap(deduped, "playwright");
+          const { stored, error: storeError } = await storeJobs(capped);
+          markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeError);
+          console.log(`[refresh] playwright: fetched=${fetched} filtered=${filtered.length} stored=${stored}`);
+          results.playwright = { raw: fetched, kept: capped.length, stored, error: storeError, companies: companyResults };
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          markDone("playwright_tier_a", "playwright_microsoft", startedAt, 0, 0, msg);
+          results.playwright = { raw: 0, kept: 0, stored: 0, error: msg };
+        }
+      })()
     );
   }
 
