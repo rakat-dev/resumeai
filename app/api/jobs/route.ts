@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   REFRESH_STATE, REFRESH_HISTORY, REFRESH_HISTORY_MAX,
+  FC_COMPANY_CACHE_STORE, setCompanyCache, getCompanyCache,
   type RefreshStatus, type RefreshState, type RefreshRun,
 } from "@/app/api/jobs/refresh-store";
 import {
@@ -594,8 +595,8 @@ function markRefreshDone(
 // and a background refresh fires after the response is sent to the client.
 // This means Google / Meta / IBM etc. always appear from cache, never stale forever.
 
-interface FcCompanyCache { jobs: Job[]; raw: number; ts: number; filter: JobFilter; }
-const FC_COMPANY_CACHE = new Map<string, FcCompanyCache>();
+// FC_COMPANY_CACHE is now FC_COMPANY_CACHE_STORE from refresh-store.ts
+// so the cron refresh endpoint and live search share the exact same Map.
 const FC_TIER_A_TTL = 10 * 60 * 1000;  // 10 min — live companies refresh often
 const FC_TIER_B_TTL = 30 * 60 * 1000;  // 30 min — background companies refresh less
 
@@ -618,7 +619,6 @@ const FC_TIER_B: FirecrawlTarget[] = [
   { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
 ];
 
-// FC_CACHE removed — replaced by FC_COMPANY_CACHE + refresh-store
 
 // Single-company fetch — 25s AbortController timeout, no outer Promise.all
 async function fetchFirecrawlCompany(
@@ -778,7 +778,7 @@ async function refreshFirecrawlCompanyCache(
     target.company, target.careerUrl, target.fortuneRank,
     expansion, filter, apiKey, "firecrawl_tier_b"
   );
-  FC_COMPANY_CACHE.set(ck, {
+  setCompanyCache(ck, {
     jobs: result.jobs, raw: result.raw, ts: Date.now(), filter,
   });
   console.log(`FC background cache updated: ${target.company} → ${result.jobs.length} jobs`);
@@ -802,7 +802,7 @@ async function fetchFirecrawl(
 
   for (const target of FC_TIER_A) {
     const ck = `${target.company}:${expansion.primary}:${filter}`;
-    const cached = FC_COMPANY_CACHE.get(ck);
+    const cached = getCompanyCache(ck);
     if (cached && now - cached.ts < FC_TIER_A_TTL) {
       console.log(`FC Tier A cache hit: ${target.company} (${cached.jobs.length} jobs)`);
       tierACached.push(...cached.jobs);
@@ -820,7 +820,7 @@ async function fetchFirecrawl(
     results.forEach((r, i) => {
       const target = tierAToScrape[i];
       const ck = `${target.company}:${expansion.primary}:${filter}`;
-      FC_COMPANY_CACHE.set(ck, {jobs:r.jobs, raw:r.raw, ts:Date.now(), filter});
+      setCompanyCache(ck, {jobs:r.jobs, raw:r.raw, ts:Date.now(), filter});
       tierAScrapedJobs.push(...r.jobs);
     });
   }
@@ -837,7 +837,7 @@ async function fetchFirecrawl(
 
   for (const target of FC_TIER_B) {
     const ck = `${target.company}:${expansion.primary}:${filter}`;
-    const cached = FC_COMPANY_CACHE.get(ck);
+    const cached = getCompanyCache(ck);
     if (cached && (Date.now() - cached.ts) < FC_TIER_B_TTL) {
       console.log(`FC Tier B cache hit: ${target.company} (${cached.jobs.length} jobs)`);
       tierBJobs.push(...cached.jobs);
