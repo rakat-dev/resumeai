@@ -168,6 +168,18 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
     byCompany.get(c)!.push(j);
   }
 
+  // Inside every group, cards are sorted by date posted (newest first).
+  // Group ORDER itself is unchanged — it reflects the outer sort
+  // (Fortune rank asc for Top Companies).
+  const byDateDesc = (a: Job, b: Job) => {
+    const at = (a as Job & {postedTimestamp?: number}).postedTimestamp ?? 0;
+    const bt = (b as Job & {postedTimestamp?: number}).postedTimestamp ?? 0;
+    return bt - at;
+  };
+  for (const c of orderedCompanies) {
+    byCompany.get(c)!.sort(byDateDesc);
+  }
+
   const top = orderedCompanies.slice(0, TOP_COMPANY_GROUP_LIMIT);
   const rest = orderedCompanies.slice(TOP_COMPANY_GROUP_LIMIT);
 
@@ -188,6 +200,9 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
     }
     // Sort summary by count desc so heaviest remaining companies sit on top
     summary.sort((a, b) => b.count - a.count);
+    // Remaining group is one combined card list — sort those by date too,
+    // so the newest jobs across all remaining companies surface first.
+    restJobs.sort(byDateDesc);
     view.push({
       type: "remaining_group",
       title: "Remaining Jobs",
