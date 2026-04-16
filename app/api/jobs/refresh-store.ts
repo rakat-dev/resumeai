@@ -1,74 +1,53 @@
 // ── Firecrawl refresh state store ────────────────────────────────────────
-// Shared module — route.ts, refresh/route.ts, and refresh-status/route.ts
-// all import from here. Because Next.js compiles all /api/jobs/** routes into
-// the same serverless function bundle, they share the same module instance
-// and therefore the same Map references at runtime.
+// In-memory Maps for same-instance fast path +
+// Upstash Redis for cross-instance persistence.
+//
+// The Maps stay as a fast local cache — reads check memory first.
+// All writes go to both memory AND Redis (fire-and-forget, non-blocking).
 
-export type RefreshStatus =
-  | "never_run"       // no attempt yet this instance lifetime
-  | "queued"          // scheduled, not yet started
-  | "running"         // currently in-flight
-  | "success"         // raw > 0 and kept > 0
-  | "partial_success" // raw > 0 but kept == 0 (all filtered out)
-  | "failed"          // HTTP error or network failure
-  | "timeout"         // aborted by AbortController
-  | "skipped";        // FIRECRAWL_API_KEY not set
+export type { RefreshStatus, RefreshState, RefreshRun } from "./types";
+import type { RefreshState, RefreshRun } from "./types";
+import { saveRefreshState, appendRefreshRun } from "@/lib/redis";
 
-export interface RefreshState {
-  company:         string;
-  source:          "firecrawl_tier_a" | "firecrawl_tier_b";
-  status:          RefreshStatus;
-  query:           string;
-  filter:          string;
-  started_at:      number | null;   // ms epoch
-  finished_at:     number | null;
-  duration_ms:     number | null;
-  raw_count:       number | null;
-  kept_count:      number | null;
-  error_message:   string | null;
-  last_success_at: number | null;
-  last_attempt_at: number | null;
-}
-
-export interface RefreshRun {
-  run_id:        string;
-  company:       string;
-  source:        "firecrawl_tier_a" | "firecrawl_tier_b";
-  status:        RefreshStatus;
-  query:         string;
-  filter:        string;
-  started_at:    number;
-  finished_at:   number | null;
-  duration_ms:   number | null;
-  raw_count:     number | null;
-  kept_count:    number | null;
-  error_message: string | null;
-}
-
-// ── Shared Maps ────────────────────────────────────────────────────────────
-// Single source of truth for all refresh state, shared across all imports.
+// ── In-memory Maps (fast path, same serverless instance) ─────────────────
 export const REFRESH_STATE   = new Map<string, RefreshState>();
 export const REFRESH_HISTORY: RefreshRun[] = [];
 export const REFRESH_HISTORY_MAX = 200;
 
-// ── Shared Firecrawl company job cache ────────────────────────────────────
-// Keyed by `company:query:filter`.
-// route.ts reads from this; refresh/route.ts writes to it via setCompanyCache.
+// ── Firecrawl job cache ───────────────────────────────────────────────────
 export interface FcCacheEntry {
   jobs:   unknown[];
   raw:    number;
   ts:     number;
   filter: string;
 }
-
 export const FC_COMPANY_CACHE_STORE = new Map<string, FcCacheEntry>();
 
-/** Called by the cron refresh endpoint to warm the cache for live searches. */
 export function setCompanyCache(key: string, entry: FcCacheEntry): void {
   FC_COMPANY_CACHE_STORE.set(key, entry);
 }
-
-/** Called by route.ts to read the cache (replaces its local FC_COMPANY_CACHE). */
 export function getCompanyCache(key: string): FcCacheEntry | undefined {
   return FC_COMPANY_CACHE_STORE.get(key);
+}
+
+// ── Persistent write helpers ──────────────────────────────────────────────
+// Called by route.ts and refresh/route.ts after every state transition.
+// Redis write is fire-and-forget (no await at call site) — never blocks response.
+
+export function persistState(state: RefreshState): void {
+  REFRESH_STATE.set(state.company, state);
+  // Non-blocking Redis write
+  saveRefreshState(state).catch(e =>
+    console.error(`[store] persistState Redis write failed (${state.company}):`, e)
+  );
+}
+
+export function persistRun(run: RefreshRun): void {
+  REFRESH_HISTORY.push(run);
+  if (REFRESH_HISTORY.length > REFRESH_HISTORY_MAX) {
+    REFRESH_HISTORY.splice(0, REFRESH_HISTORY.length - REFRESH_HISTORY_MAX);
+  }
+  appendRefreshRun(run).catch(e =>
+    console.error(`[store] persistRun Redis write failed (${run.company}):`, e)
+  );
 }

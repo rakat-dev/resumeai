@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import {
-  REFRESH_STATE, REFRESH_HISTORY,
-  type RefreshState, type RefreshRun,
-} from "@/app/api/jobs/refresh-store";
+import { getAllRefreshStates, getRefreshHistory, isRedisConfigured } from "@/lib/redis";
+import { REFRESH_STATE, REFRESH_HISTORY } from "@/app/api/jobs/refresh-store";
+import type { RefreshState, RefreshRun } from "@/app/api/jobs/types";
 
 // ── GET /api/jobs/refresh-status ──────────────────────────────────────────
-// Returns current per-company Firecrawl refresh state + recent run history.
-// Both Maps live in refresh-store.ts, shared with route.ts in the same bundle.
+// Reads from Redis (persistent, cross-instance) when configured.
+// Falls back to in-memory Maps when Redis is not yet set up.
 // ─────────────────────────────────────────────────────────────────────────
 
 function ago(ms: number | null): string {
@@ -35,7 +34,31 @@ function statusEmoji(status: RefreshState["status"]): string {
 }
 
 export async function GET() {
-  const states = Array.from(REFRESH_STATE.values()) as RefreshState[];
+  // Prefer Redis; fall back to in-memory if not configured
+  let states: RefreshState[];
+  let history: RefreshRun[];
+  let source: "redis" | "memory";
+
+  if (isRedisConfigured()) {
+    [states, history] = await Promise.all([
+      getAllRefreshStates(),
+      getRefreshHistory(50),
+    ]);
+    source = "redis";
+    // Merge in any in-memory entries that might be newer (running state)
+    const redisCompanies = new Set(states.map(s => s.company));
+    for (const [company, state] of REFRESH_STATE.entries()) {
+      if (!redisCompanies.has(company) || state.status === "running") {
+        const existing = states.findIndex(s => s.company === company);
+        if (existing >= 0) states[existing] = state;
+        else states.push(state);
+      }
+    }
+  } else {
+    states = Array.from(REFRESH_STATE.values()) as RefreshState[];
+    history = [...(REFRESH_HISTORY as RefreshRun[])].slice(-50).reverse();
+    source = "memory";
+  }
 
   // Sort: running first → queued → by last_attempt desc
   states.sort((a, b) => {
@@ -71,39 +94,36 @@ export async function GET() {
     error_message:      s.error_message,
     last_success_at:    s.last_success_at,
     last_attempt_at:    s.last_attempt_at,
-    // Human-readable relative times
     started_at_ago:     ago(s.started_at),
     finished_at_ago:    ago(s.finished_at),
     last_success_ago:   ago(s.last_success_at),
     last_attempt_ago:   ago(s.last_attempt_at),
   }));
 
-  // Last 50 history entries, newest first
-  const history = [...(REFRESH_HISTORY as RefreshRun[])]
-    .slice(-50)
-    .reverse()
-    .map(r => ({
-      emoji:           statusEmoji(r.status),
-      run_id:          r.run_id,
-      company:         r.company,
-      source:          r.source,
-      status:          r.status,
-      query:           r.query,
-      filter:          r.filter,
-      started_at:      r.started_at,
-      finished_at:     r.finished_at,
-      duration_ms:     r.duration_ms,
-      raw_count:       r.raw_count,
-      kept_count:      r.kept_count,
-      error_message:   r.error_message,
-      started_at_ago:  ago(r.started_at),
-      finished_at_ago: ago(r.finished_at),
-    }));
+  const recentHistory = history.map(r => ({
+    emoji:           statusEmoji(r.status),
+    run_id:          r.run_id,
+    company:         r.company,
+    source:          r.source,
+    status:          r.status,
+    query:           r.query,
+    filter:          r.filter,
+    started_at:      r.started_at,
+    finished_at:     r.finished_at,
+    duration_ms:     r.duration_ms,
+    raw_count:       r.raw_count,
+    kept_count:      r.kept_count,
+    error_message:   r.error_message,
+    started_at_ago:  ago(r.started_at),
+    finished_at_ago: ago(r.finished_at ?? null),
+  }));
 
   return NextResponse.json({
     as_of:          new Date().toISOString(),
+    storage:        source,
+    redis_enabled:  isRedisConfigured(),
     summary,
     companies,
-    recent_history: history,
+    recent_history: recentHistory,
   });
 }

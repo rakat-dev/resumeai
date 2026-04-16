@@ -1,76 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { expandQuery } from "@/lib/queryExpansion";
 import {
-  REFRESH_STATE, REFRESH_HISTORY, REFRESH_HISTORY_MAX,
+  REFRESH_STATE,
+  setCompanyCache,
+  persistState, persistRun,
   type RefreshState,
 } from "@/app/api/jobs/refresh-store";
 
 // ── /api/jobs/refresh ─────────────────────────────────────────────────────
-// Called by Vercel Cron every 15 minutes.
-// Scrapes all Tier B Firecrawl companies for a standard query set and
-// populates FC_COMPANY_CACHE + REFRESH_STATE so live searches find warm data.
-//
-// Also callable manually:
-//   GET  /api/jobs/refresh            → refresh all Tier B companies
-//   GET  /api/jobs/refresh?company=Google  → refresh one specific company
-//   GET  /api/jobs/refresh?tier=a     → refresh Tier A instead
-// ─────────────────────────────────────────────────────────────────────────
+export const maxDuration = 60; // Hobby plan: 60s max
 
-export const maxDuration = 300; // Vercel Pro allows 5 min for cron routes
+const CRON_QUERIES = ["software engineer", "full stack engineer", "backend engineer"];
+const CRON_FILTER  = "any";
+const FC_TIMEOUT_MS = 25000;
 
-// Standard query set used by the cron refresh.
-// Covers the most common searches Rahul makes.
-const CRON_QUERIES = [
-  "software engineer",
-  "full stack engineer",
-  "backend engineer",
-];
-
-const CRON_FILTER = "any"; // refresh "any" date filter — most inclusive
-
-// ── Inline copies of Firecrawl structures (avoid circular imports) ─────────
-// We duplicate just what we need here rather than importing from route.ts,
-// which would pull in the entire pipeline and risk circular dependency issues.
-
-interface FirecrawlTarget {
-  company: string;
-  careerUrl: string;
-  fortuneRank: number;
-}
+interface FirecrawlTarget { company: string; careerUrl: string; fortuneRank: number; }
 
 const FC_TIER_A: FirecrawlTarget[] = [
-  { company: "Microsoft",     careerUrl: "https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank: 5  },
-  { company: "Apple",         careerUrl: "https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank: 3  },
-  { company: "JPMorgan Chase",careerUrl: "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank: 12 },
+  { company:"Microsoft",     careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States", fortuneRank:5  },
+  { company:"Apple",         careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",    fortuneRank:3  },
+  { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
 ];
-
 const FC_TIER_B: FirecrawlTarget[] = [
-  { company: "Google",         careerUrl: "https://careers.google.com/jobs/results/?q={query}&location=United%20States",                 fortuneRank: 35 },
-  { company: "Meta",           careerUrl: "https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                        fortuneRank: 14 },
-  { company: "IBM",            careerUrl: "https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",            fortuneRank: 22 },
-  { company: "Oracle",         careerUrl: "https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",   fortuneRank: 25 },
-  { company: "Cisco",          careerUrl: "https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank: 24 },
-  { company: "Salesforce",     careerUrl: "https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                 fortuneRank: 26 },
-  { company: "Goldman Sachs",  careerUrl: "https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank: 53 },
-  { company: "Morgan Stanley", careerUrl: "https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank: 21 },
+  { company:"Google",        careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                 fortuneRank:35 },
+  { company:"Meta",          careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                        fortuneRank:14 },
+  { company:"IBM",           careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",            fortuneRank:22 },
+  { company:"Oracle",        careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",   fortuneRank:25 },
+  { company:"Cisco",         careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
+  { company:"Salesforce",    careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                 fortuneRank:26 },
+  { company:"Goldman Sachs", careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
+  { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
 ];
-
-const FC_TIMEOUT_MS = 25000; // 25s per company
-
-// ── Shared company cache (same reference as route.ts uses) ────────────────
-// Imported via refresh-store is not enough — we need the actual cache Map.
-// We re-declare it as a module-level singleton here. Because Next.js bundles
-// both this file and route.ts into the same serverless function for the
-// /api/jobs/** route group, they share the same module instance.
-// If they end up in different functions (unlikely), the cron still works —
-// it just warms its own instance's cache, which serves the next request.
-interface FcCompanyCacheEntry { jobs: unknown[]; raw: number; ts: number; filter: string; }
-// We import the real cache from route.ts indirectly through a shared key:
-// store results in REFRESH_STATE (which IS the shared Map from refresh-store),
-// and route.ts reads FC_COMPANY_CACHE. To bridge this, we write to both.
-// The FC_COMPANY_CACHE is declared in route.ts — we can't import it directly
-// without a circular dep. Instead we expose a setter via refresh-store.
-import { setCompanyCache } from "@/app/api/jobs/refresh-store";
 
 // ── Per-company scraper ────────────────────────────────────────────────────
 async function scrapeCompany(
@@ -86,7 +46,8 @@ async function scrapeCompany(
   // Mark running in shared state
   const startedAt = Date.now();
   const existing = REFRESH_STATE.get(target.company);
-  REFRESH_STATE.set(target.company, {
+  // Persist running state to Redis + memory
+  const runningState: RefreshState = {
     company:         target.company,
     source,
     status:          "running",
@@ -100,7 +61,8 @@ async function scrapeCompany(
     error_message:   null,
     last_success_at: existing?.last_success_at ?? null,
     last_attempt_at: startedAt,
-  });
+  };
+  persistState(runningState);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FC_TIMEOUT_MS);
@@ -192,7 +154,7 @@ function updateState(
     raw > 0              ? "partial_success" : "failed";
 
   const prev = REFRESH_STATE.get(company);
-  REFRESH_STATE.set(company, {
+  const state: RefreshState = {
     company, source, status, query, filter,
     started_at:      startedAt,
     finished_at:     finishedAt,
@@ -202,10 +164,10 @@ function updateState(
     error_message:   error,
     last_success_at: (status === "success" || status === "partial_success") ? finishedAt : (prev?.last_success_at ?? null),
     last_attempt_at: startedAt,
-  });
+  };
+  persistState(state);
 
-  // Append to history
-  REFRESH_HISTORY.push({
+  persistRun({
     run_id:        `${company}-${startedAt}`,
     company, source, status, query, filter,
     started_at:    startedAt,
@@ -215,9 +177,6 @@ function updateState(
     kept_count:    kept,
     error_message: error,
   });
-  if (REFRESH_HISTORY.length > REFRESH_HISTORY_MAX) {
-    REFRESH_HISTORY.splice(0, REFRESH_HISTORY.length - REFRESH_HISTORY_MAX);
-  }
 }
 
 // ── Route handler ──────────────────────────────────────────────────────────
@@ -262,7 +221,7 @@ export async function GET(req: NextRequest) {
       const exp = expandQuery(q);
       const prev = REFRESH_STATE.get(t.company);
       if (!prev || prev.status !== "running") {
-        REFRESH_STATE.set(t.company, {
+        persistState({
           company:         t.company,
           source,
           status:          "queued",

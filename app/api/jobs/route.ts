@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  REFRESH_STATE, REFRESH_HISTORY, REFRESH_HISTORY_MAX,
+  REFRESH_STATE,
   FC_COMPANY_CACHE_STORE, setCompanyCache, getCompanyCache,
+  persistState, persistRun,
   type RefreshStatus, type RefreshState, type RefreshRun,
 } from "@/app/api/jobs/refresh-store";
 import {
@@ -526,7 +527,7 @@ function markRefreshQueued(company: string, source: RefreshState["source"], quer
   state.query = query;
   state.filter = filter;
   state.error_message = null;
-  REFRESH_STATE.set(company, state);
+  persistState(state);
 }
 
 function markRefreshRunning(company: string, source: RefreshState["source"], query: string, filter: string): number {
@@ -542,7 +543,7 @@ function markRefreshRunning(company: string, source: RefreshState["source"], que
   state.kept_count = null;
   state.error_message = null;
   state.last_attempt_at = startedAt;
-  REFRESH_STATE.set(company, state);
+  persistState(state);
   return startedAt;
 }
 
@@ -570,9 +571,10 @@ function markRefreshDone(
   if (status === "success" || status === "partial_success") {
     state.last_success_at = finishedAt;
   }
-  REFRESH_STATE.set(company, state);
+  // Persist to both in-memory Map and Redis
+  persistState(state);
 
-  // Append to history
+  // Append run to history (in-memory + Redis)
   const run: RefreshRun = {
     run_id: `${company}-${startedAt}`,
     company, source, status, query, filter,
@@ -580,10 +582,7 @@ function markRefreshDone(
     duration_ms: durationMs, raw_count: raw, kept_count: kept,
     error_message: error,
   };
-  REFRESH_HISTORY.push(run);
-  if (REFRESH_HISTORY.length > REFRESH_HISTORY_MAX) {
-    REFRESH_HISTORY.splice(0, REFRESH_HISTORY.length - REFRESH_HISTORY_MAX);
-  }
+  persistRun(run);
 
   console.log(`FC refresh done: ${company} → ${status} (${durationMs}ms, raw=${raw}, kept=${kept})${error ? ` error=${error}` : ""}`);
 }
@@ -805,8 +804,7 @@ async function fetchFirecrawl(
     const cached = getCompanyCache(ck);
     if (cached && now - cached.ts < FC_TIER_A_TTL) {
       console.log(`FC Tier A cache hit: ${target.company} (${cached.jobs.length} jobs)`);
-      tierACached.push(...cached.jobs);
-    } else {
+      tierACached.push(...(cached.jobs as Job[]));
       tierAToScrape.push(target);
     }
   }
@@ -840,8 +838,7 @@ async function fetchFirecrawl(
     const cached = getCompanyCache(ck);
     if (cached && (Date.now() - cached.ts) < FC_TIER_B_TTL) {
       console.log(`FC Tier B cache hit: ${target.company} (${cached.jobs.length} jobs)`);
-      tierBJobs.push(...cached.jobs);
-    } else {
+      tierBJobs.push(...(cached.jobs as Job[]));
       console.log(`FC Tier B cache miss/stale: ${target.company} — queued for background refresh`);
       tierBStale.push(target);
     }
