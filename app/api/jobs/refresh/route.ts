@@ -483,10 +483,191 @@ async function deactivateStaleJobs(): Promise<void> {
   if (error) console.error("[refresh] deactivateStaleJobs error:", error.message);
 }
 
+// ── 1c. fetchJSearchSource ───────────────────────────────────────────────
+// Spec §11: one broad query, no fanout, stop on 429, cache rate_limited
+// Spec §18: cap = 500
+
+async function fetchJSearchSource(): Promise<{
+  raw: RawJob[]; fetched: number; error: string | null;
+}> {
+  const apiKey = process.env.RAPIDAPI_KEY;
+  if (!apiKey) return { raw: [], fetched: 0, error: "RAPIDAPI_KEY not set" };
+
+  try {
+    const params = new URLSearchParams({
+      query:   "software engineer",
+      page:    "1",
+      num_pages: "2",
+      country: "us",
+      remote_jobs_only: "false",
+    });
+    const res = await fetch(
+      `https://jsearch.p.rapidapi.com/search?${params}`,
+      {
+        headers: {
+          "X-RapidAPI-Key":  apiKey,
+          "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
+        },
+        signal: AbortSignal.timeout(15_000),
+      }
+    );
+
+    if (res.status === 429) {
+      console.warn("[refresh] JSearch 429 — rate limited");
+      return { raw: [], fetched: 0, error: "rate_limited" };
+    }
+    if (!res.ok) return { raw: [], fetched: 0, error: `HTTP ${res.status}` };
+
+    const data = await res.json();
+    const raw = (data.data ?? []) as Record<string, unknown>[];
+
+    const jobs: RawJob[] = raw
+      .filter(j => j.job_title && j.employer_name)
+      .map((j, i) => ({
+        id:          (j.job_id as string) ?? `js-${i}`,
+        source:      "jsearch" as RefreshSource,
+        company:     (j.employer_name as string) ?? "",
+        title:       (j.job_title as string) ?? "",
+        location:    [
+          j.job_city, j.job_state, j.job_country,
+        ].filter(Boolean).join(", ") || "Remote",
+        description: (j.job_description as string) ?? "",
+        applyUrl:    (j.job_apply_link as string) ?? "#",
+        postedAt:    (j.job_posted_at_datetime_utc as string) ?? null,
+        type:        (j.job_employment_type as string) ?? "Full-time",
+      }));
+
+    return { raw: jobs, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    return { raw: [], fetched: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// ── 1d. fetchAdzunaSource ─────────────────────────────────────────────────
+// Spec §11: one broad query, sort_by=date, paginate up to 8 pages
+// Spec §18: cap = 1000
+
+const ADZUNA_MAX_PAGES = 8;
+
+async function fetchAdzunaSource(): Promise<{
+  raw: RawJob[]; fetched: number; error: string | null;
+}> {
+  const appId  = process.env.ADZUNA_APP_ID;
+  const appKey = process.env.ADZUNA_APP_KEY;
+  if (!appId || !appKey) return { raw: [], fetched: 0, error: "ADZUNA keys not set" };
+
+  const results: RawJob[] = [];
+  let totalFetched = 0;
+
+  for (let page = 1; page <= ADZUNA_MAX_PAGES; page++) {
+    try {
+      const params = new URLSearchParams({
+        app_id:          appId,
+        app_key:         appKey,
+        results_per_page: "50",
+        what:            "software engineer",
+        where:           "united states",
+        "content-type":  "application/json",
+        full_time:       "1",
+        sort_by:         "date",
+      });
+      const res = await fetch(
+        `https://api.adzuna.com/v1/api/jobs/us/search/${page}?${params}`,
+        { signal: AbortSignal.timeout(12_000) }
+      );
+      if (!res.ok) break;
+      const data = await res.json();
+      const raw = (data.results ?? []) as Record<string, unknown>[];
+      if (raw.length === 0) break;
+      totalFetched += raw.length;
+
+      for (const j of raw) {
+        const locObj  = (j.location as Record<string, unknown>) ?? {};
+        const company = ((j.company as Record<string, unknown>)?.display_name as string) ?? "";
+        const createdAt = (j.created as string) ?? null;
+
+        // Stop pagination if jobs are older than 30 days
+        if (createdAt) {
+          const ageDays = (Date.now() - new Date(createdAt).getTime()) / 86_400_000;
+          if (ageDays > MAX_INGEST_DAYS) { break; }
+        }
+
+        results.push({
+          id:          `az-${j.id ?? Math.random()}`,
+          source:      "adzuna" as RefreshSource,
+          company,
+          title:       (j.title as string) ?? "",
+          location:    (locObj.display_name as string) ?? "United States",
+          description: (j.description as string) ?? "",
+          applyUrl:    (j.redirect_url as string) ?? "#",
+          postedAt:    createdAt,
+          type:        "Full-time",
+        });
+      }
+      if (raw.length < 50) break; // last page
+    } catch { break; }
+  }
+
+  return { raw: results, fetched: totalFetched, error: null };
+}
+
+// ── 1e. fetchJoobleSource ─────────────────────────────────────────────────
+// Spec §11: one broad query, paginate up to 3 pages max
+// Spec §18: cap = 1000
+
+const JOOBLE_MAX_PAGES = 3;
+
+async function fetchJoobleSource(): Promise<{
+  raw: RawJob[]; fetched: number; error: string | null;
+}> {
+  const apiKey = process.env.JOOBLE_API_KEY;
+  if (!apiKey) return { raw: [], fetched: 0, error: "JOOBLE_API_KEY not set" };
+
+  const results: RawJob[] = [];
+  let totalFetched = 0;
+
+  for (let page = 1; page <= JOOBLE_MAX_PAGES; page++) {
+    try {
+      const res = await fetch(`https://jooble.org/api/${apiKey}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          keywords: "software engineer",
+          location: "United States",
+          page,
+        }),
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) break;
+      const data = await res.json();
+      const raw = (data.jobs ?? []) as Record<string, unknown>[];
+      if (raw.length === 0) break;
+      totalFetched += raw.length;
+
+      for (const j of raw) {
+        const updatedAt = (j.updated as string) ?? null;
+        results.push({
+          id:          `jb-${j.id ?? Math.random()}`,
+          source:      "jooble" as RefreshSource,
+          company:     (j.company as string) ?? "",
+          title:       (j.title as string) ?? "",
+          location:    (j.location as string) ?? "United States",
+          description: ((j.snippet as string) ?? (j.description as string)) ?? "",
+          applyUrl:    (j.link as string) ?? "#",
+          postedAt:    updatedAt,
+          type:        "Full-time",
+        });
+      }
+    } catch { break; }
+  }
+
+  return { raw: results, fetched: totalFetched, error: null };
+}
+
 // ── Route handler ─────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
-  const sourceFilter = (body.source as string) || "all"; // "all" | "greenhouse" | "workday"
+  const sourceFilter = (body.source as string) || "all"; // "all" | "greenhouse" | "workday" | "jsearch" | "adzuna" | "jooble"
 
   console.log(`[refresh] POST triggered — source=${sourceFilter}`);
   const startMs = Date.now();
@@ -496,6 +677,9 @@ export async function POST(req: NextRequest) {
   // Run selected sources
   const runGreenhouse = sourceFilter === "all" || sourceFilter === "greenhouse";
   const runWorkday    = sourceFilter === "all" || sourceFilter === "workday";
+  const runJSearch    = sourceFilter === "all" || sourceFilter === "jsearch";
+  const runAdzuna     = sourceFilter === "all" || sourceFilter === "adzuna";
+  const runJooble     = sourceFilter === "all" || sourceFilter === "jooble";
 
   const tasks: Promise<void>[] = [];
 
@@ -511,6 +695,30 @@ export async function POST(req: NextRequest) {
     tasks.push(
       ingestSource("workday", fetchWorkdaySource, "workday").then(r => {
         results.workday = r;
+      })
+    );
+  }
+
+  if (runJSearch) {
+    tasks.push(
+      ingestSource("jsearch", fetchJSearchSource, "jsearch").then(r => {
+        results.jsearch = r;
+      })
+    );
+  }
+
+  if (runAdzuna) {
+    tasks.push(
+      ingestSource("adzuna", fetchAdzunaSource, "adzuna").then(r => {
+        results.adzuna = r;
+      })
+    );
+  }
+
+  if (runJooble) {
+    tasks.push(
+      ingestSource("jooble", fetchJoobleSource, "jooble").then(r => {
+        results.jooble = r;
       })
     );
   }
