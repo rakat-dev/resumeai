@@ -829,6 +829,9 @@ async function fetchJooble(
   }
 }
 
+// ── Shared result type ────────────────────────────────────────────────────
+type SourceResult = { jobs: Job[]; status: SourceStatus };
+
 // ── Main Handler ───────────────────────────────────────────────────────────
 const FALLBACK_THRESHOLD = 150; // call JSearch/Adzuna/Jooble if primary sources < this
 
@@ -845,13 +848,13 @@ export async function GET(req: NextRequest) {
   try {
     // ── Tier 1: Primary sources (always run) ─────────────────────────────
     const [rGH, rWD, rFC] = await Promise.allSettled([
-      withTimeout(fetchGreenhouse(expansion, filter), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchWorkday(expansion, filter),    30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchFirecrawl(expansion, filter),  25000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchGreenhouse(expansion, filter), 30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      withTimeout(fetchWorkday(expansion, filter),    30000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+      withTimeout(fetchFirecrawl(expansion, filter),  25000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
     ]);
 
-    const getR = <T extends {jobs:Job[];status:SourceStatus}>(r: PromiseSettledResult<T>) =>
-      r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"promise rejected"}};
+    const getR = (r: PromiseSettledResult<SourceResult>): SourceResult =>
+      r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"promise rejected"}};
 
     const tier1 = [rGH, rWD, rFC].map(getR);
     const tier1Jobs = tier1.flatMap(r=>r.jobs).filter(j=>j.title&&j.company);
@@ -860,16 +863,16 @@ export async function GET(req: NextRequest) {
     console.log(`Tier 1 (GH+WD+FC): ${tier1Count} jobs`);
 
     // ── Tier 2: Fallback aggregators (only if below threshold) ───────────
-    let rJS = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
-    let rAZ = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
-    let rJB = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
+    let rJS: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
+    let rAZ: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
+    let rJB: SourceResult = {jobs:[], status:{status:"skipped",fetched:0,kept:0,error:"threshold met"}};
 
     if (tier1Count < FALLBACK_THRESHOLD) {
       console.log(`Tier 1 < ${FALLBACK_THRESHOLD} — calling fallback sources`);
       const [rJSp, rAZp, rJBp] = await Promise.allSettled([
-        withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-        withTimeout(fetchAdzuna(query, filter),  15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-        withTimeout(fetchJooble(query, filter),  15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+        withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+        withTimeout(fetchAdzuna(query, filter),  15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
+        withTimeout(fetchJooble(query, filter),  15000, {jobs:[],status:{status:"broken",fetched:0,kept:0,error:"timeout"}} as SourceResult),
       ]);
       rJS = getR(rJSp);
       rAZ = getR(rAZp);
