@@ -102,20 +102,25 @@ function getDateCutoff(filter: JobFilter): string | null {
 }
 
 // ── Sort ───────────────────────────────────────────────────────────────────
+// company_desc = top Fortune-ranked companies first (rank 1=best, 9999=unknown)
+// company_asc  = alphabetical A→Z by company name
 function sortJobs(jobs: Job[], sort: SortOption): Job[] {
   return [...jobs].sort((a, b) => {
     switch (sort) {
       case "date_desc": return (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
       case "date_asc":  return (a.postedTimestamp || 0) - (b.postedTimestamp || 0);
       case "company_desc": {
+        // ra - rb: rank 1 (Amazon) sorts before rank 9999 (unknown) ✓
         const ra = getFortuneTier(a.company), rb = getFortuneTier(b.company);
         return ra !== rb ? ra - rb : (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
       }
       case "company_asc": {
-        const ra = getFortuneTier(a.company), rb = getFortuneTier(b.company);
-        return ra !== rb ? rb - ra : (a.postedTimestamp || 0) - (b.postedTimestamp || 0);
+        // Alphabetical A → Z
+        const cmp = a.company.toLowerCase().localeCompare(b.company.toLowerCase());
+        return cmp !== 0 ? cmp : (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
       }
       default: {
+        // Best Match: score desc, then recency
         const sd = (b.relevanceScore || 0) - (a.relevanceScore || 0);
         return sd !== 0 ? sd : (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
       }
@@ -128,7 +133,7 @@ function applyDiversityCaps(jobs: Job[]): Job[] {
   const sourceCounts  = new Map<string, number>();
   const companyCounts = new Map<string, number>();
   const MAX_PER_SOURCE  = 100;
-  const MAX_PER_COMPANY = 30;
+  const MAX_PER_COMPANY = 60; // increased from 30 — Tier A companies have many valid distinct jobs
   return jobs.filter(j => {
     const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
     const sc = sourceCounts.get(sk) ?? 0;

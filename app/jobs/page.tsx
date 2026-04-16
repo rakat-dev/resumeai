@@ -115,16 +115,20 @@ function clientSort(jobs:Job[],sort:SortOption):Job[]{
     if(sort==="date_desc") return bts-ats;
     if(sort==="date_asc") return ats-bts;
     if(sort==="company_desc"){
+      // Fortune rank ascending: rank 1 (top company) first, 9999 (unknown) last
       const ra=fortuneRank(a.company),rb=fortuneRank(b.company);
       if(ra!==rb) return ra-rb;
       return bts-ats;
     }
     if(sort==="company_asc"){
-      const ra=fortuneRank(a.company),rb=fortuneRank(b.company);
-      if(ra!==rb) return rb-ra;
-      return bts-ats;
+      // Alphabetical A → Z
+      const cmp=a.company.toLowerCase().localeCompare(b.company.toLowerCase());
+      return cmp!==0?cmp:bts-ats;
     }
-    return bts-ats;
+    // Best Match: relevanceScore desc then recency
+    const sa=(a as Job&{relevanceScore?:number}).relevanceScore||0;
+    const sb=(b as Job&{relevanceScore?:number}).relevanceScore||0;
+    return sb!==sa?sb-sa:bts-ats;
   });
 }
 
@@ -589,7 +593,7 @@ export default function JobsPage(){
             style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"9px 12px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:13,outline:"none",cursor:"pointer"}}>
             <option value="company_desc">🏆 Best Match</option>
             <option value="date_desc">🕐 Date Posted</option>
-            <option value="company_asc">🏢 Company</option>
+            <option value="company_desc">🏢 Top Companies</option>
           </select>
         </div>
       </div>

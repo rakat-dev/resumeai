@@ -25,28 +25,15 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
 
   for (let page = 0; page < MAX_PAGES; page++) {
     try {
-      const res = await fetch(
-        "https://gcsservices.careers.microsoft.com/search/api/v1/search",
-        {
-          method: "GET",
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-
-      // Fallback to public search endpoint
       const params = new URLSearchParams({
-        q:        "software engineer",
-        l:        "en_us",
-        pg:       String(page + 1),
-        pgSz:     String(PAGE_SIZE),
-        o:        "Relevance",
-        flt:      "",
+        q:    "software engineer",
+        l:    "en_us",
+        pg:   String(page + 1),
+        pgSz: String(PAGE_SIZE),
+        o:    "Relevance",
+        flt:  "",
       });
-      const res2 = await fetch(
+      const res = await fetch(
         `https://jobs.careers.microsoft.com/global/en/search?${params}`,
         {
           headers: {
@@ -56,8 +43,8 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
           signal: AbortSignal.timeout(12_000),
         }
       );
-      if (!res2.ok) break;
-      const data = await res2.json();
+      if (!res.ok) break;
+      const data = await res.json();
       const jobs = (data.operationResult?.result?.jobs ?? []) as Record<string, unknown>[];
       if (jobs.length === 0) break;
 
