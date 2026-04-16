@@ -20,9 +20,13 @@ export interface ScrapedJob {
 // 2026-04-16 via Chrome DevTools — the old jobs.careers.microsoft.com
 // endpoint now redirects to this SPA). Default page size = 10.
 // Verified working from cold fetch (no cookies, no CSRF required).
+// 2026-04-16 raised pagination from 15 → 30 pages: Microsoft has ~946 total
+// "software engineer" matches; 15 pages (150 jobs) only saw 16% of the pool
+// and post-filter yield hit only 25-40 jobs. 30 pages (300 jobs) ~32% of
+// pool, yielding 80+ after filters, comfortably filling the 100-row cap.
 export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
   const results: ScrapedJob[] = [];
-  const MAX_PAGES = 15;
+  const MAX_PAGES = 30;
   const PAGE_SIZE = 10; // Microsoft's default — matches what the SPA uses
 
   for (let page = 0; page < MAX_PAGES; page++) {
