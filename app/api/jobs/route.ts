@@ -215,6 +215,54 @@ function shouldKeepJob(title: string, desc: string, type: string, location: stri
   return true;
 }
 
+// Relaxed filter for sources like TheirStack that return broader job pools.
+// Skips strict title rejection, allows broader engineering roles, relaxed location.
+const RELAXED_TITLE_BLOCKLIST = [
+  "data scientist","data analyst","machine learning","deep learning",
+  "security engineer","cybersecurity","network engineer",
+  "business analyst","scrum master","project manager",
+  "recruiter","marketing","finance","legal","intern","internship",
+];
+function shouldKeepJobRelaxed(title: string, desc: string, type: string, location: string): boolean {
+  const tl = title.toLowerCase();
+  // Hard block: clearance, part-time, internship
+  if (requiresSecurityClearance(title, desc)) return false;
+  if (isContractOrPartTime(type, desc)) return false;
+  // Soft block: only exact non-engineering roles
+  if (RELAXED_TITLE_BLOCKLIST.some(k => tl.includes(k))) return false;
+  // Relaxed location: allow remote, worldwide, empty location
+  if (location && !isUSLocation(location)) {
+    const ll = location.toLowerCase();
+    if (!ll.includes("remote") && !ll.includes("worldwide") && !ll.includes("anywhere")) return false;
+  }
+  return true;
+}
+
+// Debug helper: logs each rejected job with its rejection reason for a given source
+function logRejectedJobs(source: string, jobs: Record<string,unknown>[], getTitle: (j: Record<string,unknown>) => string, getLocation: (j: Record<string,unknown>) => string, getType: (j: Record<string,unknown>) => string, getDesc: (j: Record<string,unknown>) => string): void {
+  let kept = 0, rejected = 0;
+  for (const j of jobs) {
+    const title = getTitle(j);
+    const location = getLocation(j);
+    const type = getType(j);
+    const desc = getDesc(j);
+    if (!title) { rejected++; console.log(`[${source}] REJECTED no-title`); continue; }
+    if (requiresSecurityClearance(title, desc)) { rejected++; console.log(`[${source}] REJECTED clearance: "${title}"`); continue; }
+    if (isContractOrPartTime(type, desc)) { rejected++; console.log(`[${source}] REJECTED contract/part-time: "${title}" type="${type}"`); continue; }
+    if (location && !isUSLocation(location)) {
+      const ll = location.toLowerCase();
+      if (!ll.includes("remote") && !ll.includes("worldwide") && !ll.includes("anywhere")) {
+        rejected++; console.log(`[${source}] REJECTED location: "${title}" loc="${location}"`); continue;
+      }
+    }
+    if (RELAXED_TITLE_BLOCKLIST.some(k => title.toLowerCase().includes(k))) {
+      rejected++; console.log(`[${source}] REJECTED blocklist: "${title}"`); continue;
+    }
+    kept++;
+  }
+  console.log(`[${source}] logRejectedJobs: ${kept} kept, ${rejected} rejected of ${jobs.length} total`);
+}
+
 // ── Relevance scoring ──────────────────────────────────────────────────────
 function computeRelevanceScore(job: Job): number {
   let score = 0;
@@ -1072,6 +1120,19 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
     }
     const data = await res.json();
     const raw = (data.data||[]) as Record<string,unknown>[];
+    console.log(`TheirStack raw count: ${raw.length}`);
+
+    // Log rejection reasons for debugging (first call only, or when raw > 0)
+    if (raw.length > 0) {
+      logRejectedJobs(
+        "theirstack", raw,
+        j => (j.job_title as string)||"",
+        j => (j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote",
+        j => "Full-time",
+        j => (j.description as string)||""
+      );
+    }
+
     const jobs: Job[] = [];
     for (const j of raw) {
       const title=(j.job_title as string)||"";
@@ -1079,8 +1140,10 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
       const desc=cleanDescription(rawDesc).slice(0,800);
       const companyObj=(j.company as Record<string,unknown>)||{};
       const company=(companyObj.name as string)||(j.company_name as string)||"";
+      // TheirStack may return "Remote" or "US" or city+state — use relaxed location check
       const location=(j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote";
-      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
+      // Use RELAXED filter — don't apply strict shouldExcludeTitle here
+      if (!shouldKeepJobRelaxed(title, desc, "Full-time", location)) continue;
       const datePosted=(j.date_posted as string)||"";
       const ts=datePosted?Math.floor(new Date(datePosted).getTime()/1000):0;
       jobs.push({
@@ -1097,6 +1160,7 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
         fortuneRank:getFortuneTier(company),
       });
     }
+    console.log(`TheirStack: ${raw.length} raw → ${jobs.length} kept`);
     return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
@@ -1115,7 +1179,13 @@ export async function GET(req: NextRequest) {
   // Expand query
   const expansion = expandQuery(query);
 
+  // JSearch threshold: skip JSearch if cache already has results,
+  // or fire it alongside other sources but skip fallbacks if others succeed
+  const JSEARCH_SKIP_THRESHOLD = 150; // skip JSearch if other sources yield this many
+
   try {
+    // Fire all non-JSearch sources first + JSearch in parallel
+    // JSearch will self-short-circuit via cache or 429 detection
     const [
       rJS, rGH, rLV, rWD, rGS, rMS, rCI, rOR, rRM, rAZ, rTS,
     ] = await Promise.allSettled([
@@ -1126,7 +1196,7 @@ export async function GET(req: NextRequest) {
       withTimeout(fetchGoldmanSachs(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchMorganStanley(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchCisco(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchOracle(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchOracle(expansion), 10000,  // deprioritized — kept for shape discovery {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchRemotive(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchAdzuna(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
       withTimeout(fetchTheirStack(expansion, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
