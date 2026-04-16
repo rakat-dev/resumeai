@@ -132,8 +132,8 @@ function sortJobs(jobs: Job[], sort: SortOption): Job[] {
 function applyDiversityCaps(jobs: Job[]): Job[] {
   const sourceCounts  = new Map<string, number>();
   const companyCounts = new Map<string, number>();
-  const MAX_PER_SOURCE  = 100;
-  const MAX_PER_COMPANY = 60; // increased from 30 — Tier A companies have many valid distinct jobs
+  const MAX_PER_SOURCE  = 500; // raised from 100: was hiding ~309 valid jobs (greenhouse 275→100, playwright 147→100)
+  const MAX_PER_COMPANY = 60;  // raised from 30
   return jobs.filter(j => {
     const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
     const sc = sourceCounts.get(sk) ?? 0;

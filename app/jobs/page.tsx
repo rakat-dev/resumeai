@@ -476,7 +476,7 @@ export default function JobsPage(){
       });
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);
-      setRefreshMsg(`✅ Refresh complete — ${data.jobs_stored} jobs stored (${Math.round(data.duration_ms/1000)}s)`);
+      setRefreshMsg(`✅ Refresh complete — ${data.jobs_stored} jobs upserted this run (${Math.round(data.duration_ms/1000)}s)`);
       // Reload jobs after refresh
       await loadJobs(filters.datePosted,sort);
     }catch(e:unknown){
