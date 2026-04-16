@@ -171,9 +171,19 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
   // Inside every group, cards are sorted by date posted (newest first).
   // Group ORDER itself is unchanged — it reflects the outer sort
   // (Fortune rank asc for Top Companies).
+  //
+  // null/0 timestamps render as "Recently" in the UI. These are jobs whose
+  // source didn't expose a posted_at date — they were JUST scraped though,
+  // so treat them as newest (+Infinity) rather than oldest. Otherwise a
+  // freshly-ingested job lands below a 3-week-old dated one.
   const byDateDesc = (a: Job, b: Job) => {
-    const at = (a as Job & {postedTimestamp?: number}).postedTimestamp ?? 0;
-    const bt = (b as Job & {postedTimestamp?: number}).postedTimestamp ?? 0;
+    const rawA = (a as Job & {postedTimestamp?: number}).postedTimestamp;
+    const rawB = (b as Job & {postedTimestamp?: number}).postedTimestamp;
+    const at = rawA && rawA > 0 ? rawA : Infinity;
+    const bt = rawB && rawB > 0 ? rawB : Infinity;
+    if (at === Infinity && bt === Infinity) return 0;
+    if (at === Infinity) return -1;
+    if (bt === Infinity) return  1;
     return bt - at;
   };
   for (const c of orderedCompanies) {
