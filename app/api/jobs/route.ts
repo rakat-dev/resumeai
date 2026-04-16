@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  REFRESH_STATE, REFRESH_HISTORY, REFRESH_HISTORY_MAX,
+  type RefreshStatus, type RefreshState, type RefreshRun,
+} from "@/app/api/jobs/refresh-store";
+import {
   expandQuery, shouldExcludeTitle, scoreSponsorshipSignal,
   scoreTitleRelevance, scoreRecency,
 } from "@/lib/queryExpansion";
@@ -498,6 +502,91 @@ interface FirecrawlTarget {
 const FC_CONCURRENCY = 2;
 const FC_TIMEOUT_MS  = 25000;
 
+// ── Firecrawl refresh state tracking ─────────────────────────────────────
+// Types and Maps are defined in refresh-store.ts and imported above.
+// Helper functions below write to those shared Maps.
+
+function getOrInitState(company: string, source: RefreshState["source"], query: string, filter: string): RefreshState {
+  const existing = REFRESH_STATE.get(company);
+  if (existing) return existing;
+  const state: RefreshState = {
+    company, source, status:"never_run", query, filter,
+    started_at:null, finished_at:null, duration_ms:null,
+    raw_count:null, kept_count:null, error_message:null,
+    last_success_at:null, last_attempt_at:null,
+  };
+  REFRESH_STATE.set(company, state);
+  return state;
+}
+
+function markRefreshQueued(company: string, source: RefreshState["source"], query: string, filter: string): void {
+  const state = getOrInitState(company, source, query, filter);
+  state.status = "queued";
+  state.query = query;
+  state.filter = filter;
+  state.error_message = null;
+  REFRESH_STATE.set(company, state);
+}
+
+function markRefreshRunning(company: string, source: RefreshState["source"], query: string, filter: string): number {
+  const startedAt = Date.now();
+  const state = getOrInitState(company, source, query, filter);
+  state.status = "running";
+  state.query = query;
+  state.filter = filter;
+  state.started_at = startedAt;
+  state.finished_at = null;
+  state.duration_ms = null;
+  state.raw_count = null;
+  state.kept_count = null;
+  state.error_message = null;
+  state.last_attempt_at = startedAt;
+  REFRESH_STATE.set(company, state);
+  return startedAt;
+}
+
+function markRefreshDone(
+  company: string, source: RefreshState["source"], query: string, filter: string,
+  startedAt: number, raw: number, kept: number, error: string | null
+): void {
+  const finishedAt = Date.now();
+  const durationMs = finishedAt - startedAt;
+  const isTimeout = error?.includes("timeout") ?? false;
+  let status: RefreshStatus;
+  if (error && isTimeout)   status = "timeout";
+  else if (error)           status = "failed";
+  else if (kept > 0)        status = "success";
+  else if (raw > 0)         status = "partial_success";
+  else                      status = "failed"; // 0 raw with no error = something went wrong
+
+  const state = getOrInitState(company, source, query, filter);
+  state.status = status;
+  state.finished_at = finishedAt;
+  state.duration_ms = durationMs;
+  state.raw_count = raw;
+  state.kept_count = kept;
+  state.error_message = error;
+  if (status === "success" || status === "partial_success") {
+    state.last_success_at = finishedAt;
+  }
+  REFRESH_STATE.set(company, state);
+
+  // Append to history
+  const run: RefreshRun = {
+    run_id: `${company}-${startedAt}`,
+    company, source, status, query, filter,
+    started_at: startedAt, finished_at: finishedAt,
+    duration_ms: durationMs, raw_count: raw, kept_count: kept,
+    error_message: error,
+  };
+  REFRESH_HISTORY.push(run);
+  if (REFRESH_HISTORY.length > REFRESH_HISTORY_MAX) {
+    REFRESH_HISTORY.splice(0, REFRESH_HISTORY.length - REFRESH_HISTORY_MAX);
+  }
+
+  console.log(`FC refresh done: ${company} → ${status} (${durationMs}ms, raw=${raw}, kept=${kept})${error ? ` error=${error}` : ""}`);
+}
+
 // ── Firecrawl company-level cache ────────────────────────────────────────
 // Keyed by `company:query:filter` so each company's results age independently.
 // Tier A companies are always scraped live (3 companies × 25s = 50s max).
@@ -529,17 +618,17 @@ const FC_TIER_B: FirecrawlTarget[] = [
   { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
 ];
 
-// Legacy combined reference used nowhere except for type safety
-const FC_CACHE = new Map<string, {jobs:Job[]; status:SourceStatus; ts:number}>();
-const FC_CACHE_TTL = 10 * 60 * 1000;
+// FC_CACHE removed — replaced by FC_COMPANY_CACHE + refresh-store
 
 // Single-company fetch — 25s AbortController timeout, no outer Promise.all
 async function fetchFirecrawlCompany(
   company: string, careerUrl: string, fortuneRank: number,
-  expansion: ReturnType<typeof expandQuery>, filter: JobFilter, apiKey: string
+  expansion: ReturnType<typeof expandQuery>, filter: JobFilter, apiKey: string,
+  source: RefreshState["source"] = "firecrawl_tier_a"
 ): Promise<{jobs:Job[];raw:number;error:string|null}> {
   const url = careerUrl.replace("{query}", encodeURIComponent(expansion.primary));
   console.log(`Firecrawl START ${company} timeout=${FC_TIMEOUT_MS}ms`);
+  const startedAt = markRefreshRunning(company, source, expansion.primary, filter);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FC_TIMEOUT_MS);
   try {
@@ -621,12 +710,14 @@ async function fetchFirecrawlCompany(
       });
     }
     console.log(`Firecrawl ${company}: ${rawJobs.length} raw → ${jobs.length} kept`);
+    markRefreshDone(company, source, expansion.primary, filter, startedAt, rawJobs.length, jobs.length, null);
     return {jobs, raw:rawJobs.length, error:null};
   } catch(e:unknown) {
     clearTimeout(timer);
     const isAbort = e instanceof Error && e.name === "AbortError";
     const msg = isAbort ? `timeout (${FC_TIMEOUT_MS}ms)` : String(e);
     console.error(`Firecrawl ${company} FAILED: ${msg}`);
+    markRefreshDone(company, source, expansion.primary, filter, startedAt, 0, 0, msg);
     return {jobs:[], raw:0, error:msg};
   }
 }
@@ -637,7 +728,8 @@ async function runFirecrawlBatch(
   targets: FirecrawlTarget[],
   expansion: ReturnType<typeof expandQuery>,
   filter: JobFilter,
-  apiKey: string
+  apiKey: string,
+  source: RefreshState["source"] = "firecrawl_tier_a"
 ): Promise<Array<{jobs:Job[];raw:number;error:string|null}>> {
   const results: Array<{jobs:Job[];raw:number;error:string|null}> = new Array(targets.length);
   const names = targets.map(t => t.company);
@@ -651,7 +743,7 @@ async function runFirecrawlBatch(
 
     const settled = await Promise.allSettled(
       chunk.map(({company, careerUrl, fortuneRank}) =>
-        fetchFirecrawlCompany(company, careerUrl, fortuneRank, expansion, filter, apiKey)
+        fetchFirecrawlCompany(company, careerUrl, fortuneRank, expansion, filter, apiKey, source)
       )
     );
 
@@ -681,8 +773,10 @@ async function refreshFirecrawlCompanyCache(
 ): Promise<void> {
   const expansion = expandQuery(query);
   const ck = `${target.company}:${expansion.primary}:${filter}`;
+  // fetchFirecrawlCompany calls markRefreshRunning/Done internally
   const result = await fetchFirecrawlCompany(
-    target.company, target.careerUrl, target.fortuneRank, expansion, filter, apiKey
+    target.company, target.careerUrl, target.fortuneRank,
+    expansion, filter, apiKey, "firecrawl_tier_b"
   );
   FC_COMPANY_CACHE.set(ck, {
     jobs: result.jobs, raw: result.raw, ts: Date.now(), filter,
@@ -720,7 +814,9 @@ async function fetchFirecrawl(
   let tierAScrapedJobs: Job[] = [];
   if (tierAToScrape.length > 0) {
     console.log(`FC Tier A scraping live: [${tierAToScrape.map(t=>t.company).join(", ")}]`);
-    const results = await runFirecrawlBatch(tierAToScrape, expansion, filter, apiKey);
+    // Mark as queued before starting (running will be set inside fetchFirecrawlCompany)
+    tierAToScrape.forEach(t => markRefreshQueued(t.company, "firecrawl_tier_a", expansion.primary, filter));
+    const results = await runFirecrawlBatch(tierAToScrape, expansion, filter, apiKey, "firecrawl_tier_a");
     results.forEach((r, i) => {
       const target = tierAToScrape[i];
       const ck = `${target.company}:${expansion.primary}:${filter}`;
@@ -755,6 +851,8 @@ async function fetchFirecrawl(
   // Uses Promise without await so it doesn't count against Vercel budget
   if (tierBStale.length > 0 && apiKey) {
     console.log(`FC background refresh: [${tierBStale.map(t=>t.company).join(", ")}]`);
+    // Mark as queued so refresh-status shows intent before running starts
+    tierBStale.forEach(t => markRefreshQueued(t.company, "firecrawl_tier_b", expansion.primary, filter));
     // Don't await — intentionally fire-and-forget after response is sent
     Promise.allSettled(
       tierBStale.map(target =>
