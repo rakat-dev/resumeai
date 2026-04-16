@@ -2,8 +2,8 @@ import { Redis } from "@upstash/redis";
 import type { RefreshState, RefreshRun } from "@/app/api/jobs/types";
 
 // ── Upstash Redis client ───────────────────────────────────────────────────
-// Lazy singleton — only instantiated when first called, so missing env vars
-// during build don't blow up. Falls back to no-op if not configured.
+// Used ONLY for: refresh status, refresh history, short-lived source cache.
+// Jobs are stored in Supabase, not here.
 
 let _redis: Redis | null = null;
 
@@ -17,13 +17,13 @@ function getRedis(): Redis | null {
 }
 
 // ── Key helpers ───────────────────────────────────────────────────────────
-const KEY_STATE   = (company: string) => `fc:state:${company}`;
-const KEY_HISTORY = "fc:history";
+const KEY_STATE   = (company: string) => `rs:state:${company}`;
+const KEY_HISTORY = "rs:history";
 const HISTORY_MAX = 200;
 
 // ── Public API ────────────────────────────────────────────────────────────
 
-/** Write current state for one company. No-op if Redis not configured. */
+/** Write current refresh state for one company. No-op if Redis not configured. */
 export async function saveRefreshState(state: RefreshState): Promise<void> {
   const r = getRedis();
   if (!r) return;
@@ -34,23 +34,20 @@ export async function saveRefreshState(state: RefreshState): Promise<void> {
   }
 }
 
-/** Read state for all known companies (scans fc:state:* keys). */
+/** Read refresh state for all known companies. */
 export async function getAllRefreshStates(): Promise<RefreshState[]> {
   const r = getRedis();
   if (!r) return [];
   try {
-    // SCAN for all fc:state:* keys
     const keys: string[] = [];
     let cursor = 0;
     do {
-      const [nextCursor, batch] = await r.scan(cursor, { match: "fc:state:*", count: 100 });
+      const [nextCursor, batch] = await r.scan(cursor, { match: "rs:state:*", count: 100 });
       keys.push(...(batch as string[]));
       cursor = Number(nextCursor);
     } while (cursor !== 0);
 
     if (keys.length === 0) return [];
-
-    // Bulk fetch
     const values = await r.mget<string[]>(...keys);
     return values
       .filter((v): v is string => v !== null && v !== undefined)
@@ -66,7 +63,6 @@ export async function appendRefreshRun(run: RefreshRun): Promise<void> {
   const r = getRedis();
   if (!r) return;
   try {
-    // LPUSH newest first, then LTRIM to cap length
     await r.lpush(KEY_HISTORY, JSON.stringify(run));
     await r.ltrim(KEY_HISTORY, 0, HISTORY_MAX - 1);
   } catch (e) {

@@ -62,7 +62,7 @@ function loadSS():{query:string;filter:JobFilter;jobs:Job[];sources:Record<strin
 // ── Filter types ───────────────────────────────────────────────────────────
 type SponsorFilter = "all"|"yes"|"no_info";
 type ExpFilter = "0-1yr"|"1-3yr"|"4-6yr"|"6+yr";
-type SourceType = "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"firecrawl"|"other";
+type SourceType = "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"playwright"|"other";
 
 interface Filters {
   datePosted: JobFilter;
@@ -242,7 +242,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
   const allCompanies=useMemo(()=>Array.from(new Set(allJobs.map(j=>j.company).filter(Boolean))).sort(),[allJobs]);
-  const allSources:SourceType[]=["greenhouse","workday","firecrawl","jsearch","adzuna","jooble"];
+  const allSources:SourceType[]=["greenhouse","workday","playwright","jsearch","adzuna","jooble"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
   const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
 
@@ -315,7 +315,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {allSources.map(s=>{
                 const srcCount=sources[s===("other" as string)?"other":s]||0;
-                const srcLabelMap:Record<string,string>={greenhouse:"Greenhouse (ATS)",workday:"Workday (20 cos)",firecrawl:"Firecrawl (direct)",jsearch:"JSearch (fallback)",adzuna:"Adzuna (backup)",jooble:"Jooble (gap filler)"};
+                const srcLabelMap:Record<string,string>={greenhouse:"Greenhouse (ATS)",workday:"Workday (20 cos)",playwright:"Playwright (Tier A)",jsearch:"JSearch (fallback)",adzuna:"Adzuna (backup)",jooble:"Jooble (gap filler)"};
 const label=srcLabelMap[s]||s;
                 const SC:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",remotive:"#9664ff",theirstack:"#ff8c00",fantasticjobs:"#00c8b4",other:"#7070a0"};
                 const dotColor=SC[s]||"#7070a0";
@@ -373,7 +373,7 @@ const label=srcLabelMap[s]||s;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function SourceBadge({source,sourceType}:{source:string;sourceType?:string}){
-  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},workday:{bg:"rgba(207,69,0,0.1)",color:"#cf4500"},firecrawl:{bg:"rgba(108,99,255,0.1)",color:"#6c63ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},adzuna:{bg:"rgba(0,200,180,0.1)",color:"#00c8b4"},jooble:{bg:"rgba(255,149,0,0.1)",color:"#ff9500"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
+  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},workday:{bg:"rgba(207,69,0,0.1)",color:"#cf4500"},playwright:{bg:"rgba(108,99,255,0.1)",color:"#6c63ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},adzuna:{bg:"rgba(0,200,180,0.1)",color:"#00c8b4"},jooble:{bg:"rgba(255,149,0,0.1)",color:"#ff9500"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
   const c=C[sourceType||"other"]||C.other;
   return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:c.bg,color:c.color,border:`1px solid ${c.color}40`}}>{source}</span>;
 }
@@ -591,8 +591,8 @@ export default function JobsPage(){
               ? diagnostics
               : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
             ).map(d=>{
-              const COL:Record<string,string>={greenhouse:"#00c864",workday:"#cf4500",firecrawl:"#6c63ff",jsearch:"#7070a0",adzuna:"#00c8b4",jooble:"#ff9500"};
-              const LBL:Record<string,string>={greenhouse:"Greenhouse",workday:"Workday",firecrawl:"Firecrawl",jsearch:"JSearch",adzuna:"Adzuna",jooble:"Jooble"};
+              const COL:Record<string,string>={greenhouse:"#00c864",workday:"#cf4500",playwright:"#6c63ff",jsearch:"#7070a0",adzuna:"#00c8b4",jooble:"#ff9500"};
+              const LBL:Record<string,string>={greenhouse:"Greenhouse",workday:"Workday",playwright:"Playwright",jsearch:"JSearch",adzuna:"Adzuna",jooble:"Jooble"};
               const col=COL[d.source]||"#888";
               const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"||d.status==="rate_limited"?"🟡":"🔴";
               return(

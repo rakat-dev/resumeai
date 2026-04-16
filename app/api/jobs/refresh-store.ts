@@ -1,11 +1,10 @@
-// ── Firecrawl refresh state store ────────────────────────────────────────
+// ── Refresh state store ───────────────────────────────────────────────────
 // In-memory Maps for same-instance fast path +
-// Upstash Redis for cross-instance persistence.
+// Upstash Redis for cross-instance persistence (refresh status only).
 //
-// The Maps stay as a fast local cache — reads check memory first.
-// All writes go to both memory AND Redis (fire-and-forget, non-blocking).
+// Jobs are stored in Supabase (real DB), NOT here.
 
-export type { RefreshStatus, RefreshState, RefreshRun } from "./types";
+export type { RefreshStatus, RefreshSource, RefreshState, RefreshRun } from "./types";
 import type { RefreshState, RefreshRun } from "./types";
 import { saveRefreshState, appendRefreshRun } from "@/lib/redis";
 
@@ -14,29 +13,11 @@ export const REFRESH_STATE   = new Map<string, RefreshState>();
 export const REFRESH_HISTORY: RefreshRun[] = [];
 export const REFRESH_HISTORY_MAX = 200;
 
-// ── Firecrawl job cache ───────────────────────────────────────────────────
-export interface FcCacheEntry {
-  jobs:   unknown[];
-  raw:    number;
-  ts:     number;
-  filter: string;
-}
-export const FC_COMPANY_CACHE_STORE = new Map<string, FcCacheEntry>();
-
-export function setCompanyCache(key: string, entry: FcCacheEntry): void {
-  FC_COMPANY_CACHE_STORE.set(key, entry);
-}
-export function getCompanyCache(key: string): FcCacheEntry | undefined {
-  return FC_COMPANY_CACHE_STORE.get(key);
-}
-
 // ── Persistent write helpers ──────────────────────────────────────────────
-// Called by route.ts and refresh/route.ts after every state transition.
-// Redis write is fire-and-forget (no await at call site) — never blocks response.
+// Called after every state transition. Redis write is fire-and-forget.
 
 export function persistState(state: RefreshState): void {
   REFRESH_STATE.set(state.company, state);
-  // Non-blocking Redis write
   saveRefreshState(state).catch(e =>
     console.error(`[store] persistState Redis write failed (${state.company}):`, e)
   );

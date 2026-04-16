@@ -1,4 +1,4 @@
-// ── Shared Firecrawl refresh types ────────────────────────────────────────
+// ── Shared refresh types ───────────────────────────────────────────────────
 // Imported by: refresh-store.ts, lib/redis.ts, app/api/jobs/route.ts,
 //              app/api/jobs/refresh/route.ts, app/api/jobs/refresh-status/route.ts
 
@@ -10,14 +10,26 @@ export type RefreshStatus =
   | "partial_success"
   | "failed"
   | "timeout"
-  | "skipped";
+  | "skipped"
+  | "rate_limited";
+
+export type RefreshSource =
+  | "greenhouse"
+  | "workday"
+  | "jsearch"
+  | "adzuna"
+  | "jooble"
+  | "playwright_microsoft"
+  | "playwright_google"
+  | "playwright_apple"
+  | "playwright_meta"
+  | "playwright_amazon"
+  | "playwright_jpmorgan";
 
 export interface RefreshState {
   company:         string;
-  source:          "firecrawl_tier_a" | "firecrawl_tier_b";
+  source:          RefreshSource;
   status:          RefreshStatus;
-  query:           string;
-  filter:          string;
   started_at:      number | null;
   finished_at:     number | null;
   duration_ms:     number | null;
@@ -31,10 +43,8 @@ export interface RefreshState {
 export interface RefreshRun {
   run_id:        string;
   company:       string;
-  source:        "firecrawl_tier_a" | "firecrawl_tier_b";
+  source:        RefreshSource;
   status:        RefreshStatus;
-  query:         string;
-  filter:        string;
   started_at:    number;
   finished_at:   number | null;
   duration_ms:   number | null;
