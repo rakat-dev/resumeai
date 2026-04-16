@@ -45,7 +45,8 @@ function loadPanel():{sel:Job|null;v1:string;v2:string;jd:string;v1ats:unknown;v
 function saveSS(f:JobFilter,jobs:Job[],src:Record<string,number>){
   try{
     sessionStorage.setItem(SS.F,f);
-    sessionStorage.setItem(SS.J,JSON.stringify(jobs));
+    // Only cache up to 500 jobs to avoid sessionStorage size limits
+    sessionStorage.setItem(SS.J,JSON.stringify(jobs.slice(0,500)));
     sessionStorage.setItem(SS.S,JSON.stringify(src));
   }catch{}
 }
@@ -403,6 +404,7 @@ export default function JobsPage(){
   const [totalJobs,setTotalJobs]=useState(0);
   const [refreshing,setRefreshing]=useState(false);
   const [refreshMsg,setRefreshMsg]=useState("");
+  const [displayLimit,setDisplayLimit]=useState(50); // start with 50, load more on demand
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
   const [filtersOpen,setFiltersOpen]=useState(false);
@@ -435,18 +437,17 @@ export default function JobsPage(){
       setJd(panel.jd);setV1Ats(panel.v1ats as ATSResult|null);
       setV2Ats(panel.v2ats as ATSResult|null);setStep(panel.step as 0|1|2);
     }
-    // Restore cached results or fetch from DB
-    const cached=loadSS();
-    if(cached){setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);}
-    else loadJobs(filters.datePosted,sort);
+    // Always fetch fresh from DB (don't trust stale sessionStorage cache)
+    sessionStorage.removeItem(SS.J); // clear old cache
+    loadJobs(filters.datePosted,sort);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
   // ── Load jobs from DB ──────────────────────────────────────────────────
   const loadJobs=async(dateFilter:JobFilter,sortOpt:SortOption)=>{
-    setLoading(true);setLoadErr("");
+    setLoading(true);setLoadErr("");setDisplayLimit(50);
     try{
-      const res=await fetch(`/api/jobs?filter=${dateFilter}&sort=${sortOpt}&page=1`);
+      const res=await fetch(`/api/jobs?filter=${dateFilter}&sort=${sortOpt}`);
       if(!res.ok)throw new Error(`HTTP ${res.status}`);
       const data=await res.json();
       const nj=(data.jobs as Job[])||[];
@@ -482,17 +483,17 @@ export default function JobsPage(){
   };
 
   // ── Client-side filtering ─────────────────────────────────────────────
-  const {filteredJobs}=useMemo(()=>{
+  const {filteredJobs,visibleJobs}=useMemo(()=>{
     let list=jobs;
 
-    // Fix 9: Client-side date filter (covers Greenhouse/Lever/Remotive which ignore API date param)
+    // Client-side date filter
     if(filters.datePosted!=="any"){
       const now=Date.now();
       const cutoffs:Record<string,number>={"24h":now-86400000,"3d":now-259200000,"7d":now-604800000};
       const cutoff=cutoffs[filters.datePosted];
       if(cutoff) list=list.filter(j=>{
         const ts=(j as Job&{postedTimestamp?:number}).postedTimestamp;
-        if(!ts)return false; // no timestamp = exclude when date filter active
+        if(!ts)return false;
         return ts*1000>=cutoff;
       });
     }
@@ -502,17 +503,17 @@ export default function JobsPage(){
     if(filters.companies.size>0)list=list.filter(j=>filters.companies.has(j.company));
     if(filters.sources.size>0)list=list.filter(j=>filters.sources.has((j as Job&{sourceType?:string}).sourceType as SourceType||"other"));
 
-    // Experience filter — jobs with no exp data mixed in, filtered only when exp filter active
     if(filters.experience.size>0){
       list=list.filter(j=>{
         const exp=(j as Job&{experience?:string}).experience;
-        if(!exp) return true; // no exp data: always include (mix with results)
+        if(!exp) return true;
         return filters.experience.has(exp as ExpFilter);
       });
     }
 
-    return{filteredJobs:clientSort(list,sort)};
-  },[jobs,filters,sort]);
+    const sorted=clientSort(list,sort);
+    return{filteredJobs:sorted,visibleJobs:sorted.slice(0,displayLimit)};
+  },[jobs,filters,sort,displayLimit]);
 
   const activeFilterCount=countActiveFilters(filters);
   const currentResume=step===2?v2Resume:v1Resume;
@@ -599,7 +600,7 @@ export default function JobsPage(){
       {jobs.length>0&&(
         <div style={{marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:6}}>
-            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length} / {jobs.length}</span>
+            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length} jobs{filteredJobs.length!==jobs.length?` (filtered from ${jobs.length})`:""}</span>
             {(diagnostics.length>0
               ? diagnostics
               : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
@@ -683,12 +684,22 @@ export default function JobsPage(){
               </div>
             )}
 
-            {/* All jobs — no-exp jobs mixed in */}
+            {/* All jobs with Load More */}
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {filteredJobs.map(job=>(
+              {visibleJobs.map(job=>(
                 <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
               ))}
             </div>
+            {/* Load More button */}
+            {filteredJobs.length>visibleJobs.length&&(
+              <div style={{textAlign:"center",paddingTop:16,paddingBottom:8}}>
+                <button
+                  onClick={()=>setDisplayLimit(l=>l+50)}
+                  style={{padding:"10px 28px",borderRadius:12,border:"1px solid var(--border)",background:"var(--surface2)",color:"var(--text)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Syne',sans-serif"}}>
+                  Load More ({filteredJobs.length-visibleJobs.length} remaining)
+                </button>
+              </div>
+            )}
           </div>
         </div>
 

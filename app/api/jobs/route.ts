@@ -146,8 +146,8 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const filter   = (searchParams.get("filter") as JobFilter) || "any";
   const sort     = (searchParams.get("sort")   as SortOption) || "company_desc";
-  const page     = Math.max(1, parseInt(searchParams.get("page") || "1"));
-  const pageSize = 25;
+  const page     = 1;
+  const pageSize = 2000; // return all, UI handles scrolling
 
   try {
     // Build query — use service role key to bypass RLS
