@@ -580,7 +580,7 @@ export default function JobsPage(){
               const COL:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",workday:"#cf4500",goldman:"#00a3e0",morganstanley:"#003087",cisco:"#1ba0d7",oracle:"#f80000",remotive:"#9664ff",adzuna:"#00c8b4",theirstack:"#ff8c00"};
               const LBL:Record<string,string>={jsearch:"JSearch",greenhouse:"Greenhouse",lever:"Lever",workday:"Workday",goldman:"Goldman",morganstanley:"MS",cisco:"Cisco",oracle:"Oracle",remotive:"Remotive",adzuna:"Adzuna",theirstack:"TheirStack"};
               const col=COL[d.source]||"#888";
-              const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"?"🟡":"🔴";
+              const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"||d.status==="rate_limited"?"🟡":"🔴";
               return(
                 <span key={d.source} title={`${d.status}${d.error?`: ${d.error}`:""}`}
                   style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:`${col}15`,
@@ -612,8 +612,8 @@ export default function JobsPage(){
                 </thead>
                 <tbody>
                   {diagnostics.map(d=>{
-                    const sColor={success:"#00c864",degraded:"#ff9500",error:"#ff6b6b",skipped:"#7070a0",timeout:"#ff9500"}[d.status]||"#888";
-                    const sIcon={success:"✅",degraded:"⚠️",error:"❌",skipped:"⏭️",timeout:"⏱"}[d.status]||"❓";
+                    const sColor={success:"#00c864",degraded:"#ff9500",error:"#ff6b6b",skipped:"#7070a0",timeout:"#ff9500",rate_limited:"#ff6b6b"}[d.status as string]||"#888";
+                    const sIcon={success:"✅",degraded:"⚠️",error:"❌",skipped:"⏭️",timeout:"⏱",rate_limited:"🚫"}[d.status as string]||"❓";
                     return(
                       <tr key={d.source} style={{borderBottom:"1px solid var(--border)",opacity:d.called?1:0.45}}>
                         <td style={{padding:"4px 8px",fontWeight:600,color:"var(--text)"}}>{d.source}</td>
