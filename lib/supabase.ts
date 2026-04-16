@@ -4,13 +4,9 @@ import { createClient } from "@supabase/supabase-js";
 // anon client  — safe for read queries from API routes
 // service client — used for writes (refresh/ingestion only, server-side)
 
-const url   = process.env.SUPABASE_URL!;
-const anon  = process.env.SUPABASE_ANON_KEY!;
-const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-if (!url || !anon) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY env vars");
-}
+const url    = process.env.SUPABASE_URL ?? "";
+const anon   = process.env.SUPABASE_ANON_KEY ?? "";
+const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? anon;
 
 // Read client (used in /api/jobs GET)
 export const supabase = createClient(url, anon, {
