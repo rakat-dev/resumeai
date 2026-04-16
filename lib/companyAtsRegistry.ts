@@ -1,0 +1,606 @@
+// ── Company → ATS Registry ─────────────────────────────────────────────────
+// Single source of truth for every company → ATS mapping.
+// Each company appears EXACTLY ONCE. No company is mapped to multiple adapters.
+// enabled: false = configured but not yet active in the pipeline.
+
+export type AtsType =
+  | "workday"
+  | "oracle_hcm"
+  | "greenhouse"
+  | "lever"
+  | "ashby"
+  | "taleo"
+  | "brassring"
+  | "eightfold"
+  | "successfactors"
+  | "icims"
+  | "custom";
+
+export interface CompanyAtsConfig {
+  company:     string;
+  ats:         AtsType;
+  careersUrl?: string;
+  hostHint?:   string;
+  adapter:     string;   // which fetch function handles this company
+  enabled:     boolean;
+}
+
+export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
+
+  // ── WORKDAY ──────────────────────────────────────────────────────────────
+  {
+    company:    "Salesforce",
+    ats:        "workday",
+    careersUrl: "https://salesforce.wd12.myworkdayjobs.com/External_Career_Site",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "ServiceNow",
+    ats:        "workday",
+    careersUrl: "https://servicenow.wd12.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Adobe",
+    ats:        "workday",
+    careersUrl: "https://adobe.wd5.myworkdayjobs.com/external_career",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Intel",
+    ats:        "workday",
+    careersUrl: "https://intel.wd1.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Wells Fargo",
+    ats:        "workday",
+    careersUrl: "https://wellsfargo.wd1.myworkdayjobs.com/WF_External_Careers",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Capital One",
+    ats:        "workday",
+    careersUrl: "https://capitalone.wd1.myworkdayjobs.com/Capital_One_External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Verizon",
+    ats:        "workday",
+    careersUrl: "https://verizon.wd5.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "T-Mobile",
+    ats:        "workday",
+    careersUrl: "https://tmobile.wd1.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "S&P Global",
+    ats:        "workday",
+    careersUrl: "https://spglobal.wd1.myworkdayjobs.com/Careers",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "CVS Health",
+    ats:        "workday",
+    careersUrl: "https://cvshealth.wd1.myworkdayjobs.com/CVS_Health_Careers",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "UnitedHealth",
+    ats:        "workday",
+    careersUrl: "https://uhg.wd5.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Elevance Health",
+    ats:        "workday",
+    careersUrl: "https://elevancehealth.wd1.myworkdayjobs.com/ANT",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Walmart",
+    ats:        "workday",
+    careersUrl: "https://walmart.wd5.myworkdayjobs.com/WalmartExternal",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Target",
+    ats:        "workday",
+    careersUrl: "https://target.wd5.myworkdayjobs.com/targetcareers",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Home Depot",
+    ats:        "workday",
+    careersUrl: "https://homedepot.wd5.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "NVIDIA",
+    ats:        "workday",
+    careersUrl: "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Lowe's",
+    ats:        "workday",
+    careersUrl: "https://lowes.wd1.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Costco",
+    ats:        "workday",
+    careersUrl: "https://costco.wd5.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "FedEx",
+    ats:        "workday",
+    careersUrl: "https://fedex.wd1.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "UPS",
+    ats:        "workday",
+    careersUrl: "https://ups.wd1.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Morgan Stanley",
+    ats:        "workday",
+    careersUrl: "https://morganstanley.wd5.myworkdayjobs.com/External",
+    adapter:    "workday",
+    enabled:    true,
+  },
+  {
+    company:    "Fidelity",
+    ats:        "workday",
+    careersUrl: "https://fmr.wd1.myworkdayjobs.com/FidelityCareers",
+    adapter:    "workday",
+    enabled:    true,
+  },
+
+  // ── ORACLE HCM ───────────────────────────────────────────────────────────
+  // JPMorgan and Goldman Sachs use Oracle HCM — NOT Workday
+  {
+    company:    "JPMorgan Chase",
+    ats:        "oracle_hcm",
+    careersUrl: "https://jpmc.fa.oraclecloud.com",
+    hostHint:   "jpmc",
+    adapter:    "oracle_hcm",
+    enabled:    true,
+  },
+  {
+    company:    "Goldman Sachs",
+    ats:        "oracle_hcm",
+    careersUrl: "https://hdpc.fa.us2.oraclecloud.com",
+    hostHint:   "goldmansachs",
+    adapter:    "oracle_hcm",
+    enabled:    true,
+  },
+  {
+    company:    "Bank of America",
+    ats:        "oracle_hcm",
+    careersUrl: "https://bofa.fa.oraclecloud.com",
+    hostHint:   "bofa",
+    adapter:    "oracle_hcm",
+    enabled:    false, // endpoint not verified — enable after testing
+  },
+
+  // ── GREENHOUSE ────────────────────────────────────────────────────────────
+  // These companies confirmed on Greenhouse boards API
+  {
+    company:    "Databricks",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/databricks",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Snowflake",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/snowflake",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "HashiCorp",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/hashicorp",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Cloudflare",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/cloudflare",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "MongoDB",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/mongodb",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Confluent",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/confluent",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Atlassian",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/atlassian",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Anthropic",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/anthropic",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Stripe",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/stripe",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Figma",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/figma",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Notion",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/notion",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Brex",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/brex",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Gusto",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/gusto",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Ramp",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/ramp",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Plaid",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/plaid",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Airbnb",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/airbnb",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "DoorDash",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/doordash",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Coinbase",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/coinbase",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Robinhood",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/robinhood",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Amplitude",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/amplitude",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Segment",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/segment",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Flexport",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/flexport",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Mercury",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/mercury",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Checkr",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/checkr",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Vercel",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/vercel",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Webflow",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/webflow",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Airtable",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/airtable",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Asana",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/asana",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Deel",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/deel",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Postman",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/postman",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Sourcegraph",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/sourcegraph",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "LaunchDarkly",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/launchdarkly",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Neo4j",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/neo4j",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "PayPal",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/paypal",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Visa",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/visa",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Mastercard",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/mastercard",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Infosys",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/infosys",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Cognizant",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/cognizant",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Accenture",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/accenture",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+  {
+    company:    "Capgemini",
+    ats:        "greenhouse",
+    careersUrl: "https://boards.greenhouse.io/capgemini",
+    adapter:    "greenhouse",
+    enabled:    true,
+  },
+
+  // ── ASHBY ─────────────────────────────────────────────────────────────────
+  {
+    company:    "OpenAI",
+    ats:        "ashby",
+    careersUrl: "https://jobs.ashbyhq.com/openai",
+    adapter:    "ashby",
+    enabled:    true,
+  },
+
+  // ── LEVER ─────────────────────────────────────────────────────────────────
+  {
+    company:    "Netflix",
+    ats:        "lever",
+    careersUrl: "https://jobs.lever.co/netflix",
+    adapter:    "lever",
+    enabled:    true,
+  },
+
+  // ── BRASSRING ─────────────────────────────────────────────────────────────
+  {
+    company:    "AT&T",
+    ats:        "brassring",
+    careersUrl: "https://sjobs.brassring.com",
+    adapter:    "brassring",
+    enabled:    false, // BrassRing requires CSRF/session — disable until implemented
+  },
+
+  // ── EIGHTFOLD ─────────────────────────────────────────────────────────────
+  {
+    company:    "Cisco",
+    ats:        "eightfold",
+    careersUrl: "https://jobs.cisco.com",
+    adapter:    "eightfold",
+    enabled:    false, // Eightfold adapter not yet implemented
+  },
+
+  // ── PLAYWRIGHT / DIRECT SCRAPE (Tier A) ──────────────────────────────────
+  // These companies have no standard ATS API — scraped via career page APIs
+  {
+    company:    "Microsoft",
+    ats:        "custom",
+    careersUrl: "https://jobs.careers.microsoft.com/global/en/search",
+    adapter:    "playwright_microsoft",
+    enabled:    true,
+  },
+  {
+    company:    "Google",
+    ats:        "custom",
+    careersUrl: "https://careers.google.com/api/v3/search",
+    adapter:    "playwright_google",
+    enabled:    true,
+  },
+  {
+    company:    "Apple",
+    ats:        "custom",
+    careersUrl: "https://jobs.apple.com/api/role/search",
+    adapter:    "playwright_apple",
+    enabled:    true,
+  },
+  {
+    company:    "Meta",
+    ats:        "custom",
+    careersUrl: "https://www.metacareers.com/graphql",
+    adapter:    "playwright_meta",
+    enabled:    true,
+  },
+  {
+    company:    "Amazon",
+    ats:        "custom",
+    careersUrl: "https://www.amazon.jobs/en/search.json",
+    adapter:    "playwright_amazon",
+    enabled:    true,
+  },
+];
+
+// ── Lookup helpers ─────────────────────────────────────────────────────────
+export function getEnabledByAdapter(adapter: string): CompanyAtsConfig[] {
+  return COMPANY_ATS_REGISTRY.filter(c => c.enabled && c.adapter === adapter);
+}
+
+export function getEnabledByAts(ats: AtsType): CompanyAtsConfig[] {
+  return COMPANY_ATS_REGISTRY.filter(c => c.enabled && c.ats === ats);
+}
+
+// Workday config shape (parsed from careersUrl)
+export interface WorkdayConfig {
+  name:   string;
+  tenant: string;
+  site:   string;
+  server: string;
+}
+
+export function getWorkdayConfigs(): WorkdayConfig[] {
+  return getEnabledByAts("workday").map(c => {
+    // Parse: https://{tenant}.{server}.myworkdayjobs.com/{site}
+    const url  = c.careersUrl ?? "";
+    const match = url.match(/https?:\/\/([^.]+)\.([^.]+)\.myworkdayjobs\.com\/(.+)/);
+    if (!match) return null;
+    const [, tenant, server, site] = match;
+    return { name: c.company, tenant, server, site };
+  }).filter((x): x is WorkdayConfig => x !== null);
+}
+
+// Greenhouse slug list (parsed from careersUrl)
+export function getGreenhouseSlugs(): Array<{ company: string; slug: string }> {
+  return getEnabledByAts("greenhouse").map(c => {
+    const url  = c.careersUrl ?? "";
+    const slug = url.split("/").pop() ?? "";
+    return { company: c.company, slug };
+  }).filter(x => x.slug !== "");
+}
