@@ -476,7 +476,10 @@ export default function JobsPage(){
       });
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);
-      setRefreshMsg(`✅ Refresh complete — ${data.jobs_stored} jobs upserted this run (${Math.round(data.duration_ms/1000)}s)`);
+      const upserted = data.jobs_upserted_this_run ?? data.jobs_stored ?? 0;
+      const dbTotal  = data.board_db_total ?? "?";
+      const secs     = Math.round(data.duration_ms/1000);
+      setRefreshMsg(`✅ Refresh done (${secs}s) — ${upserted} rows upserted this run • ${dbTotal} active rows in DB`);
       // Reload jobs after refresh
       await loadJobs(filters.datePosted,sort);
     }catch(e:unknown){

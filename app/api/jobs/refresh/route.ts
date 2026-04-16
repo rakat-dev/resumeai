@@ -45,34 +45,72 @@ interface NormalizedJob {
 }
 
 // ── Title filter ───────────────────────────────────────────────────────────
+// INCLUDE: must contain at least one keyword or phrase
 const INCLUDE_KEYWORDS = [
-  "software", "backend", "frontend", "full stack", "fullstack",
-  "application", "cloud", "platform", "python developer", "java developer",
-  "data", "ai", "ui developer", "ui engineer",
+  "software engineer", "software developer",
+  "backend engineer", "backend developer",
+  "frontend engineer", "frontend developer",
+  "full stack", "fullstack",
+  "cloud engineer", "devops engineer", "platform engineer",
+  "site reliability", "sre",
+  "distributed systems",
+  "application engineer", "application developer",
+  "python developer", "java developer",
+  "ui engineer", "ui developer",
+  "api engineer", "integration engineer",
+  "web developer", "product engineer",
 ];
-const INCLUDE_FULL_PHRASES = [
-  "web developer", "product engineer", "site reliability engineer", "sre",
-  "distributed systems engineer", "api engineer", "integration engineer",
-];
+
+// EXCLUDE: hard reject if title contains any of these (substring match — checked
+// BEFORE include keywords, so these always win regardless of SWE context)
 const EXCLUDE_SUBSTRINGS = [
-  "lead", "principal", "architect", "manager", "director",
-  "vice president", "head of", "chief",
-  "intern", "internship", ".net", "dotnet", "c#",
-  "machine learning", "gpu", "research scientist",
+  // Seniority levels we do not want in the board
+  "principal",   // kills "Principal Software Engineer"
+  "staff",       // kills "Staff Software Engineer"
+  "lead",        // kills "Lead Software Engineer", "Tech Lead"
+  "architect",   // kills "Solutions Architect", "Software Architect"
+  // Management / non-IC
+  "manager", "director", "vice president", "head of", "chief",
+  "intern", "internship",
+  // Language-specific we don't target
+  ".net developer", "dotnet", "c# developer",
+  // Research / clearance
+  "research scientist",
+  // Non-SWE tech
   "security engineer", "cybersecurity", "network engineer",
+  // Business / process
   "business analyst", "scrum master", "project manager",
   "recruiter", "marketing engineer",
+  // Junk roles from retail / ops / physical
+  "technician", "mechanic", "electrician", "machinist",
+  "warehouse", "retail associate", "store associate",
+  "robotics engineer", "controls engineer", "automation engineer",
+  "mechanical engineer", "electrical engineer", "civil engineer",
+  "nurse", "pharmacist", "physician", "therapist",
+  "sales representative", "account executive", "account manager",
+  "data center technician", "field technician", "field service",
+  "customer service", "customer support",
 ];
-const EXCLUDE_WHOLE_WORDS = ["staff", "ml", "vp"];
+
+// EXCLUDE whole-word only — must not match "mls", "vpn", etc.
+const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
 
 function shouldIncludeTitle(title: string): boolean {
   const tl = title.toLowerCase();
-  for (const kw of EXCLUDE_SUBSTRINGS)   { if (tl.includes(kw)) return false; }
-  for (const kw of EXCLUDE_WHOLE_WORDS)  { if (new RegExp(`\\b${kw}\\b`).test(tl)) return false; }
-  const stripped = tl.replace(/\b(senior|sr\.?|ii|iii|iv|2|3|4|junior|jr\.?)\b/gi, "").trim();
+
+  // Hard excludes always win — checked before include keywords
+  for (const kw of EXCLUDE_SUBSTRINGS)  { if (tl.includes(kw))                     return false; }
+  for (const kw of EXCLUDE_WHOLE_WORDS) { if (new RegExp(`\\b${kw}\\b`).test(tl)) return false; }
+
+  // Must match at least one SWE keyword
+  if (INCLUDE_KEYWORDS.some(kw => tl.includes(kw))) return true;
+
+  // Bare "Engineer" / "Developer" with no qualifying keyword → exclude
+  const stripped = tl
+    .replace(/\b(senior|sr\.?|ii|iii|iv|2|3|4|junior|jr\.?)\b/gi, "")
+    .trim();
   if (stripped === "engineer" || stripped === "developer") return false;
-  for (const kw of INCLUDE_KEYWORDS)     { if (tl.includes(kw))  return true; }
-  for (const ph of INCLUDE_FULL_PHRASES) { if (tl.includes(ph))  return true; }
+
   return false;
 }
 
@@ -595,16 +633,31 @@ export async function POST(req: NextRequest) {
   await Promise.allSettled(tasks);
   await deactivateStaleJobs();
 
-  const totalStored = Object.values(results).reduce<number>(
+  // Query DB for actual visible board count after this run
+  let boardVisibleTotal = 0;
+  try {
+    const { count } = await supabaseAdmin
+      .from("jobs")
+      .select("*", { count: "exact", head: true })
+      .eq("is_active", true);
+    boardVisibleTotal = count ?? 0;
+  } catch { /* non-fatal */ }
+
+  const jobsUpsertedThisRun = Object.values(results).reduce<number>(
     (sum, r) => sum + ((r as { stored?: number }).stored ?? 0), 0
   );
   const durationMs = Date.now() - startMs;
-  console.log(`[refresh] done in ${durationMs}ms stored=${totalStored}`);
+  console.log(`[refresh] done in ${durationMs}ms upserted=${jobsUpsertedThisRun} board_total=${boardVisibleTotal}`);
 
   return NextResponse.json({
-    ok: true, duration_ms: durationMs,
-    sources_run: Object.keys(results),
-    jobs_stored: totalStored,
+    ok:                    true,
+    duration_ms:           durationMs,
+    sources_run:           Object.keys(results),
+    // Upserted = rows inserted OR updated in DB this run (not the board visible total)
+    jobs_upserted_this_run: jobsUpsertedThisRun,
+    // Board total = active rows in DB (what the Jobs page will show before diversity caps)
+    board_db_total:        boardVisibleTotal,
+    note:                  `${jobsUpsertedThisRun} rows upserted this run. Board shows ${boardVisibleTotal} active rows in DB (diversity caps may reduce visible count further).`,
     results,
   });
 }
