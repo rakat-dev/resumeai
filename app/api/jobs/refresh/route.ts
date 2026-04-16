@@ -569,6 +569,10 @@ const ADZUNA_TARGETED_COMPANIES = [
   "Accenture",          // 273 jobs — consulting giant, heavy coverage
   "Cognizant",          // 314 jobs
   "Capgemini",          //  94 jobs
+  // Third expansion — Meta scraper broken + Walmart/Target undercovered by Workday:
+  "Walmart",            // 400 jobs — Workday pipeline finds only 38; Adzuna indexes Walmart corporate SWE roles more thoroughly
+  "Meta",               // 238 jobs — playwright Meta scraper returns HTTP 400, Adzuna is the entire Meta pipeline for now
+  "Target",             //   4 jobs — small add, but target company on the priority list
 ];
 
 async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
