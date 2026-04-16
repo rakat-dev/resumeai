@@ -562,6 +562,13 @@ const ADZUNA_TARGETED_COMPANIES = [
   "UnitedHealth Group", //  90 jobs — exact name matters; "UnitedHealth" alone returns 400
   "ServiceNow",         //  35 jobs (also in Workday registry but tenant returns 422)
   "UPS",                //   2 jobs — sparse but real
+  // Second expansion — Greenhouse slug was 404 for these; Adzuna has them:
+  "Snowflake",          //  10 jobs — all real engineering roles
+  "Visa",               //  45 jobs
+  "Mastercard",         //  45 jobs
+  "Accenture",          // 273 jobs — consulting giant, heavy coverage
+  "Cognizant",          // 314 jobs
+  "Capgemini",          //  94 jobs
 ];
 
 async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
