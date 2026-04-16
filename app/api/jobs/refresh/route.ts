@@ -527,6 +527,68 @@ async function fetchAdzunaSource(): Promise<{ raw: RawJob[]; fetched: number; er
   return { raw: results, fetched: totalFetched, error: null };
 }
 
+// ── 1d-b. Adzuna Targeted (per-company) ────────────────────────────────────
+// Fills coverage gaps for major enterprise companies whose direct Workday/ATS
+// fetch is blocked by Cloudflare bot protection (Wells Fargo, Capital One,
+// Morgan Stanley, Home Depot). One call per company, 50 jobs each, scoped to
+// the last 30 days. Jobs land in the DB tagged source="adzuna" — dedupe
+// handles any overlap with fetchAdzunaSource.
+const ADZUNA_TARGETED_COMPANIES = [
+  "Wells Fargo",
+  "Capital One",
+  "Morgan Stanley",
+  "Home Depot",
+];
+
+async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  const appId  = process.env.ADZUNA_APP_ID;
+  const appKey = process.env.ADZUNA_APP_KEY;
+  if (!appId || !appKey) return { raw: [], fetched: 0, error: "ADZUNA keys not set" };
+
+  const results: RawJob[] = [];
+  let totalFetched = 0;
+
+  const settled = await Promise.allSettled(
+    ADZUNA_TARGETED_COMPANIES.map(async (companyName) => {
+      const params = new URLSearchParams({
+        app_id: appId, app_key: appKey,
+        results_per_page: "50", company: companyName,
+        what: "software engineer", max_days_old: String(MAX_INGEST_DAYS),
+        "content-type": "application/json", sort_by: "date",
+      });
+      const url = `https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const raw  = (data.results ?? []) as Record<string, unknown>[];
+      return { companyName, raw };
+    })
+  );
+
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    const { companyName, raw } = result.value;
+    totalFetched += raw.length;
+    for (const j of raw) {
+      const locObj    = (j.location as Record<string, unknown>) ?? {};
+      const company   = ((j.company as Record<string, unknown>)?.display_name as string) ?? companyName;
+      const createdAt = (j.created as string) ?? null;
+      if (createdAt && (Date.now() - new Date(createdAt).getTime()) / 86_400_000 > MAX_INGEST_DAYS) continue;
+      results.push({
+        id: `azt-${j.id ?? Math.random()}`, source: "adzuna" as RefreshSource, company,
+        title:       (j.title as string) ?? "",
+        location:    (locObj.display_name as string) ?? "United States",
+        description: (j.description as string) ?? "",
+        applyUrl:    (j.redirect_url as string) ?? "#",
+        postedAt:    createdAt, type: "Full-time",
+      });
+    }
+  }
+
+  console.log(`[adzuna_targeted] companies=${ADZUNA_TARGETED_COMPANIES.length} raw=${totalFetched} kept=${results.length}`);
+  return { raw: results, fetched: totalFetched, error: null };
+}
+
 // ── 1e. Jooble ─────────────────────────────────────────────────────────────
 const JOOBLE_MAX_PAGES = 6; // increased from 3
 
@@ -642,6 +704,7 @@ export async function POST(req: NextRequest) {
   if (run("workday"))    tasks.push(ingestSource("workday",    fetchWorkdaySource,    "workday"   ).then(r => { results.workday    = r; }));
   if (run("jsearch"))    tasks.push(ingestSource("jsearch",    fetchJSearchSource,    "jsearch"   ).then(r => { results.jsearch    = r; }));
   if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaSource,     "adzuna"    ).then(r => { results.adzuna     = r; }));
+  if (run("adzuna"))     tasks.push(ingestSource("adzuna_targeted", fetchAdzunaTargetedSource, "adzuna").then(r => { results.adzuna_targeted = r; }));
   if (run("jooble"))     tasks.push(ingestSource("jooble",     fetchJoobleSource,     "jooble"    ).then(r => { results.jooble     = r; }));
 
   if (run("playwright")) {
