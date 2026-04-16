@@ -107,7 +107,7 @@ function fortuneRank(company:string):number{
   for(const [k,v] of Object.entries(FORTUNE)){if(lc===k||lc.includes(k))return v;}
   return 9999;
 }
-type SortOption="date_desc"|"date_asc"|"company_desc"|"company_asc";
+type SortOption="date_desc"|"date_asc"|"company_desc"|"company_asc"|"best_match";
 function clientSort(jobs:Job[],sort:SortOption):Job[]{
   return [...jobs].sort((a,b)=>{
     const ats=(a as Job&{postedTimestamp?:number}).postedTimestamp||0;
@@ -412,7 +412,7 @@ export default function JobsPage(){
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
   const [filtersOpen,setFiltersOpen]=useState(false);
-  const [sort,setSort]=useState<SortOption>("company_desc");
+  const [sort,setSort]=useState<SortOption>("best_match");
 
   const [selected,setSelected]=useState<Job|null>(null);
   const [resume,setResume]=useState("");
@@ -594,7 +594,7 @@ export default function JobsPage(){
           </button>
           <select value={sort} onChange={e=>setSort(e.target.value as typeof sort)}
             style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"9px 12px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:13,outline:"none",cursor:"pointer"}}>
-            <option value="company_desc">🏆 Best Match</option>
+            <option value="best_match">🏆 Best Match</option>
             <option value="date_desc">🕐 Date Posted</option>
             <option value="company_desc">🏢 Top Companies</option>
           </select>

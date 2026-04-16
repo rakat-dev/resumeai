@@ -8,7 +8,7 @@ export const maxDuration = 60;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export type JobFilter = "24h" | "3d" | "7d" | "any";
-export type SortOption = "date_desc" | "date_asc" | "company_desc" | "company_asc";
+export type SortOption = "date_desc" | "date_asc" | "company_desc" | "company_asc" | "best_match";
 
 export interface Job {
   id: string;
