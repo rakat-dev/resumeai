@@ -42,20 +42,19 @@ function loadPanel():{sel:Job|null;v1:string;v2:string;jd:string;v1ats:unknown;v
     };
   }catch{return null;}
 }
-function saveSS(q:string,f:JobFilter,jobs:Job[],src:Record<string,number>){
+function saveSS(f:JobFilter,jobs:Job[],src:Record<string,number>){
   try{
-    sessionStorage.setItem(SS.Q,q);
     sessionStorage.setItem(SS.F,f);
     sessionStorage.setItem(SS.J,JSON.stringify(jobs));
     sessionStorage.setItem(SS.S,JSON.stringify(src));
   }catch{}
 }
-function loadSS():{query:string;filter:JobFilter;jobs:Job[];sources:Record<string,number>}|null{
+function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|null{
   try{
-    const q=sessionStorage.getItem(SS.Q),f=sessionStorage.getItem(SS.F) as JobFilter;
+    const f=sessionStorage.getItem(SS.F) as JobFilter;
     const j=sessionStorage.getItem(SS.J),s=sessionStorage.getItem(SS.S);
-    if(!q||!j)return null;
-    return{query:q,filter:f||"any",jobs:JSON.parse(j),sources:s?JSON.parse(s):{}};
+    if(!j)return null;
+    return{filter:f||"any",jobs:JSON.parse(j),sources:s?JSON.parse(s):{}};
   }catch{return null;}
 }
 
@@ -271,7 +270,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
               {(["any","24h","3d","7d"] as JobFilter[]).map(v=>(
                 <button key={v} onClick={()=>setDraft(d=>({...d,datePosted:v}))}
                   style={{padding:"6px 14px",borderRadius:100,fontSize:12,fontWeight:600,cursor:"pointer",border:"none",background:draft.datePosted===v?"var(--accent)":"var(--surface2)",color:draft.datePosted===v?"#fff":"var(--muted)"}}>
-                  {v==="any"?"Any time":v==="24h"?"Past 24h":v==="3d"?"Past 3 days":"Past week"}
+                  {v==="any"?"All":v==="24h"?"Last 24 hours":v==="3d"?"Last 3 days":"Last week"}
                 </button>
               ))}
             </div>
@@ -395,13 +394,15 @@ const S={
 
 // ── Main ───────────────────────────────────────────────────────────────────
 export default function JobsPage(){
-  const [query,setQuery]=useState("");
   const [jobs,setJobs]=useState<Job[]>([]);
   const [sources,setSources]=useState<Record<string,number>>({});
   const [diagnostics,setDiagnostics]=useState<SourceDiagnostic[]>([]);
   const [diagOpen,setDiagOpen]=useState(false);
   const [loading,setLoading]=useState(false);
-  const [searchErr,setSearchErr]=useState("");
+  const [loadErr,setLoadErr]=useState("");
+  const [totalJobs,setTotalJobs]=useState(0);
+  const [refreshing,setRefreshing]=useState(false);
+  const [refreshMsg,setRefreshMsg]=useState("");
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
   const [filtersOpen,setFiltersOpen]=useState(false);
@@ -425,24 +426,60 @@ export default function JobsPage(){
   const [jd,setJd]=useState("");
 
 
-  // Restore from sessionStorage (cleared on tab close)
+  // Load jobs from DB on mount (stored-search model)
   useEffect(()=>{
-    const saved=loadSS();
-    if(saved){setQuery(saved.query);setJobs(saved.jobs);setSources(saved.sources);}
-    // Load shared base resume
     setResume(getBaseResume());
-    // Restore panel state (survives tab switching)
     const panel=loadPanel();
     if(panel){
-      setSelected(panel.sel);
-      setV1Resume(panel.v1);
-      setV2Resume(panel.v2 as string);
-      setJd(panel.jd);
-      setV1Ats(panel.v1ats as ATSResult|null);
-      setV2Ats(panel.v2ats as ATSResult|null);
-      setStep(panel.step as 0|1|2);
+      setSelected(panel.sel);setV1Resume(panel.v1);setV2Resume(panel.v2 as string);
+      setJd(panel.jd);setV1Ats(panel.v1ats as ATSResult|null);
+      setV2Ats(panel.v2ats as ATSResult|null);setStep(panel.step as 0|1|2);
     }
+    // Restore cached results or fetch from DB
+    const cached=loadSS();
+    if(cached){setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);}
+    else loadJobs(filters.datePosted,sort);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
+
+  // ── Load jobs from DB ──────────────────────────────────────────────────
+  const loadJobs=async(dateFilter:JobFilter,sortOpt:SortOption)=>{
+    setLoading(true);setLoadErr("");
+    try{
+      const res=await fetch(`/api/jobs?filter=${dateFilter}&sort=${sortOpt}&page=1`);
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      const data=await res.json();
+      const nj=(data.jobs as Job[])||[];
+      const ns=(data.sources as Record<string,number>)||{};
+      const nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
+      setJobs(nj);setSources(ns);setDiagnostics(nd);
+      setTotalJobs(data.total||nj.length);
+      saveSS(dateFilter,nj,ns);
+      if(nj.length===0)setLoadErr(data.message||"No jobs in DB yet — click \"Refresh Now\" to ingest jobs.");
+    }catch(e:unknown){setLoadErr(e instanceof Error?e.message:"Failed to load jobs.");}
+    setLoading(false);
+  };
+
+  // ── Trigger background refresh ────────────────────────────────────────
+  const handleRefresh=async(source="all")=>{
+    setRefreshing(true);setRefreshMsg("");
+    try{
+      const res=await fetch("/api/jobs/refresh",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({source}),
+      });
+      const data=await res.json();
+      if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);
+      setRefreshMsg(`✅ Refresh complete — ${data.jobs_stored} jobs stored (${Math.round(data.duration_ms/1000)}s)`);
+      // Reload jobs after refresh
+      await loadJobs(filters.datePosted,sort);
+    }catch(e:unknown){
+      setRefreshMsg(`❌ ${e instanceof Error?e.message:"Refresh failed"}`);
+    }
+    setRefreshing(false);
+    setTimeout(()=>setRefreshMsg(""),8000);
+  };
 
   // ── Client-side filtering ─────────────────────────────────────────────
   const {filteredJobs}=useMemo(()=>{
@@ -481,34 +518,9 @@ export default function JobsPage(){
   const currentResume=step===2?v2Resume:v1Resume;
   const currentAts=step===2?v2Ats:v1Ats;
 
-  // ── Search ───────────────────────────────────────────────────────────────
-  const handleSearch=async()=>{
-    if(!query.trim())return;
-    setLoading(true);setJobs([]);setSelected(null);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setSearchErr("");setFilters(DEFAULT_FILTERS);
-    try{
-      const res=await fetch(`/api/jobs?q=${encodeURIComponent(query)}&filter=${filters.datePosted}`);
-      if(!res.ok){
-        // Vercel timeout and other errors return plain text, not JSON
-        const text=await res.text().catch(()=>"");
-        const isTimeout=res.status===504||text.toLowerCase().includes("timeout")||text.startsWith("A");
-        throw new Error(isTimeout
-          ? "Search timed out — the pipeline took too long. Try again in a few seconds."
-          : `Search failed (HTTP ${res.status}): ${text.slice(0,120)}`
-        );
-      }
-      let data:Record<string,unknown>;
-      try{
-        data=await res.json();
-      }catch{
-        throw new Error("Search timed out — please try again.");
-      }
-      const nj=(data.jobs as unknown[])||[],ns=(data.sources as Record<string,number>)||{},nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
-      setJobs(nj as Job[]);setSources(ns);setDiagnostics(nd);
-      saveSS(query,"any",nj as Job[],ns);
-      if(nj.length===0)setSearchErr("No jobs found. Try a different query or time filter.");
-    }catch(e:unknown){setSearchErr(e instanceof Error?e.message:"Search failed — please try again.");}
-    setLoading(false);
-  };
+  // Re-load when filter or sort changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(jobs.length>0||loading)loadJobs(filters.datePosted,sort);},[filters.datePosted,sort]);
 
   const handleSaveResume=()=>{
     saveBaseResume(resume);
@@ -554,33 +566,34 @@ export default function JobsPage(){
 
   return(
     <AppLayout>
-      <div style={{marginBottom:16}}>
-        <h1 style={{fontSize:28,fontWeight:800}}>🔍 Job Search</h1>
-        <p style={{color:"var(--muted)",fontSize:14,marginTop:4}}>Real jobs from LinkedIn, Indeed, Greenhouse, Lever & more — US only</p>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:10}}>
+        <div>
+          <h1 style={{fontSize:26,fontWeight:800,marginBottom:2}}>💼 Job Board</h1>
+          <p style={{color:"var(--muted)",fontSize:13}}>
+            {loading?"Loading...":totalJobs>0?`${totalJobs.toLocaleString()} stored jobs — Greenhouse, Workday, Playwright, JSearch, Adzuna, Jooble`:"No jobs yet — run a refresh"}
+          </p>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <button onClick={()=>handleRefresh("all")} disabled={refreshing}
+            style={{...S.btn(refreshing?"var(--surface2)":"var(--accent2)","#0a0a0f"),opacity:refreshing?0.6:1,cursor:refreshing?"not-allowed":"pointer",fontSize:13}}>
+            {refreshing?<><span className="spinner dark"/>Refreshing...</>:"🔄 Refresh Now"}
+          </button>
+          <button onClick={()=>setFiltersOpen(true)}
+            style={{...S.btn("var(--surface2)","var(--text)"),border:"1px solid var(--border)",position:"relative",fontSize:13}}>
+            ⚙️ Filters
+            {activeFilterCount>0&&<span style={{position:"absolute",top:-6,right:-6,background:"var(--accent)",color:"#fff",borderRadius:"50%",width:18,height:18,fontSize:10,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{activeFilterCount}</span>}
+          </button>
+          <select value={sort} onChange={e=>setSort(e.target.value as typeof sort)}
+            style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"9px 12px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:13,outline:"none",cursor:"pointer"}}>
+            <option value="company_desc">🏆 Best Match</option>
+            <option value="date_desc">🕐 Date Posted</option>
+            <option value="company_asc">🏢 Company</option>
+          </select>
+        </div>
       </div>
-
-      {/* Search + Filters bar */}
-      <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
-        <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSearch()}
-          placeholder="e.g. Senior Software Engineer, Java Developer..."
-          style={{flex:1,minWidth:200,background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"11px 16px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:14,outline:"none"}}/>
-        <button onClick={()=>setFiltersOpen(true)}
-          style={{...S.btn("var(--surface2)","var(--text)"),border:"1px solid var(--border)",position:"relative"}}>
-          ⚙️ Filters
-          {activeFilterCount>0&&<span style={{position:"absolute",top:-6,right:-6,background:"var(--accent)",color:"#fff",borderRadius:"50%",width:18,height:18,fontSize:10,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>{activeFilterCount}</span>}
-        </button>
-        <select value={sort} onChange={e=>setSort(e.target.value as typeof sort)}
-          style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:12,padding:"11px 14px",color:"var(--text)",fontFamily:"'DM Sans',sans-serif",fontSize:13,outline:"none",cursor:"pointer"}}>
-          <option value="company_desc">🏆 Top Companies First</option>
-          <option value="date_desc">🕐 Newest First</option>
-          <option value="date_asc">🕐 Oldest First</option>
-          <option value="company_asc">📋 All Companies</option>
-        </select>
-        <button onClick={handleSearch} disabled={loading||!query.trim()}
-          style={{...S.btn("var(--accent2)","#0a0a0f"),opacity:loading||!query.trim()?0.5:1,cursor:loading||!query.trim()?"not-allowed":"pointer"}}>
-          {loading?<><span className="spinner dark"/>Searching...</>:"🔍 Search Jobs"}
-        </button>
-      </div>
+      {/* Refresh feedback */}
+      {refreshMsg&&<div style={{background:refreshMsg.startsWith("✅")?"rgba(0,200,100,0.1)":"rgba(255,107,107,0.1)",border:`1px solid ${refreshMsg.startsWith("✅")?"rgba(0,200,100,0.3)":"rgba(255,107,107,0.3)"}`,borderRadius:10,padding:"9px 14px",fontSize:12,marginBottom:10,color:refreshMsg.startsWith("✅")?"#00c864":"var(--accent3)"}}>{refreshMsg}</div>}
 
       {/* Results count + source breakdown */}
       {jobs.length>0&&(
@@ -648,7 +661,7 @@ export default function JobsPage(){
         </div>
       )}
 
-      {searchErr&&<div style={{background:"rgba(255,107,107,.1)",border:"1px solid rgba(255,107,107,.3)",color:"var(--accent3)",borderRadius:12,padding:"12px 16px",fontSize:13,marginBottom:14}}>⚠️ {searchErr}</div>}
+      {loadErr&&<div style={{background:"rgba(255,107,107,.1)",border:"1px solid rgba(255,107,107,.3)",color:"var(--accent3)",borderRadius:12,padding:"12px 16px",fontSize:13,marginBottom:14}}>⚠️ {loadErr}</div>}
 
       {/* Two-panel layout */}
       <div style={{display:"grid",gridTemplateColumns:selected?`1fr ${panelCollapsed?"42px":"1fr"}`:"1fr",gap:16,alignItems:"start"}}>
@@ -656,11 +669,17 @@ export default function JobsPage(){
         {/* ── Jobs scrollable container ── */}
         <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:16,overflow:"hidden"}}>
           <div style={{height:"calc(100vh - 230px)",overflowY:"auto",padding:"12px"}}>
-            {jobs.length===0&&!loading&&!searchErr&&(
+            {loading&&jobs.length===0&&(
               <div style={{textAlign:"center",padding:"60px 20px",color:"var(--muted)"}}>
-                <div style={{fontSize:48,marginBottom:12}}>💼</div>
-                <p style={{fontSize:14}}>Search for jobs above</p>
-                <p style={{fontSize:12,marginTop:6}}>Results are session-only — cleared when you close the tab</p>
+                <div className="spinner" style={{width:32,height:32,borderWidth:3,borderTopColor:"var(--accent)",margin:"0 auto 14px"}}/>
+                <p style={{fontSize:14}}>Loading jobs from DB...</p>
+              </div>
+            )}
+            {jobs.length===0&&!loading&&!loadErr&&(
+              <div style={{textAlign:"center",padding:"60px 20px",color:"var(--muted)"}}>
+                <div style={{fontSize:48,marginBottom:12}}>📭</div>
+                <p style={{fontSize:14}}>No jobs in DB yet</p>
+                <p style={{fontSize:12,marginTop:6}}>Click <strong>Refresh Now</strong> to ingest jobs from all sources</p>
               </div>
             )}
 
