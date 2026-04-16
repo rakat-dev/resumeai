@@ -440,10 +440,22 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
 async function fetchWorkdaySource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   const results: RawJob[] = [];
   const companies = getWorkdayConfigs(); // registry-driven
-  const BATCH = 4;
+  const BATCH = 12;              // was 4 — more parallelism to stay under Vercel 60s
+  const PER_TENANT_MS = 20_000;  // hard cap per tenant (paging can blow past per-call 12s)
+
   for (let i = 0; i < companies.length; i += BATCH) {
     const settled = await Promise.allSettled(
-      companies.slice(i, i + BATCH).map(c => fetchWorkdayCompany(c.name, c.tenant, c.site, c.server))
+      companies.slice(i, i + BATCH).map(c =>
+        Promise.race<RawJob[]>([
+          fetchWorkdayCompany(c.name, c.tenant, c.site, c.server),
+          new Promise<RawJob[]>((_, reject) =>
+            setTimeout(() => reject(new Error(`per-tenant timeout ${c.name}`)), PER_TENANT_MS)
+          ),
+        ]).catch(() => {
+          console.warn(`[workday] ${c.name} hit ${PER_TENANT_MS}ms per-tenant cap`);
+          return [] as RawJob[];
+        })
+      )
     );
     settled.forEach(r => { if (r.status === "fulfilled") results.push(...r.value); });
   }
