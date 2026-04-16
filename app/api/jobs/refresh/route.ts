@@ -397,7 +397,11 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         body: JSON.stringify({ appliedFacets: {}, limit: WD_PAGE_SIZE, offset: page * WD_PAGE_SIZE, searchText: "" }),
         signal: AbortSignal.timeout(12_000),
       });
-      if (!res.ok) break;
+      if (!res.ok) {
+        // Log 422 so we know which tenants have bot protection
+        if (res.status === 422) console.warn(`[workday] ${name} returned 422 — tenant may require session cookie`);
+        break;
+      }
       const data = await res.json();
       const jobs = (data.jobPostings ?? []) as Record<string, unknown>[];
       if (jobs.length === 0) break;
