@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  scoreSponsorshipSignal, scoreTitleRelevance, scoreRecency,
-} from "@/lib/queryExpansion";
-import { getFortuneTier, getPriorityTier, formatPostedDate } from "@/lib/jobUtils";
+import { getFortuneTier, getPriorityTier, formatPostedDate, computeJobScore } from "@/lib/jobUtils";
+import type { QualityBucket } from "@/lib/jobUtils";
 import { supabase } from "@/lib/supabase";
 import type { JobRow } from "@/lib/supabase";
 
@@ -32,6 +30,7 @@ export interface Job {
   priorityTier?: "highest" | "high" | "must_apply";
   fortuneRank?: number;
   relevanceScore?: number;
+  bucket?: QualityBucket;
 }
 
 export interface SourceStatus {
@@ -53,26 +52,43 @@ export interface SourceDiagnostic {
 // ── Map DB row → Job ───────────────────────────────────────────────────────
 function rowToJob(row: JobRow): Job {
   const ts = row.posted_at ? Math.floor(new Date(row.posted_at).getTime() / 1000) : 0;
-  const sourceType = (row.source as Job["sourceType"]) ?? "other";
+  // Normalize playwright_* source types to "playwright" for UI
+  const rawSource = row.source as string;
+  const sourceType: Job["sourceType"] = rawSource.startsWith("playwright")
+    ? "playwright"
+    : (rawSource as Job["sourceType"]) ?? "other";
+
   return {
-    id:              row.id,
-    title:           row.title,
-    company:         row.company,
-    location:        row.location,
-    type:            row.employment_type ?? "Full-time",
-    description:     row.description ?? "",
-    applyUrl:        row.apply_url,
-    postedAt:        row.posted_at ?? "",
-    postedDate:      ts ? formatPostedDate(ts) : "Recently",
+    id:             row.id,
+    title:          row.title,
+    company:        row.company,
+    location:       row.location,
+    type:           row.employment_type ?? "Full-time",
+    description:    row.description ?? "",
+    applyUrl:       row.apply_url,
+    postedAt:       row.posted_at ?? "",
+    postedDate:     ts ? formatPostedDate(ts) : "Recently",
     postedTimestamp: ts,
-    source:          row.source,
+    source:         rawSource,
     sourceType,
-    skills:          [],   // not stored in DB; computed at ingest time if needed
-    sponsorshipTag:  (row.sponsorship_status as Job["sponsorshipTag"]) ?? "not_mentioned",
-    experience:      undefined,
-    priorityTier:    getPriorityTier(row.company),
-    fortuneRank:     getFortuneTier(row.company),
+    skills:         [],
+    sponsorshipTag: (row.sponsorship_status as Job["sponsorshipTag"]) ?? "not_mentioned",
+    experience:     undefined,
+    priorityTier:   getPriorityTier(row.company),
+    fortuneRank:    getFortuneTier(row.company),
   };
+}
+
+// ── Scoring + bucket assignment (spec §19) ────────────────────────────────
+function scoreJob(job: Job): Job {
+  const { score, bucket } = computeJobScore({
+    title:           job.title,
+    description:     job.description,
+    postedTimestamp: job.postedTimestamp,
+    sourceType:      job.sourceType,
+    company:         job.company,
+  });
+  return { ...job, relevanceScore: score, bucket };
 }
 
 // ── Date filter cutoff ─────────────────────────────────────────────────────
@@ -83,22 +99,7 @@ const DATE_CUTOFF: Record<JobFilter, string | null> = {
   "any": null,
 };
 
-// ── Scoring ────────────────────────────────────────────────────────────────
-function computeRelevanceScore(job: Job): number {
-  let score = 0;
-  score += scoreTitleRelevance(job.title) * 3;
-  score += scoreSponsorshipSignal(job.description);
-  score += scoreRecency(job.postedTimestamp);
-  const tier = job.priorityTier;
-  if (tier === "highest")    score += 5;
-  else if (tier === "high")  score += 3;
-  else if (tier === "must_apply") score += 2;
-  if (job.sourceType === "greenhouse" || job.sourceType === "workday") score += 3;
-  else if (job.sourceType === "jsearch" || job.sourceType === "adzuna") score += 1;
-  return score;
-}
-
-// ── Sort (client-side after DB fetch) ─────────────────────────────────────
+// ── Sort ───────────────────────────────────────────────────────────────────
 function sortJobs(jobs: Job[], sort: SortOption): Job[] {
   return [...jobs].sort((a, b) => {
     switch (sort) {
@@ -112,21 +113,27 @@ function sortJobs(jobs: Job[], sort: SortOption): Job[] {
         const ra = getFortuneTier(a.company), rb = getFortuneTier(b.company);
         return ra !== rb ? rb - ra : (a.postedTimestamp || 0) - (b.postedTimestamp || 0);
       }
-      default: return (b.relevanceScore || 0) - (a.relevanceScore || 0);
+      // Best Match = score desc then recency
+      default: {
+        const sd = (b.relevanceScore || 0) - (a.relevanceScore || 0);
+        return sd !== 0 ? sd : (b.postedTimestamp || 0) - (a.postedTimestamp || 0);
+      }
     }
   });
 }
 
+// ── Diversity caps (spec §18) ──────────────────────────────────────────────
 function applyDiversityCaps(jobs: Job[]): Job[] {
   const sourceCounts  = new Map<string, number>();
   const companyCounts = new Map<string, number>();
   const MAX_PER_SOURCE  = 100;
   const MAX_PER_COMPANY = 30;
   return jobs.filter(j => {
-    const sc = sourceCounts.get(j.sourceType)  ?? 0;
+    const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
+    const sc = sourceCounts.get(sk)  ?? 0;
     const cc = companyCounts.get(j.company.toLowerCase()) ?? 0;
     if (sc >= MAX_PER_SOURCE || cc >= MAX_PER_COMPANY) return false;
-    sourceCounts.set(j.sourceType, sc + 1);
+    sourceCounts.set(sk, sc + 1);
     companyCounts.set(j.company.toLowerCase(), cc + 1);
     return true;
   });
@@ -134,7 +141,6 @@ function applyDiversityCaps(jobs: Job[]): Job[] {
 
 // ── Main Handler ───────────────────────────────────────────────────────────
 // Queries stored jobs from Supabase only. No live source calls.
-// Jobs are ingested via POST /api/jobs/refresh.
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const filter   = (searchParams.get("filter") as JobFilter) || "any";
@@ -143,18 +149,15 @@ export async function GET(req: NextRequest) {
   const pageSize = 25;
 
   try {
-    // ── Build Supabase query ─────────────────────────────────────────────
     let query = supabase
       .from("jobs")
       .select("*")
       .eq("is_active", true)
       .order("posted_at", { ascending: false })
-      .limit(2000);   // fetch broad set, sort/cap client-side
+      .limit(2000);
 
     const cutoff = DATE_CUTOFF[filter];
-    if (cutoff) {
-      query = query.gte("posted_at", cutoff);
-    }
+    if (cutoff) query = query.gte("posted_at", cutoff);
 
     const { data, error } = await query;
 
@@ -165,31 +168,40 @@ export async function GET(req: NextRequest) {
 
     const rows = (data ?? []) as JobRow[];
 
-    // ── Map → score → sort → cap → paginate ──────────────────────────────
-    const jobs   = rows.map(rowToJob);
-    const scored = jobs.map(j => ({ ...j, relevanceScore: computeRelevanceScore(j) }));
-    const sorted = sortJobs(scored, sort);
-    const capped = applyDiversityCaps(sorted);
-    const total  = capped.length;
+    // Map → score (with bucket) → sort → diversity cap → paginate
+    const jobs      = rows.map(rowToJob);
+    const scored    = jobs.map(scoreJob);
+    const sorted    = sortJobs(scored, sort);
+    const capped    = applyDiversityCaps(sorted);
+    const total     = capped.length;
     const paginated = capped.slice((page - 1) * pageSize, page * pageSize);
 
-    // ── Source breakdown ──────────────────────────────────────────────────
-    const sources: Record<string, number> = {
-      greenhouse: 0, workday: 0, playwright: 0,
-      jsearch: 0, adzuna: 0, jooble: 0,
-    };
+    // ── Source breakdown + diagnostics (spec §20) ─────────────────────────
+    const sourceCountMap = new Map<string, number>();
     capped.forEach(j => {
-      const k = j.sourceType in sources ? j.sourceType : "other";
-      sources[k] = (sources[k] ?? 0) + 1;
+      const key = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
+      sourceCountMap.set(key, (sourceCountMap.get(key) ?? 0) + 1);
     });
 
-    const sourceDiagnostics: SourceDiagnostic[] = Object.entries(sources).map(([k, v]) => ({
-      source:           k,
-      called:           false,
-      status:           v > 0 ? "success" : "skipped",
-      rawCount:         v,
-      postFilterCount:  v,
-      error:            null,
+    const SOURCE_KEYS = ["greenhouse", "workday", "playwright", "jsearch", "adzuna", "jooble"];
+    const sources: Record<string, number> = {};
+    SOURCE_KEYS.forEach(k => { sources[k] = sourceCountMap.get(k) ?? 0; });
+
+    // Quality bucket counts (spec §19)
+    const buckets = { hot: 0, strong: 0, possible: 0 };
+    capped.forEach(j => {
+      const b = (j.bucket ?? "possible") as keyof typeof buckets;
+      buckets[b] = (buckets[b] ?? 0) + 1;
+    });
+
+    // Diagnostics per source
+    const sourceDiagnostics: SourceDiagnostic[] = SOURCE_KEYS.map(k => ({
+      source:          k,
+      called:          (sourceCountMap.get(k) ?? 0) > 0,
+      status:          (sourceCountMap.get(k) ?? 0) > 0 ? "success" as const : "skipped" as const,
+      rawCount:        sourceCountMap.get(k) ?? 0,
+      postFilterCount: sources[k],
+      error:           null,
     }));
 
     return NextResponse.json({
@@ -201,6 +213,7 @@ export async function GET(req: NextRequest) {
       totalPages:       Math.ceil(total / pageSize),
       sources,
       sourceDiagnostics,
+      buckets,
       storageMode:      "db",
       message:          total === 0
         ? "No jobs in DB yet. Trigger a refresh via POST /api/jobs/refresh."

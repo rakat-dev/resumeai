@@ -148,3 +148,75 @@ export function isUSLocation(location: string): boolean {
   const parts = location.split(/[,\s]+/);
   return parts.some(p => US_STATES.has(p.trim()) || US_STATES.has(p.trim().toUpperCase()));
 }
+
+// ── Quality buckets (spec §19) ───────────────────────────────────────────────────
+// hot      → score >= 22  (very recent + high title relevance + Tier A company)
+// strong   → score >= 12
+// possible → everything else
+//
+// Ranking signals (spec §19):
+//   recency, title relevance, sponsorship score, company priority, source quality
+
+export type QualityBucket = "hot" | "strong" | "possible";
+
+export function computeJobScore(params: {
+  title:           string;
+  description:     string;
+  postedTimestamp: number;
+  sourceType:      string;
+  company:         string;
+}): { score: number; bucket: QualityBucket } {
+  const { title, description, postedTimestamp, sourceType, company } = params;
+  let score = 0;
+
+  // ── Title relevance (weight x3) ───────────────────────────────
+  const tl = title.toLowerCase();
+  const TITLE_SCORES: Record<string, number> = {
+    "software engineer": 10, "software developer": 10,
+    "backend engineer": 9,   "backend developer": 9,
+    "full stack engineer": 9, "fullstack engineer": 9,
+    "python developer": 8,   "java developer": 8,
+    "frontend engineer": 8,  "cloud engineer": 7,
+    "platform engineer": 7,  "devops engineer": 6,
+    "site reliability engineer": 6, "sre": 6,
+  };
+  let titleScore = 3; // default
+  for (const [term, s] of Object.entries(TITLE_SCORES)) {
+    if (tl.includes(term)) { titleScore = s; break; }
+  }
+  score += titleScore * 3;
+
+  // ── Sponsorship signal ────────────────────────────────────────
+  const dl = description.toLowerCase();
+  const SPONSOR_POS = ["visa sponsorship","h-1b","h1b","will sponsor","opt","cpt"];
+  const SPONSOR_NEG = ["no sponsorship","will not sponsor","cannot sponsor","without sponsorship"];
+  if (SPONSOR_NEG.some(k => dl.includes(k)))      score -= 20;
+  else if (SPONSOR_POS.some(k => dl.includes(k))) score += 15;
+
+  // ── Recency ───────────────────────────────────────────────
+  if (postedTimestamp) {
+    const ageDays = (Date.now() - postedTimestamp * 1000) / 86_400_000;
+    if      (ageDays <= 1)  score += 10;
+    else if (ageDays <= 7)  score += 7;
+    else if (ageDays <= 30) score += 3;
+  }
+
+  // ── Company priority tier ─────────────────────────────────
+  const tier = getPriorityTier(company);
+  if      (tier === "highest")    score += 5;
+  else if (tier === "high")       score += 3;
+  else if (tier === "must_apply") score += 2;
+
+  // ── Source quality ───────────────────────────────────────
+  const srcLower = sourceType.toLowerCase();
+  if (srcLower.startsWith("playwright"))                      score += 4; // Tier A = premium
+  else if (srcLower === "greenhouse" || srcLower === "workday") score += 3;
+  else if (srcLower === "jsearch"    || srcLower === "adzuna")  score += 1;
+
+  // ── Bucket assignment ─────────────────────────────────────
+  const bucket: QualityBucket =
+    score >= 22 ? "hot" :
+    score >= 12 ? "strong" : "possible";
+
+  return { score, bucket };
+}

@@ -799,7 +799,11 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const exp=(job as Job&{experience?:string}).experience;
   const sponsorship=(job as Job&{sponsorshipTag?:string}).sponsorshipTag;
   const sourceType=(job as Job&{sourceType?:string}).sourceType;
+  const bucket=(job as Job&{bucket?:string}).bucket;
   const [saved,setSaved]=useState(()=>isJobSaved(job.id));
+  const bucketBadge = bucket==="hot" ? {label:"🔥 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
+    : bucket==="strong" ? {label:"⭐ Strong",color:"#ff9500",bg:"rgba(255,149,0,0.1)"}
+    : null;
 
   const handleBookmark=(e:React.MouseEvent)=>{
     e.stopPropagation();
@@ -831,6 +835,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
           <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>🕐 {job.postedDate}</span>
+          {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
           <SourceBadge source={job.source} sourceType={sourceType}/>
         </div>
       </div>
