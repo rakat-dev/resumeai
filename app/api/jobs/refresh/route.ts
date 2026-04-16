@@ -550,10 +550,18 @@ async function fetchAdzunaSource(): Promise<{ raw: RawJob[]; fetched: number; er
 // the last 30 days. Jobs land in the DB tagged source="adzuna" — dedupe
 // handles any overlap with fetchAdzunaSource.
 const ADZUNA_TARGETED_COMPANIES = [
+  // Cloudflare-blocked Workday tenants — sourced via Adzuna instead.
   "Wells Fargo",
   "Capital One",
   "Morgan Stanley",
   "Home Depot",
+  // Priority companies expanded 2026-04-16 after Adzuna probe confirmed
+  // real SWE results indexed under these exact names.
+  "IBM",                // 149 jobs on Adzuna
+  "Cigna",              //  18 jobs
+  "UnitedHealth Group", //  90 jobs — exact name matters; "UnitedHealth" alone returns 400
+  "ServiceNow",         //  35 jobs (also in Workday registry but tenant returns 422)
+  "UPS",                //   2 jobs — sparse but real
 ];
 
 async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
