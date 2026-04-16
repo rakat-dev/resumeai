@@ -132,6 +132,74 @@ function clientSort(jobs:Job[],sort:SortOption):Job[]{
   });
 }
 
+// ── Grouped view for Top Companies sort ──────────────────────────────────
+// When sort === "company_desc", results are rendered as collapsible
+// dropdowns: one per top-15 company, plus a "Remaining Jobs" dropdown
+// with a summary card listing the rest.
+const TOP_COMPANY_GROUP_LIMIT = 15;
+
+type CompanyGroup = {
+  type: "company_group";
+  company: string;
+  count: number;
+  jobs: Job[];
+};
+type RemainingGroup = {
+  type: "remaining_group";
+  title: string;
+  count: number;
+  jobs: Job[];
+  companiesSummary: { company: string; count: number }[];
+};
+type GroupedView = (CompanyGroup | RemainingGroup)[];
+
+function normalizeCompany(c: string | null | undefined): string {
+  const trimmed = (c ?? "").trim();
+  return trimmed || "Unknown Company";
+}
+
+function buildGroupedView(sortedJobs: Job[]): GroupedView {
+  // Preserve sort order: first appearance of each company wins
+  const orderedCompanies: string[] = [];
+  const byCompany = new Map<string, Job[]>();
+  for (const j of sortedJobs) {
+    const c = normalizeCompany(j.company);
+    if (!byCompany.has(c)) { byCompany.set(c, []); orderedCompanies.push(c); }
+    byCompany.get(c)!.push(j);
+  }
+
+  const top = orderedCompanies.slice(0, TOP_COMPANY_GROUP_LIMIT);
+  const rest = orderedCompanies.slice(TOP_COMPANY_GROUP_LIMIT);
+
+  const view: GroupedView = top.map(c => ({
+    type: "company_group",
+    company: c,
+    count: byCompany.get(c)!.length,
+    jobs: byCompany.get(c)!,
+  }));
+
+  if (rest.length > 0) {
+    const restJobs: Job[] = [];
+    const summary: { company: string; count: number }[] = [];
+    for (const c of rest) {
+      const jobs = byCompany.get(c)!;
+      restJobs.push(...jobs);
+      summary.push({ company: c, count: jobs.length });
+    }
+    // Sort summary by count desc so heaviest remaining companies sit on top
+    summary.sort((a, b) => b.count - a.count);
+    view.push({
+      type: "remaining_group",
+      title: "Remaining Jobs",
+      count: restJobs.length,
+      jobs: restJobs,
+      companiesSummary: summary,
+    });
+  }
+
+  return view;
+}
+
 function wordOverlap(a:string,b:string):number{
   const wa=new Set(a.toLowerCase().split(/\s+/));
   const wb=b.toLowerCase().split(/\s+/);
@@ -490,7 +558,7 @@ export default function JobsPage(){
   };
 
   // ── Client-side filtering ─────────────────────────────────────────────
-  const {filteredJobs,visibleJobs}=useMemo(()=>{
+  const {filteredJobs,visibleJobs,groupedView}=useMemo(()=>{
     let list=jobs;
 
     // Client-side date filter
@@ -519,7 +587,10 @@ export default function JobsPage(){
     }
 
     const sorted=clientSort(list,sort);
-    return{filteredJobs:sorted,visibleJobs:sorted.slice(0,displayLimit)};
+    // Grouped view only for Top Companies sort — null otherwise so the
+    // normal flat render path is untouched.
+    const groupedView=sort==="company_desc"?buildGroupedView(sorted):null;
+    return{filteredJobs:sorted,visibleJobs:sorted.slice(0,displayLimit),groupedView};
   },[jobs,filters,sort,displayLimit]);
 
   const activeFilterCount=countActiveFilters(filters);
@@ -691,21 +762,65 @@ export default function JobsPage(){
               </div>
             )}
 
-            {/* All jobs with Load More */}
-            <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {visibleJobs.map(job=>(
-                <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
-              ))}
-            </div>
-            {/* Load More button */}
-            {filteredJobs.length>visibleJobs.length&&(
-              <div style={{textAlign:"center",paddingTop:16,paddingBottom:8}}>
-                <button
-                  onClick={()=>setDisplayLimit(l=>l+50)}
-                  style={{padding:"10px 28px",borderRadius:12,border:"1px solid var(--border)",background:"var(--surface2)",color:"var(--text)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Syne',sans-serif"}}>
-                  Load More ({filteredJobs.length-visibleJobs.length} remaining)
-                </button>
+            {/* Grouped-by-company view when sort === "company_desc" */}
+            {groupedView?(
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {groupedView.map((g,i)=>(
+                  <details key={g.type==="company_group"?g.company:"__remaining__"}
+                    style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:14,overflow:"hidden"}}>
+                    <summary style={{padding:"14px 18px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
+                      <span style={{display:"flex",alignItems:"center",gap:10}}>
+                        {g.type==="company_group"?(
+                          <>
+                            <span style={{color:"var(--muted)",fontSize:12,fontWeight:500,minWidth:22}}>#{i+1}</span>
+                            <span>{g.company}</span>
+                          </>
+                        ):(
+                          <span>{g.title}</span>
+                        )}
+                      </span>
+                      <span style={{fontSize:12,color:"var(--muted)",fontWeight:500,background:"var(--surface2)",padding:"3px 10px",borderRadius:999}}>{g.count}</span>
+                    </summary>
+                    <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
+                      {g.type==="remaining_group"&&g.companiesSummary.length>0&&(
+                        <div style={{background:"var(--surface2)",border:"1px dashed var(--border)",borderRadius:12,padding:"12px 14px",marginTop:6}}>
+                          <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--muted)",marginBottom:8,fontWeight:600}}>Companies in this group</div>
+                          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:"6px 16px",fontSize:13}}>
+                            {g.companiesSummary.map(c=>(
+                              <div key={c.company} style={{display:"flex",justifyContent:"space-between",gap:8,color:"var(--text)"}}>
+                                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.company}</span>
+                                <span style={{color:"var(--muted)",fontVariantNumeric:"tabular-nums"}}>— {c.count}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {g.jobs.map(job=>(
+                        <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                      ))}
+                    </div>
+                  </details>
+                ))}
               </div>
+            ):(
+              <>
+                {/* All jobs with Load More */}
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  {visibleJobs.map(job=>(
+                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                  ))}
+                </div>
+                {/* Load More button */}
+                {filteredJobs.length>visibleJobs.length&&(
+                  <div style={{textAlign:"center",paddingTop:16,paddingBottom:8}}>
+                    <button
+                      onClick={()=>setDisplayLimit(l=>l+50)}
+                      style={{padding:"10px 28px",borderRadius:12,border:"1px solid var(--border)",background:"var(--surface2)",color:"var(--text)",fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Syne',sans-serif"}}>
+                      Load More ({filteredJobs.length-visibleJobs.length} remaining)
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
