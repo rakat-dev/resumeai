@@ -4,8 +4,10 @@ import {
   scoreTitleRelevance, scoreRecency,
 } from "@/lib/queryExpansion";
 
-export const maxDuration = 60; // Vercel max: 60s on hobby, 300s on pro
-export type JobFilter = "24h" | "7d" | "30d" | "any";
+export const maxDuration = 60;
+
+// ── Types ─────────────────────────────────────────────────────────────────
+export type JobFilter = "24h" | "3d" | "7d" | "any";
 export type SortOption = "date_desc" | "date_asc" | "company_desc" | "company_asc";
 
 export interface Job {
@@ -21,7 +23,7 @@ export interface Job {
   postedDate: string;
   postedTimestamp: number;
   source: string;
-  sourceType: "jsearch"|"greenhouse"|"lever"|"remotive"|"workday"|"goldman"|"morganstanley"|"cisco"|"oracle"|"adzuna"|"other";
+  sourceType: "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"firecrawl"|"other";
   skills: string[];
   sponsorshipTag: "mentioned"|"not_mentioned";
   experience?: string;
@@ -30,7 +32,6 @@ export interface Job {
   relevanceScore?: number;
 }
 
-// ── Source diagnostics ─────────────────────────────────────────────────────
 export interface SourceStatus {
   status: "healthy"|"degraded"|"broken"|"skipped"|"rate_limited";
   fetched: number;
@@ -74,7 +75,6 @@ function getFortuneTier(company: string): number {
   return 9999;
 }
 
-// ── Priority tiers ─────────────────────────────────────────────────────────
 const PRIORITY_MAP: Record<string,"highest"|"high"|"must_apply"> = {
   "microsoft":"highest","amazon":"highest","google":"highest","apple":"highest",
   "meta":"highest","oracle":"highest","intel":"highest","cisco":"highest","ibm":"highest",
@@ -141,8 +141,12 @@ function extractMissingSkills(description: string): string[] {
 }
 
 function detectSponsorship(description: string): "mentioned"|"not_mentioned" {
-  const kw = ["sponsor","h-1b","h1b","visa","work authorization","work permit","ead","opt","cpt","green card"];
-  return kw.some(k=>description.toLowerCase().includes(k)) ? "mentioned" : "not_mentioned";
+  const kw = ["sponsor","h-1b","h1b","visa sponsorship","work authorization","work permit","ead","opt","cpt","green card","immigration"];
+  const neg = ["no sponsorship","will not sponsor","cannot sponsor","not able to sponsor","sponsorship not available","without sponsorship"];
+  const dl = description.toLowerCase();
+  if (neg.some(k=>dl.includes(k))) return "not_mentioned"; // explicit no
+  if (kw.some(k=>dl.includes(k))) return "mentioned";
+  return "not_mentioned";
 }
 
 function extractExperience(description: string): string {
@@ -195,87 +199,74 @@ function isUSLocation(location: string): boolean {
   return parts.some(p=>US_STATES.has(p.trim())||US_STATES.has(p.trim().toUpperCase()));
 }
 
-// ── Job quality filters ────────────────────────────────────────────────────
+// ── Filters ────────────────────────────────────────────────────────────────
+// From priority list: reject lead/principal/architect/manager/director + pure non-SWE roles
+const HARD_EXCLUDE = [
+  "lead","principal","architect","manager","director",
+  "vice president","vp ","head of","chief","distinguished","fellow",
+];
+const REJECT_ROLES = [
+  ".net developer",".net engineer","asp.net",
+  "data engineer","data scientist","data analyst",
+  "machine learning","ml engineer","ai engineer","deep learning",
+  "nlp engineer","computer vision","research scientist",
+  "security engineer","cybersecurity","network engineer",
+  "business analyst","scrum master","project manager",
+  "recruiter","marketing engineer","finance","legal",
+];
+
+function shouldExcludeTitleLocal(title: string): boolean {
+  const tl = title.toLowerCase();
+  if (HARD_EXCLUDE.some(k => tl.includes(k))) return true;
+  if (REJECT_ROLES.some(k => tl.includes(k))) return true;
+  return false;
+}
+
 function isContractOrPartTime(type: string, desc: string): boolean {
-  const lc=(type+" "+desc.slice(0,300)).toLowerCase();
+  const lc = (type+" "+desc.slice(0,300)).toLowerCase();
   return /\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/.test(lc);
 }
 
 function requiresSecurityClearance(title: string, desc: string): boolean {
-  const text=(title+" "+desc).toLowerCase();
+  const text = (title+" "+desc).toLowerCase();
   return /\b(security\s+clearance|secret\s+clearance|top\s+secret|ts\/sci|clearance\s+required|dod\s+clearance|classified|polygraph)\b/.test(text);
 }
 
-// Master filter
-function shouldKeepJob(title: string, desc: string, type: string, location: string): boolean {
-  if (shouldExcludeTitle(title)) return false;
+// Date filter cutoffs (seconds)
+const DATE_CUTOFF_S: Record<JobFilter, number|null> = {
+  "24h": 86400,
+  "3d":  259200,
+  "7d":  604800,
+  "any": null,
+};
+
+function passesDateFilter(ts: number, filter: JobFilter): boolean {
+  const cutoff = DATE_CUTOFF_S[filter];
+  if (!cutoff) return true;
+  if (!ts) return false; // no timestamp → exclude when date filter active
+  return (Date.now()/1000 - ts) <= cutoff;
+}
+
+function shouldKeepJob(title: string, desc: string, type: string, location: string, ts: number, filter: JobFilter): boolean {
+  if (shouldExcludeTitleLocal(title)) return false;
   if (isContractOrPartTime(type, desc)) return false;
   if (!isUSLocation(location)) return false;
   if (requiresSecurityClearance(title, desc)) return false;
+  if (!passesDateFilter(ts, filter)) return false;
   return true;
 }
 
-// Relaxed filter for sources like TheirStack that return broader job pools.
-// Skips strict title rejection, allows broader engineering roles, relaxed location.
-const RELAXED_TITLE_BLOCKLIST = [
-  "data scientist","data analyst","machine learning","deep learning",
-  "security engineer","cybersecurity","network engineer",
-  "business analyst","scrum master","project manager",
-  "recruiter","marketing","finance","legal","intern","internship",
-];
-function shouldKeepJobRelaxed(title: string, desc: string, type: string, location: string): boolean {
-  const tl = title.toLowerCase();
-  // Hard block: clearance, part-time, internship
-  if (requiresSecurityClearance(title, desc)) return false;
-  if (isContractOrPartTime(type, desc)) return false;
-  // Soft block: only exact non-engineering roles
-  if (RELAXED_TITLE_BLOCKLIST.some(k => tl.includes(k))) return false;
-  // Relaxed location: allow remote, worldwide, empty location
-  if (location && !isUSLocation(location)) {
-    const ll = location.toLowerCase();
-    if (!ll.includes("remote") && !ll.includes("worldwide") && !ll.includes("anywhere")) return false;
-  }
-  return true;
-}
-
-// Debug helper: logs each rejected job with its rejection reason for a given source
-function logRejectedJobs(source: string, jobs: Record<string,unknown>[], getTitle: (j: Record<string,unknown>) => string, getLocation: (j: Record<string,unknown>) => string, getType: (j: Record<string,unknown>) => string, getDesc: (j: Record<string,unknown>) => string): void {
-  let kept = 0, rejected = 0;
-  for (const j of jobs) {
-    const title = getTitle(j);
-    const location = getLocation(j);
-    const type = getType(j);
-    const desc = getDesc(j);
-    if (!title) { rejected++; console.log(`[${source}] REJECTED no-title`); continue; }
-    if (requiresSecurityClearance(title, desc)) { rejected++; console.log(`[${source}] REJECTED clearance: "${title}"`); continue; }
-    if (isContractOrPartTime(type, desc)) { rejected++; console.log(`[${source}] REJECTED contract/part-time: "${title}" type="${type}"`); continue; }
-    if (location && !isUSLocation(location)) {
-      const ll = location.toLowerCase();
-      if (!ll.includes("remote") && !ll.includes("worldwide") && !ll.includes("anywhere")) {
-        rejected++; console.log(`[${source}] REJECTED location: "${title}" loc="${location}"`); continue;
-      }
-    }
-    if (RELAXED_TITLE_BLOCKLIST.some(k => title.toLowerCase().includes(k))) {
-      rejected++; console.log(`[${source}] REJECTED blocklist: "${title}"`); continue;
-    }
-    kept++;
-  }
-  console.log(`[${source}] logRejectedJobs: ${kept} kept, ${rejected} rejected of ${jobs.length} total`);
-}
-
-// ── Relevance scoring ──────────────────────────────────────────────────────
+// ── Scoring ────────────────────────────────────────────────────────────────
 function computeRelevanceScore(job: Job): number {
   let score = 0;
-  score += scoreTitleRelevance(job.title) * 3;          // 0–30
-  score += scoreSponsorshipSignal(job.description);     // -20 to +15
-  score += scoreRecency(job.postedTimestamp);            // 0–10
-  // Company priority bonus
+  score += scoreTitleRelevance(job.title) * 3;
+  score += scoreSponsorshipSignal(job.description);
+  score += scoreRecency(job.postedTimestamp);
   const tier = job.priorityTier;
   if (tier==="highest") score += 5;
   else if (tier==="high") score += 3;
   else if (tier==="must_apply") score += 2;
-  // Source trust
-  if (job.sourceType==="greenhouse"||job.sourceType==="lever"||job.sourceType==="workday") score += 3;
+  if (job.sourceType==="greenhouse"||job.sourceType==="workday") score += 3;
   else if (job.sourceType==="jsearch"||job.sourceType==="adzuna") score += 1;
   return score;
 }
@@ -293,30 +284,24 @@ function deduplicateJobs(jobs: Job[]): Job[] {
 }
 
 function sortJobs(jobs: Job[], sort: SortOption): Job[] {
-  return [...jobs].sort((a, b) => {
+  return [...jobs].sort((a,b) => {
     switch (sort) {
       case "date_desc": return (b.postedTimestamp||0)-(a.postedTimestamp||0);
       case "date_asc":  return (a.postedTimestamp||0)-(b.postedTimestamp||0);
       case "company_desc": {
         const ra=getFortuneTier(a.company),rb=getFortuneTier(b.company);
-        if (ra!==rb) return ra-rb;
-        return (b.postedTimestamp||0)-(a.postedTimestamp||0);
+        return ra!==rb ? ra-rb : (b.postedTimestamp||0)-(a.postedTimestamp||0);
       }
       case "company_asc": {
         const ra=getFortuneTier(a.company),rb=getFortuneTier(b.company);
-        if (ra!==rb) return rb-ra;
-        return (a.postedTimestamp||0)-(b.postedTimestamp||0);
+        return ra!==rb ? rb-ra : (a.postedTimestamp||0)-(b.postedTimestamp||0);
       }
-      default:
-        // Default: relevance score desc
-        return (b.relevanceScore||0)-(a.relevanceScore||0);
+      default: return (b.relevanceScore||0)-(a.relevanceScore||0);
     }
   });
 }
 
-// ── Per-company cap ────────────────────────────────────────────────────────
 const PER_COMPANY_CAP = 30;
-
 function applyPerCompanyCap(jobs: Job[]): Job[] {
   const counts = new Map<string,number>();
   return jobs.filter(j => {
@@ -332,144 +317,25 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([p, new Promise<T>(res=>setTimeout(()=>res(fallback),ms))]);
 }
 
-const DATE_MAP: Record<JobFilter,string> = {
-  "24h":"today","7d":"week","30d":"month","any":"",
-};
-
-// ── JSearch ────────────────────────────────────────────────────────────────
-// Fallback logic: start with primary query only; if raw < threshold, try adjacent titles.
-// Location is passed as separate param, NOT appended to query string.
-const JSEARCH_MIN_THRESHOLD = 10;
-const JSEARCH_FALLBACK_TERMS = ["backend engineer","frontend engineer","full stack engineer","cloud engineer"];
-
-// 20-min module-level cache to survive repeated searches when rate-limited
-const JSEARCH_CACHE = new Map<string, {jobs:Job[], fetched:number, ts:number}>();
-const JSEARCH_CACHE_TTL = 20 * 60 * 1000; // 20 minutes
-
-async function jsearchFetch(
-  term: string, filter: JobFilter, apiKey: string
-): Promise<{ raw: Record<string,unknown>[], rateLimited: boolean }> {
-  const params = new URLSearchParams({
-    query: term,          // clean title only — no "in USA"
-    page: "1",
-    num_pages: "2",
-    country: "us",        // location via separate API param
-    remote_jobs_only: "false",
-    ...(DATE_MAP[filter] && { date_posted: DATE_MAP[filter] }),
-  });
-  const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
-    headers: {
-      "X-RapidAPI-Key": apiKey,
-      "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
-    },
-    cache: "no-store",
-  });
-  if (res.status === 429) {
-    const retryAfter = res.headers.get("retry-after") || res.headers.get("x-ratelimit-reset") || "unknown";
-    console.error(`JSearch 429 RATE LIMITED for term="${term}" — retry-after: ${retryAfter}s`);
-    return { raw: [], rateLimited: true };
-  }
-  if (!res.ok) {
-    console.error(`JSearch HTTP ${res.status} for term="${term}"`);
-    return { raw: [], rateLimited: false };
-  }
-  const data = await res.json();
-  return { raw: (data.data || []) as Record<string,unknown>[], rateLimited: false };
-}
-
-function jsearchMapJob(j: Record<string,unknown>, i: number): Job|null {
-  const rawDesc=(j.job_description as string)||"";
-  const desc=cleanDescription(rawDesc).slice(0,800);
-  const ts=(j.job_posted_at_timestamp as number)||0;
-  const loc=[j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
-  const company=(j.employer_name as string)||"";
-  const title=(j.job_title as string)||"";
-  if (!title||!company||!shouldKeepJob(title,desc,(j.job_employment_type as string)||"",loc)) return null;
-  return {
-    id:(j.job_id as string)||`js-${i}`,
-    title, company, location:loc,
-    type:(j.job_employment_type as string)||"Full-time",
-    salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
-    description:desc,
-    applyUrl:(j.job_apply_link as string)||"#",
-    postedAt:(j.job_posted_at_datetime_utc as string)||"",
-    postedDate:ts?formatPostedDate(ts):"Recently",
-    postedTimestamp:ts,
-    source:(j.job_publisher as string)||"Job Board",
-    sourceType:"jsearch",
-    skills:extractMissingSkills(rawDesc),
-    sponsorshipTag:detectSponsorship(rawDesc),
-    experience:extractExperience(rawDesc),
-    priorityTier:getPriorityTier(company),
-    fortuneRank:getFortuneTier(company),
-  };
-}
-
-async function fetchJSearch(query: string, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
-  const apiKey = process.env.RAPIDAPI_KEY;
-  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"RAPIDAPI_KEY not set"}};
-
-  // Check 20-min cache first
-  const cacheKey = `${query}::${filter}`;
-  const cached = JSEARCH_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.ts < JSEARCH_CACHE_TTL) {
-    console.log(`JSearch cache hit: "${query}" (${cached.jobs.length} jobs)`);
-    return {jobs:cached.jobs,status:{status:cached.jobs.length>0?"healthy":"degraded",fetched:cached.fetched,kept:cached.jobs.length}};
-  }
-
-  const expansion = expandQuery(query);
-  const allJobs: Job[] = [];
-  let totalFetched = 0;
-
-  try {
-    // Step 1: primary term only
-    const { raw: primaryRaw, rateLimited: rl1 } = await jsearchFetch(expansion.primary, filter, apiKey);
-    if (rl1) {
-      return {jobs:[],status:{status:"rate_limited",fetched:0,kept:0,error:"HTTP 429 — rate limited, retry later"}};
-    }
-    totalFetched += primaryRaw.length;
-    console.log(`JSearch primary="${expansion.primary}" → ${primaryRaw.length} raw`);
-    primaryRaw.forEach((j,i) => { const job = jsearchMapJob(j,i); if (job) allJobs.push(job); });
-
-    // Step 2: fallback terms only if below threshold
-    if (primaryRaw.length < JSEARCH_MIN_THRESHOLD) {
-      const fallbacks = expansion.mode === "broad"
-        ? JSEARCH_FALLBACK_TERMS
-        : expansion.terms.filter(t => t !== expansion.primary).slice(0,3);
-
-      for (const term of fallbacks) {
-        if (allJobs.length >= 30) break;
-        const { raw, rateLimited } = await jsearchFetch(term, filter, apiKey);
-        if (rateLimited) {
-          console.warn(`JSearch 429 on fallback "${term}" — stopping`);
-          break; // stop immediately on 429
-        }
-        totalFetched += raw.length;
-        console.log(`JSearch fallback="${term}" → ${raw.length} raw`);
-        raw.forEach((j,i) => { const job = jsearchMapJob(j,totalFetched+i); if (job) allJobs.push(job); });
-      }
-    }
-
-    const kept = allJobs.length;
-    // Cache the result whether or not we got jobs (avoids hammering on empty results too)
-    JSEARCH_CACHE.set(cacheKey, { jobs: allJobs, fetched: totalFetched, ts: Date.now() });
-    return {jobs:allJobs,status:{status:kept>0?"healthy":"degraded",fetched:totalFetched,kept}};
-  } catch(e:unknown) {
-    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
-  }
-}
-
 // ── Greenhouse ─────────────────────────────────────────────────────────────
+// Priority list companies using Greenhouse ATS
 const GREENHOUSE_COMPANIES = [
-  "airbnb","stripe","doordash","openai","coinbase","gusto","brex","notion",
-  "plaid","lattice","figma","robinhood","benchling","mixpanel","amplitude",
-  "segment","flexport","mercury","ramp","checkr",
-  "confluent","cloudflare","mongodb","hashicorp","anthropic","databricks",
-  "snowflake","atlassian","servicenow","workday","adobe","paypal","visa",
-  "mastercard","verizon","infosys","cognizant","accenture","capgemini",
+  // Tech / cloud-native (from priority list)
+  "databricks","snowflake","hashicorp","cloudflare","mongodb","confluent",
+  "atlassian","openai","anthropic","stripe","figma","notion","brex","gusto",
+  "ramp","plaid","airbnb","doordash","coinbase","robinhood","lattice",
+  "amplitude","mixpanel","segment","flexport","mercury","ramp","checkr",
+  "vercel","webflow","airtable","asana","deel","postman","sourcegraph",
+  "launchdarkly","neo4j",
+  // Enterprise / Fortune 500 that use Greenhouse
+  "paypal","visa","mastercard","verizon","infosys","cognizant","accenture","capgemini",
+  "adobe","servicenow","workday",
 ];
 
-async function fetchGreenhouse(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
+async function fetchGreenhouse(
+  expansion: ReturnType<typeof expandQuery>,
+  filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
   const results: Job[] = [];
   let fetched = 0;
   await Promise.allSettled(
@@ -477,7 +343,7 @@ async function fetchGreenhouse(expansion: ReturnType<typeof expandQuery>): Promi
       try {
         const res = await fetch(
           `https://boards-api.greenhouse.io/v1/boards/${company}/jobs?content=true`,
-          { next: { revalidate: 3600 } }
+          { next: { revalidate: 1800 } }
         );
         if (!res.ok) return;
         const data = await res.json();
@@ -486,25 +352,24 @@ async function fetchGreenhouse(expansion: ReturnType<typeof expandQuery>): Promi
         let kept = 0;
         for (const j of jobs) {
           if (kept >= PER_COMPANY_CAP) break;
-          const title=(j.title as string)||"";
-          const rawContent=(j.content as string)||"";
-          const desc=cleanDescription(rawContent).slice(0,800);
-          const location=((j.location as Record<string,unknown>)?.name as string)||"Remote";
-          if (!shouldKeepJob(title,desc,"",location)) continue;
-          // Query relevance check for Greenhouse (title must match expansion)
-          const tl=title.toLowerCase();
-          const relevant = expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
-          if (!relevant) continue;
-          const url=(j.absolute_url as string)||"#";
-          const updatedAt=(j.updated_at as string)||"";
-          const ts=updatedAt?Math.floor(new Date(updatedAt).getTime()/1000):0;
-          const displayName=company.charAt(0).toUpperCase()+company.slice(1);
+          const title = (j.title as string)||"";
+          const rawContent = (j.content as string)||"";
+          const desc = cleanDescription(rawContent).slice(0,800);
+          const location = ((j.location as Record<string,unknown>)?.name as string)||"Remote";
+          const updatedAt = (j.updated_at as string)||"";
+          const ts = updatedAt ? Math.floor(new Date(updatedAt).getTime()/1000) : 0;
+          if (!shouldKeepJob(title,desc,"",location,ts,filter)) continue;
+          // Title relevance check
+          const tl = title.toLowerCase();
+          if (!expansion.terms.some(term=>tl.includes(term.split(" ")[0]))) continue;
+          const url = (j.absolute_url as string)||"#";
+          const displayName = company.charAt(0).toUpperCase()+company.slice(1);
           results.push({
             id:`gh-${company}-${j.id??Math.random()}`,
-            title,company:displayName,location,type:"Full-time",
-            description:desc,applyUrl:url,postedAt:updatedAt,
+            title, company:displayName, location, type:"Full-time",
+            description:desc, applyUrl:url, postedAt:updatedAt,
             postedDate:ts?formatPostedDate(ts):"Recently",
-            postedTimestamp:ts,source:"Greenhouse",sourceType:"greenhouse",
+            postedTimestamp:ts, source:"Greenhouse", sourceType:"greenhouse",
             skills:extractMissingSkills(rawContent),
             sponsorshipTag:detectSponsorship(rawContent),
             experience:extractExperience(rawContent),
@@ -519,143 +384,47 @@ async function fetchGreenhouse(expansion: ReturnType<typeof expandQuery>): Promi
   return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched,kept:results.length}};
 }
 
-// ── Lever ──────────────────────────────────────────────────────────────────
-const LEVER_COMPANIES = [
-  "netflix","reddit","webflow","miro","airtable","asana","attentive",
-  "loom","superhuman","deel","remote","scale-ai","alchemy",
-  "postman","vercel","neo4j","launchdarkly","envoy","sourcegraph",
-  "stripe","figma","notion","brex","gusto","ramp","plaid",
-];
-
-// Module-level cache: key=company, value={jobs, ts}
-const LEVER_CACHE = new Map<string, {jobs:Record<string,unknown>[], ts:number}>();
-const LEVER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-async function fetchLeverCompany(company: string): Promise<Record<string,unknown>[]> {
-  const cached = LEVER_CACHE.get(company);
-  if (cached && Date.now() - cached.ts < LEVER_CACHE_TTL) {
-    return cached.jobs;
-  }
-  try {
-    const res = await fetch(
-      `https://api.lever.co/v0/postings/${company}?mode=json`,
-      { next: { revalidate: 300 } }
-    );
-    if (!res.ok) return [];
-    const jobs = await res.json();
-    if (!Array.isArray(jobs)) return [];
-    LEVER_CACHE.set(company, { jobs, ts: Date.now() });
-    return jobs;
-  } catch {
-    return [];
-  }
-}
-
-// Run promises in batches of N to limit concurrency
-async function batchedAllSettled<T>(items: (() => Promise<T>)[], batchSize: number): Promise<T[]> {
-  const results: T[] = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize).map(fn => fn());
-    const settled = await Promise.allSettled(batch);
-    settled.forEach(r => { if (r.status === "fulfilled") results.push(r.value); });
-  }
-  return results;
-}
-
-async function fetchLever(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
-  const results: Job[] = [];
-  let fetched = 0;
-
-  // Fetch 6 companies at a time to avoid timeout
-  await batchedAllSettled(
-    LEVER_COMPANIES.map(company => async () => {
-      const rawJobs = await fetchLeverCompany(company);
-      fetched += rawJobs.length;
-      let kept = 0;
-      for (const j of rawJobs as Record<string,unknown>[]) {
-        if (kept >= PER_COMPANY_CAP) break;
-        const title=(j.text as string)||"";
-        const plainDesc=(j.descriptionPlain as string)||"";
-        const rawDesc=(j.description as string)||plainDesc;
-        const desc=cleanDescription(plainDesc||rawDesc).slice(0,800);
-        const cats=(j.categories as Record<string,unknown>)||{};
-        const commitment=(cats.commitment as string)||"";
-        const location=(cats.location as string)||"Remote";
-        if (!shouldKeepJob(title,desc,commitment,location)) continue;
-        const tl=title.toLowerCase();
-        const relevant=expansion.terms.some(term=>tl.includes(term.split(" ")[0]));
-        if (!relevant) continue;
-        const url=(j.hostedUrl as string)||"#";
-        const createdAt=(j.createdAt as number)||0;
-        const ts=createdAt>1e10?Math.floor(createdAt/1000):createdAt;
-        const displayName=company.charAt(0).toUpperCase()+company.slice(1).replace(/-/g," ");
-        results.push({
-          id:`lever-${company}-${j.id??Math.random()}`,
-          title,company:displayName,location,type:commitment||"Full-time",
-          description:desc,applyUrl:url,
-          postedAt:createdAt?new Date(createdAt>1e10?createdAt:createdAt*1000).toISOString():"",
-          postedDate:ts?formatPostedDate(ts):"Recently",
-          postedTimestamp:ts,source:"Lever",sourceType:"lever",
-          skills:extractMissingSkills(rawDesc),
-          sponsorshipTag:detectSponsorship(rawDesc),
-          experience:extractExperience(rawDesc),
-          priorityTier:getPriorityTier(displayName),
-          fortuneRank:getFortuneTier(displayName),
-        });
-        kept++;
-      }
-    }),
-    6  // batch size: 6 companies at a time
-  );
-  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched,kept:results.length}};
-}
-
-// ── Workday adapter ────────────────────────────────────────────────────────
-// Config: tenant, site, server (wd1/wd3/wd5/wd12 etc)
+// ── Workday ────────────────────────────────────────────────────────────────
+// Priority list companies using Workday portals
 const WORKDAY_COMPANIES: Array<{name:string;tenant:string;site:string;server:string}> = [
-  {name:"Salesforce",       tenant:"salesforce",       site:"External_Career_Site",       server:"wd12"},
-  {name:"ServiceNow",       tenant:"servicenow",        site:"External",                  server:"wd12"},
-  {name:"Adobe",            tenant:"adobe",             site:"external_career",            server:"wd5"},
-  {name:"Intel",            tenant:"intel",             site:"External",                   server:"wd1"},
-  {name:"Wells Fargo",      tenant:"wellsfargo",        site:"WF_External_Careers",        server:"wd1"},
-  {name:"Bank of America",  tenant:"bofa",              site:"External",                   server:"wd1"},
-  {name:"Capital One",      tenant:"capitalone",        site:"Capital_One_External",       server:"wd1"},
-  {name:"AT&T",             tenant:"att",               site:"ATTCareers",                 server:"wd1"},
-  {name:"Verizon",          tenant:"verizon",           site:"External",                   server:"wd5"},
-  {name:"T-Mobile",         tenant:"tmobile",           site:"External",                   server:"wd1"},
-  {name:"S&P Global",       tenant:"spglobal",          site:"Careers",                    server:"wd1"},
-  {name:"CVS Health",       tenant:"cvshealth",         site:"CVS_Health_Careers",         server:"wd1"},
-  {name:"UnitedHealth",     tenant:"uhg",               site:"External",                   server:"wd5"},
-  {name:"Elevance Health",  tenant:"elevancehealth",    site:"ANT",                        server:"wd1"},
-  {name:"JPMorgan Chase",   tenant:"jpmc",              site:"External",                   server:"wd5"},
-  {name:"Amazon",           tenant:"amazon",            site:"External_Career_Site",       server:"wd1"},
-  {name:"Walmart",          tenant:"walmart",           site:"External",                   server:"wd5"},
-  {name:"Target",           tenant:"target",            site:"External",                   server:"wd1"},
-  {name:"Home Depot",       tenant:"homedepot",         site:"External",                   server:"wd5"},
-  {name:"NVIDIA",           tenant:"nvidia",            site:"NVIDIAExternalCareerSite",   server:"wd5"},
+  // Fortune 500 / enterprise — from priority list
+  {name:"Salesforce",      tenant:"salesforce",    site:"External_Career_Site",     server:"wd12"},
+  {name:"ServiceNow",      tenant:"servicenow",    site:"External",                  server:"wd12"},
+  {name:"Adobe",           tenant:"adobe",         site:"external_career",           server:"wd5"},
+  {name:"Intel",           tenant:"intel",         site:"External",                  server:"wd1"},
+  {name:"Wells Fargo",     tenant:"wellsfargo",    site:"WF_External_Careers",       server:"wd1"},
+  {name:"Bank of America", tenant:"bofa",          site:"External",                  server:"wd1"},
+  {name:"Capital One",     tenant:"capitalone",    site:"Capital_One_External",      server:"wd1"},
+  {name:"AT&T",            tenant:"att",           site:"ATTCareers",                server:"wd1"},
+  {name:"Verizon",         tenant:"verizon",       site:"External",                  server:"wd5"},
+  {name:"T-Mobile",        tenant:"tmobile",       site:"External",                  server:"wd1"},
+  {name:"S&P Global",      tenant:"spglobal",      site:"Careers",                   server:"wd1"},
+  {name:"CVS Health",      tenant:"cvshealth",     site:"CVS_Health_Careers",        server:"wd1"},
+  {name:"UnitedHealth",    tenant:"uhg",           site:"External",                  server:"wd5"},
+  {name:"Elevance Health", tenant:"elevancehealth",site:"ANT",                       server:"wd1"},
+  {name:"JPMorgan Chase",  tenant:"jpmc",          site:"External",                  server:"wd5"},
+  {name:"Amazon",          tenant:"amazon",        site:"External_Career_Site",      server:"wd1"},
+  {name:"Walmart",         tenant:"walmart",       site:"External",                  server:"wd5"},
+  {name:"Target",          tenant:"target",        site:"External",                  server:"wd1"},
+  {name:"Home Depot",      tenant:"homedepot",     site:"External",                  server:"wd5"},
+  {name:"NVIDIA",          tenant:"nvidia",        site:"NVIDIAExternalCareerSite",  server:"wd5"},
+  {name:"Lowe's",          tenant:"lowes",         site:"External",                  server:"wd1"},
+  {name:"Costco",          tenant:"costco",        site:"External",                  server:"wd5"},
+  {name:"FedEx",           tenant:"fedex",         site:"External",                  server:"wd1"},
+  {name:"UPS",             tenant:"ups",           site:"External",                  server:"wd1"},
 ];
 
-const WORKDAY_DATE_MAP: Record<JobFilter,number|undefined> = {
-  "24h":1,"7d":7,"30d":30,"any":undefined,
-};
-
-async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
+async function fetchWorkday(
+  expansion: ReturnType<typeof expandQuery>,
+  filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
   const results: Job[] = [];
   let totalFetched = 0;
-
-  // Use primary term for Workday search text
-  const searchText = expansion.primary;
 
   await Promise.allSettled(
     WORKDAY_COMPANIES.map(async ({name,tenant,site,server}) => {
       try {
         const url = `https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`;
-        const body: Record<string,unknown> = {
-          appliedFacets: {},
-          limit: 20,
-          offset: 0,
-          searchText,
-        };
         const res = await fetch(url, {
           method: "POST",
           headers: {
@@ -664,7 +433,7 @@ async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: J
             "Accept-Language": "en-US",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ appliedFacets:{}, limit:20, offset:0, searchText:expansion.primary }),
           cache: "no-store",
         });
         if (!res.ok) return;
@@ -674,34 +443,25 @@ async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: J
         let kept = 0;
         for (const j of jobs) {
           if (kept >= PER_COMPANY_CAP) break;
-          const title=(j.title as string)||"";
-          const rawDesc=((j.jobDescription as Record<string,unknown>)?.jobDescription as string)||
-                        (j.shortDesc as string)||"";
-          const desc=cleanDescription(rawDesc).slice(0,800);
+          const title = (j.title as string)||"";
+          const rawDesc = ((j.jobDescription as Record<string,unknown>)?.jobDescription as string)||(j.shortDesc as string)||"";
+          const desc = cleanDescription(rawDesc).slice(0,800);
           const locArr = (j.locationsText as string)||(j.location as string)||"United States";
-          if (!shouldKeepJob(title,desc,"Full-time",locArr)) continue;
-          const externalPath=(j.externalPath as string)||"";
-          const applyUrl=externalPath
+          // Parse Workday "Posted N Days Ago" → timestamp
+          const postedOn = (j.postedOn as string)||"";
+          let ts = 0;
+          const dM = postedOn.match(/(\d+)\s+day/i);
+          const wM = postedOn.match(/(\d+)\s+week/i);
+          const mM = postedOn.match(/(\d+)\s+month/i);
+          if (dM) ts = Math.floor(Date.now()/1000) - parseInt(dM[1])*86400;
+          else if (wM) ts = Math.floor(Date.now()/1000) - parseInt(wM[1])*604800;
+          else if (mM) ts = Math.floor(Date.now()/1000) - parseInt(mM[1])*2592000;
+          else if (postedOn.toLowerCase().includes("today")) ts = Math.floor(Date.now()/1000);
+          if (!shouldKeepJob(title,desc,"Full-time",locArr,ts,filter)) continue;
+          const externalPath = (j.externalPath as string)||"";
+          const applyUrl = externalPath
             ? `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}/job${externalPath}`
             : `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}`;
-          const postedOn=(j.postedOn as string)||"";
-          // Workday postedOn format: "Posted 3 Days Ago" — extract approximate ts
-          let ts = 0;
-          const dMatch = postedOn.match(/(\d+)\s+day/i);
-          const wMatch = postedOn.match(/(\d+)\s+week/i);
-          const mMatch = postedOn.match(/(\d+)\s+month/i);
-          if (dMatch) ts = Math.floor(Date.now()/1000) - parseInt(dMatch[1])*86400;
-          else if (wMatch) ts = Math.floor(Date.now()/1000) - parseInt(wMatch[1])*604800;
-          else if (mMatch) ts = Math.floor(Date.now()/1000) - parseInt(mMatch[1])*2592000;
-          else if (postedOn.toLowerCase().includes("today")) ts = Math.floor(Date.now()/1000);
-
-          // Apply date filter
-          const maxDays = WORKDAY_DATE_MAP[filter];
-          if (maxDays && ts) {
-            const ageDays = (Date.now()/1000 - ts) / 86400;
-            if (ageDays > maxDays) continue;
-          }
-
           results.push({
             id:`wd-${tenant}-${(j.bulletFields as string[]|undefined)?.[0]||Math.random()}`,
             title, company:name, location:locArr, type:"Full-time",
@@ -722,324 +482,256 @@ async function fetchWorkday(expansion: ReturnType<typeof expandQuery>, filter: J
   return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched:totalFetched,kept:results.length}};
 }
 
-// ── Goldman Sachs GraphQL ─────────────────────────────────────────────────
-async function fetchGoldmanSachs(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
-  try {
-    const body = {
-      operationName: "RoleSearch",
-      variables: {
-        criteria: {
-          keyword: expansion.primary,
-          pageSize: 30,
-          pageNumber: 1,
-          locations: ["United States"],
-        },
-      },
-      query: `query RoleSearch($criteria: RoleSearchCriteriaInput!) {
-        roleSearch(criteria: $criteria) {
-          totalCount
-          roles {
-            id title location { city state country }
-            division team description
-            postedDate applyUrl
+// ── Firecrawl direct company scrapers ─────────────────────────────────────
+// Target companies not covered by Greenhouse/Workday — from priority list
+// These use Firecrawl's /scrape endpoint to extract job listings from career pages
+interface FirecrawlTarget {
+  company: string;
+  careerUrl: string;
+  fortuneRank: number;
+}
+
+const FIRECRAWL_TARGETS: FirecrawlTarget[] = [
+  { company:"Microsoft",   careerUrl:"https://careers.microsoft.com/us/en/search-results?keywords={query}&country=United%20States",   fortuneRank:5  },
+  { company:"Google",      careerUrl:"https://careers.google.com/jobs/results/?q={query}&location=United%20States",                    fortuneRank:35 },
+  { company:"Apple",       careerUrl:"https://jobs.apple.com/en-us/search?search={query}&sort=newest&location=united-states-USA",       fortuneRank:3  },
+  { company:"Meta",        careerUrl:"https://www.metacareers.com/jobs?q={query}&offices[0]=United%20States",                           fortuneRank:14 },
+  { company:"IBM",         careerUrl:"https://www.ibm.com/us-en/employment/newhire/jobs/index.html?q={query}&country=US",               fortuneRank:22 },
+  { company:"Oracle",      careerUrl:"https://careers.oracle.com/en/sites/jobsearch/jobs?keyword={query}&location=United+States",      fortuneRank:25 },
+  { company:"Cisco",       careerUrl:"https://jobs.cisco.com/jobs/SearchJobs/{query}?21178=%5B169482%5D&21178_format=6020&listtype=proximity", fortuneRank:24 },
+  { company:"Salesforce",  careerUrl:"https://careers.salesforce.com/en/jobs/?search={query}&region=North+America",                    fortuneRank:26 },
+  { company:"Goldman Sachs",careerUrl:"https://www.goldmansachs.com/careers/exploring-careers/students/jobs-search/?region=AMER&q={query}", fortuneRank:53 },
+  { company:"Morgan Stanley",careerUrl:"https://www.morganstanley.com/people-opportunities/students-graduates/programs/search/results?q={query}", fortuneRank:21 },
+  { company:"JPMorgan Chase",careerUrl:"https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/jobs?keyword={query}&location=United+States", fortuneRank:12 },
+];
+
+async function fetchFirecrawl(
+  expansion: ReturnType<typeof expandQuery>,
+  filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
+  const apiKey = process.env.FIRECRAWL_API_KEY;
+  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"FIRECRAWL_API_KEY not set"}};
+
+  const results: Job[] = [];
+  let totalFetched = 0;
+
+  await Promise.allSettled(
+    FIRECRAWL_TARGETS.map(async ({company, careerUrl, fortuneRank}) => {
+      try {
+        const url = careerUrl.replace("{query}", encodeURIComponent(expansion.primary));
+        const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url,
+            formats: ["extract"],
+            extract: {
+              schema: {
+                type: "object",
+                properties: {
+                  jobs: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        title:    { type: "string" },
+                        location: { type: "string" },
+                        url:      { type: "string" },
+                        postedDate: { type: "string" },
+                        description: { type: "string" },
+                        employmentType: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+              prompt: `Extract all software engineering job listings from this career page. For each job return: title, location, apply URL, posted date, brief description, employment type.`,
+            },
+          }),
+          cache: "no-store",
+        });
+
+        if (!res.ok) {
+          console.error(`Firecrawl ${company} HTTP ${res.status}`);
+          return;
+        }
+
+        const data = await res.json();
+        const jobs = (data?.data?.extract?.jobs || data?.extract?.jobs || []) as Record<string,unknown>[];
+        totalFetched += jobs.length;
+        console.log(`Firecrawl ${company}: ${jobs.length} raw`);
+
+        for (const j of jobs) {
+          const title = (j.title as string)||"";
+          const rawDesc = (j.description as string)||"";
+          const desc = cleanDescription(rawDesc).slice(0,800);
+          const location = (j.location as string)||"United States";
+          const type = (j.employmentType as string)||"Full-time";
+          // Parse posted date — try ISO first, then relative strings
+          const postedDateStr = (j.postedDate as string)||"";
+          let ts = 0;
+          if (postedDateStr) {
+            const parsed = new Date(postedDateStr);
+            if (!isNaN(parsed.getTime())) {
+              ts = Math.floor(parsed.getTime()/1000);
+            } else {
+              // Relative: "2 days ago", "1 week ago"
+              const dM = postedDateStr.match(/(\d+)\s+day/i);
+              const wM = postedDateStr.match(/(\d+)\s+week/i);
+              if (dM) ts = Math.floor(Date.now()/1000) - parseInt(dM[1])*86400;
+              else if (wM) ts = Math.floor(Date.now()/1000) - parseInt(wM[1])*604800;
+            }
           }
+          if (!shouldKeepJob(title, desc, type, location, ts, filter)) continue;
+          results.push({
+            id:`fc-${company.toLowerCase().replace(/\s+/g,"-")}-${Math.random().toString(36).slice(2,8)}`,
+            title, company, location, type,
+            description:desc,
+            applyUrl:(j.url as string)||careerUrl.replace("{query}",encodeURIComponent(expansion.primary)),
+            postedAt:postedDateStr,
+            postedDate:ts?formatPostedDate(ts):postedDateStr||"Recently",
+            postedTimestamp:ts,
+            source:"Firecrawl",
+            sourceType:"firecrawl",
+            skills:extractMissingSkills(rawDesc),
+            sponsorshipTag:detectSponsorship(rawDesc),
+            experience:extractExperience(rawDesc),
+            priorityTier:getPriorityTier(company),
+            fortuneRank,
+          });
         }
-      }`,
-    };
-    const res = await fetch("https://api-higher.gs.com/gateway/api/v1/graphql", {
-      method: "POST",
-      headers: {"Content-Type":"application/json","Accept":"application/json"},
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
-    const data = await res.json();
-    const roles = data?.data?.roleSearch?.roles as Record<string,unknown>[] || [];
-    const jobs: Job[] = [];
-    for (const r of roles) {
-      const title=(r.title as string)||"";
-      const locObj=(r.location as Record<string,unknown>)||{};
-      const location=[locObj.city,locObj.state,locObj.country].filter(Boolean).join(", ")||"United States";
-      const rawDesc=(r.description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
-      const postedDate=(r.postedDate as string)||"";
-      const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
-      jobs.push({
-        id:`gs-${r.id??Math.random()}`,
-        title, company:"Goldman Sachs", location, type:"Full-time",
-        description:desc, applyUrl:(r.applyUrl as string)||"https://higher.gs.com/roles",
-        postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:"Goldman Sachs", sourceType:"goldman",
-        skills:extractMissingSkills(rawDesc),
-        sponsorshipTag:detectSponsorship(rawDesc),
-        experience:extractExperience(rawDesc),
-        priorityTier:"highest", fortuneRank:53,
-      });
-    }
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:roles.length,kept:jobs.length}};
-  } catch(e:unknown) {
-    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
-  }
+      } catch(e) {
+        console.error(`Firecrawl ${company} error: ${e}`);
+      }
+    })
+  );
+
+  return {jobs:results,status:{status:results.length>0?"healthy":"degraded",fetched:totalFetched,kept:results.length}};
 }
 
-// ── Morgan Stanley Eightfold ───────────────────────────────────────────────
-async function fetchMorganStanley(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
+// ── JSearch (fallback aggregator) ─────────────────────────────────────────
+const JSEARCH_CACHE = new Map<string,{jobs:Job[],fetched:number,ts:number}>();
+const JSEARCH_CACHE_TTL = 25 * 60 * 1000; // 25 min
+
+async function jsearchFetch(
+  term: string, filter: JobFilter, apiKey: string
+): Promise<{raw:Record<string,unknown>[],rateLimited:boolean}> {
+  const dateMap: Record<JobFilter,string> = {"24h":"today","3d":"3days","7d":"week","any":""};
+  const params = new URLSearchParams({
+    query: term,
+    page: "1", num_pages: "2",
+    country: "us",
+    remote_jobs_only: "false",
+    ...(dateMap[filter] && {date_posted:dateMap[filter]}),
+  });
+  const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
+    headers:{"X-RapidAPI-Key":apiKey,"X-RapidAPI-Host":"jsearch.p.rapidapi.com"},
+    cache:"no-store",
+  });
+  if (res.status===429) {
+    const retryAfter = res.headers.get("retry-after")||res.headers.get("x-ratelimit-reset")||"unknown";
+    console.error(`JSearch 429 for "${term}" — retry-after: ${retryAfter}`);
+    return {raw:[],rateLimited:true};
+  }
+  if (!res.ok) { console.error(`JSearch HTTP ${res.status} for "${term}"`); return {raw:[],rateLimited:false}; }
+  const data = await res.json();
+  return {raw:(data.data||[]) as Record<string,unknown>[],rateLimited:false};
+}
+
+function jsearchMapJob(j: Record<string,unknown>, i: number, filter: JobFilter): Job|null {
+  const rawDesc = (j.job_description as string)||"";
+  const desc = cleanDescription(rawDesc).slice(0,800);
+  const ts = (j.job_posted_at_timestamp as number)||0;
+  const loc = [j.job_city,j.job_state,j.job_country].filter(Boolean).join(", ")||"Remote";
+  const company = (j.employer_name as string)||"";
+  const title = (j.job_title as string)||"";
+  if (!title||!company) return null;
+  if (!shouldKeepJob(title,desc,(j.job_employment_type as string)||"",loc,ts,filter)) return null;
+  return {
+    id:(j.job_id as string)||`js-${i}`,
+    title, company, location:loc,
+    type:(j.job_employment_type as string)||"Full-time",
+    salary:j.job_min_salary?`$${Math.round(Number(j.job_min_salary)/1000)}k–$${Math.round(Number(j.job_max_salary)/1000)}k`:undefined,
+    description:desc,
+    applyUrl:(j.job_apply_link as string)||"#",
+    postedAt:(j.job_posted_at_datetime_utc as string)||"",
+    postedDate:ts?formatPostedDate(ts):"Recently",
+    postedTimestamp:ts,
+    source:(j.job_publisher as string)||"JSearch",
+    sourceType:"jsearch",
+    skills:extractMissingSkills(rawDesc),
+    sponsorshipTag:detectSponsorship(rawDesc),
+    experience:extractExperience(rawDesc),
+    priorityTier:getPriorityTier(company),
+    fortuneRank:getFortuneTier(company),
+  };
+}
+
+async function fetchJSearch(
+  query: string, filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
+  const apiKey = process.env.RAPIDAPI_KEY;
+  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"RAPIDAPI_KEY not set"}};
+
+  const cacheKey = `${query}::${filter}`;
+  const cached = JSEARCH_CACHE.get(cacheKey);
+  if (cached && Date.now()-cached.ts < JSEARCH_CACHE_TTL) {
+    console.log(`JSearch cache hit: "${query}" (${cached.jobs.length} jobs)`);
+    return {jobs:cached.jobs,status:{status:cached.jobs.length>0?"healthy":"degraded",fetched:cached.fetched,kept:cached.jobs.length}};
+  }
+
+  const expansion = expandQuery(query);
+  const allJobs: Job[] = [];
+  let totalFetched = 0;
+
   try {
-    const params = new URLSearchParams({
-      domain: "morganstanley.com",
-      query: expansion.primary,
-      location: "United States",
-      start: "0",
-      num: "30",
-      sort_by: "timestamp",
-    });
-    const res = await fetch(
-      `https://morganstanley.eightfold.ai/api/pcsx/search?${params}`,
-      { headers:{"Accept":"application/json"}, cache:"no-store" }
-    );
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
-    const data = await res.json();
-    const positions = (data.positions||[]) as Record<string,unknown>[];
-    const jobs: Job[] = [];
-    for (const p of positions) {
-      const title=(p.name as string)||"";
-      const rawDesc=(p.description as string)||(p.skills_text as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const location=(p.location as string)||(p.city as string)||"United States";
-      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
-      const ts=p.t_update?Math.floor(Number(p.t_update)/1000):0;
-      jobs.push({
-        id:`ms-${p.id??Math.random()}`,
-        title, company:"Morgan Stanley", location, type:"Full-time",
-        description:desc,
-        applyUrl:`https://morganstanley.eightfold.ai/careers?pid=${p.id}&domain=morganstanley.com`,
-        postedAt:"", postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:"Morgan Stanley", sourceType:"morganstanley",
-        skills:extractMissingSkills(rawDesc),
-        sponsorshipTag:detectSponsorship(rawDesc),
-        experience:extractExperience(rawDesc),
-        priorityTier:"highest", fortuneRank:21,
-      });
+    const {raw:primaryRaw,rateLimited:rl} = await jsearchFetch(expansion.primary, filter, apiKey);
+    if (rl) return {jobs:[],status:{status:"rate_limited",fetched:0,kept:0,error:"HTTP 429 — rate limited"}};
+    totalFetched += primaryRaw.length;
+    console.log(`JSearch primary="${expansion.primary}" → ${primaryRaw.length} raw`);
+    primaryRaw.forEach((j,i) => { const job=jsearchMapJob(j,i,filter); if(job) allJobs.push(job); });
+
+    // Fallback only if below threshold
+    if (primaryRaw.length < 10) {
+      const fallbacks = ["backend engineer","frontend engineer","full stack engineer"].slice(0,2);
+      for (const term of fallbacks) {
+        if (allJobs.length >= 25) break;
+        const {raw,rateLimited} = await jsearchFetch(term, filter, apiKey);
+        if (rateLimited) { console.warn(`JSearch 429 on fallback "${term}" — stopping`); break; }
+        totalFetched += raw.length;
+        raw.forEach((j,i) => { const job=jsearchMapJob(j,totalFetched+i,filter); if(job) allJobs.push(job); });
+      }
     }
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:positions.length,kept:jobs.length}};
+
+    JSEARCH_CACHE.set(cacheKey, {jobs:allJobs,fetched:totalFetched,ts:Date.now()});
+    return {jobs:allJobs,status:{status:allJobs.length>0?"healthy":"degraded",fetched:totalFetched,kept:allJobs.length}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
   }
 }
 
-// ── Cisco Phenom ───────────────────────────────────────────────────────────
-async function fetchCisco(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
-  try {
-    const body = {
-      operationName: "getPaginatedJobs",
-      variables: {
-        filter: {
-          keyword: expansion.primary,
-          country: ["United States"],
-        },
-        pageSize: 20,
-        pageNo: 0,
-        sortBy: "recent",
-      },
-      query: `query getPaginatedJobs($filter: JobSearchFilterInput, $pageSize: Int, $pageNo: Int, $sortBy: String) {
-        paginatedJobs(filter: $filter, pageSize: $pageSize, pageNo: $pageNo, sortBy: $sortBy) {
-          jobs { id title location description applyUrl postedDate }
-          totalCount
-        }
-      }`,
-    };
-    const res = await fetch("https://careers.cisco.com/widgets", {
-      method: "POST",
-      headers: {"Content-Type":"application/json","Accept":"application/json"},
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
-    const data = await res.json();
-    const raw = data?.data?.paginatedJobs?.jobs as Record<string,unknown>[] || [];
-    const jobs: Job[] = [];
-    for (const j of raw) {
-      const title=(j.title as string)||"";
-      const rawDesc=(j.description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const location=(j.location as string)||"United States";
-      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
-      const postedDate=(j.postedDate as string)||"";
-      const ts=postedDate?Math.floor(new Date(postedDate).getTime()/1000):0;
-      jobs.push({
-        id:`cisco-${j.id??Math.random()}`,
-        title, company:"Cisco", location, type:"Full-time",
-        description:desc, applyUrl:(j.applyUrl as string)||"https://careers.cisco.com",
-        postedAt:postedDate, postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:"Cisco", sourceType:"cisco",
-        skills:extractMissingSkills(rawDesc),
-        sponsorshipTag:detectSponsorship(rawDesc),
-        experience:extractExperience(rawDesc),
-        priorityTier:"highest", fortuneRank:24,
-      });
-    }
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
-  } catch(e:unknown) {
-    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
-  }
-}
-
-// ── Oracle Cloud HCM ──────────────────────────────────────────────────────
-// Strategy: probe bare endpoint with minimal params first.
-// Log full response structure so we can identify the correct field names.
-// Do NOT assume items/expand/requisitionList structure is correct until verified.
-async function fetchOracle(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
-  try {
-    // Minimal params — no OData syntax, no expand, just pagination
-    // Oracle HCM — confirmed returns items:[], count:0 — deprioritized, kept for shape discovery
-    const reqUrl = "https://eeho.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?limit=25&offset=0&onlyData=true";
-
-    const res = await fetch(reqUrl, {
-      headers: {
-        "Accept": "application/json",
-        "Accept-Language": "en-US",
-        "User-Agent": "Mozilla/5.0 (compatible)",
-      },
-      cache: "no-store",
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error(`Oracle HTTP ${res.status}: ${errText.slice(0,300)}`);
-      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}: ${errText.slice(0,80)}`}};
-    }
-
-    const data = await res.json();
-
-    // Log top-level keys and first-item keys to identify correct field names
-    const topKeys = Object.keys(data);
-    console.log(`Oracle top-level keys: ${JSON.stringify(topKeys)}`);
-    console.log(`Oracle count=${data.count}, totalResults=${data.totalResults}, items.length=${data.items?.length ?? 0}`);
-
-    if (!data.items || data.items.length === 0) {
-      // Log full raw response to diagnose shape
-      console.log(`Oracle 0 items — raw (first 600): ${JSON.stringify(data).slice(0,600)}`);
-      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`0 items. Top keys: [${topKeys.join(",")}]`}};
-    }
-
-    // Log first item keys to understand field names
-    const firstItem = data.items[0] as Record<string,unknown>;
-    console.log(`Oracle items[0] keys: ${JSON.stringify(Object.keys(firstItem))}`);
-
-    const items = data.items as Record<string,unknown>[];
-    const jobs: Job[] = [];
-
-    for (const item of items) {
-      // Try multiple possible field name patterns Oracle may use
-      const title =
-        (item.Title as string) || (item.Name as string) ||
-        (item.JobTitle as string) || (item.title as string) || "";
-      const rawDesc =
-        (item.ExternalDescriptionStr as string) || (item.Description as string) ||
-        (item.ShortDescription as string) || (item.description as string) || "";
-      const desc = cleanDescription(rawDesc).slice(0, 800);
-      const location =
-        (item.PrimaryLocation as string) || (item.PrimaryWorkLocation as string) ||
-        (item.WorkLocation as string) || (item.location as string) || "United States";
-      const postedDate =
-        (item.PostedDate as string) || (item.CreationDate as string) ||
-        (item.postedDate as string) || "";
-      const reqId =
-        (item.Id as string) || (item.RequisitionNumber as string) ||
-        (item.RequisitionId as string) || (item.id as string) || String(Math.random());
-
-      if (!title) continue;
-      if (!shouldKeepJob(title, desc, "Full-time", location)) continue;
-
-      const tl = title.toLowerCase();
-      const relevant = expansion.terms.some(t => tl.includes(t.split(" ")[0]));
-      if (!relevant) continue;
-
-      const ts = postedDate ? Math.floor(new Date(postedDate).getTime() / 1000) : 0;
-
-      jobs.push({
-        id: `oracle-${reqId}`,
-        title, company: "Oracle", location, type: "Full-time",
-        description: desc,
-        applyUrl: `https://careers.oracle.com/en/sites/jobsearch/job/${reqId}`,
-        postedAt: postedDate, postedDate: ts ? formatPostedDate(ts) : "Recently",
-        postedTimestamp: ts, source: "Oracle", sourceType: "oracle",
-        skills: extractMissingSkills(rawDesc),
-        sponsorshipTag: detectSponsorship(rawDesc),
-        experience: extractExperience(rawDesc),
-        priorityTier: "highest", fortuneRank: 25,
-      });
-    }
-
-    console.log(`Oracle: ${items.length} raw items → ${jobs.length} kept`);
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:items.length,kept:jobs.length}};
-  } catch(e:unknown) {
-    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
-  }
-}
-
-// ── Remotive ───────────────────────────────────────────────────────────────
-async function fetchRemotive(expansion: ReturnType<typeof expandQuery>): Promise<{jobs:Job[];status:SourceStatus}> {
-  try {
-    const q = expansion.primary;
-    const res = await fetch(
-      `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=50`,
-      { next: { revalidate: 1800 } }
-    );
-    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
-    const data = await res.json();
-    const raw = ((data.jobs||[]) as Record<string,unknown>[]).filter(j => {
-      const title=(j.title as string)||"";
-      const loc=(j.candidate_required_location as string)||"";
-      const isUS=!loc||["usa","united states","us only","remote","worldwide","anywhere"].some(k=>loc.toLowerCase().includes(k));
-      return isUS;
-    });
-    const jobs: Job[] = [];
-    for (const j of raw) {
-      const title=(j.title as string)||"";
-      const rawDesc=(j.description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const location=(j.candidate_required_location as string)||"Remote";
-      if (!shouldKeepJob(title,desc,(j.job_type as string)||"Full-time",location)) continue;
-      const pubDate=(j.publication_date as string)||"";
-      const ts=pubDate?Math.floor(new Date(pubDate).getTime()/1000):0;
-      const company=(j.company_name as string)||"";
-      jobs.push({
-        id:`remotive-${j.id??Math.random()}`,
-        title, company, location, type:(j.job_type as string)||"Full-time",
-        description:desc, applyUrl:(j.url as string)||"#",
-        postedAt:pubDate, postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:"Remotive", sourceType:"remotive",
-        skills:extractMissingSkills(rawDesc),
-        sponsorshipTag:detectSponsorship(rawDesc),
-        experience:extractExperience(rawDesc),
-        priorityTier:getPriorityTier(company),
-        fortuneRank:getFortuneTier(company),
-      });
-    }
-    return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
-  } catch(e:unknown) {
-    return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
-  }
-}
-
-// ── Adzuna ─────────────────────────────────────────────────────────────────
-async function fetchAdzuna(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
+// ── Adzuna (backup/enrichment) ─────────────────────────────────────────────
+async function fetchAdzuna(
+  query: string, filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
   const appId = process.env.ADZUNA_APP_ID;
   const appKey = process.env.ADZUNA_APP_KEY;
-  if (!appId || !appKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"ADZUNA keys not set"}};
-  const maxDays: Record<JobFilter,number|undefined> = {"24h":1,"7d":7,"30d":30,"any":undefined};
-  const maxDaysOld = maxDays[filter];
+  if (!appId||!appKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"ADZUNA keys not set"}};
+
+  const maxDaysMap: Record<JobFilter,number|undefined> = {"24h":1,"3d":3,"7d":7,"any":undefined};
+  const maxDays = maxDaysMap[filter];
   try {
     const params = new URLSearchParams({
-      app_id: appId, app_key: appKey,
-      results_per_page: "50",
-      what: expansion.primary,
-      where: "united states",
-      "content-type": "application/json",
-      full_time: "1",
-      ...(maxDaysOld ? { max_days_old: String(maxDaysOld) } : {}),
+      app_id:appId, app_key:appKey,
+      results_per_page:"50",
+      what:query,
+      where:"united states",
+      "content-type":"application/json",
+      full_time:"1",
+      ...(maxDays?{max_days_old:String(maxDays)}:{}),
     });
     const res = await fetch(`https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`,{cache:"no-store"});
     if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
@@ -1047,21 +739,21 @@ async function fetchAdzuna(expansion: ReturnType<typeof expandQuery>, filter: Jo
     const raw = (data.results||[]) as Record<string,unknown>[];
     const jobs: Job[] = [];
     for (const j of raw) {
-      const title=(j.title as string)||"";
-      const rawDesc=(j.description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const locObj=(j.location as Record<string,unknown>)||{};
-      const location=(locObj.display_name as string)||"United States";
-      const company=((j.company as Record<string,unknown>)?.display_name as string)||"";
-      if (!shouldKeepJob(title,desc,"Full-time",location)) continue;
-      const createdAt=(j.created as string)||"";
-      const ts=createdAt?Math.floor(new Date(createdAt).getTime()/1000):0;
-      const salaryMin=j.salary_min?Math.round(Number(j.salary_min)/1000):0;
-      const salaryMax=j.salary_max?Math.round(Number(j.salary_max)/1000):0;
+      const title = (j.title as string)||"";
+      const rawDesc = (j.description as string)||"";
+      const desc = cleanDescription(rawDesc).slice(0,800);
+      const locObj = (j.location as Record<string,unknown>)||{};
+      const location = (locObj.display_name as string)||"United States";
+      const company = ((j.company as Record<string,unknown>)?.display_name as string)||"";
+      const createdAt = (j.created as string)||"";
+      const ts = createdAt?Math.floor(new Date(createdAt).getTime()/1000):0;
+      if (!shouldKeepJob(title,desc,"Full-time",location,ts,filter)) continue;
+      const salMin = j.salary_min?Math.round(Number(j.salary_min)/1000):0;
+      const salMax = j.salary_max?Math.round(Number(j.salary_max)/1000):0;
       jobs.push({
         id:`az-${j.id??Math.random()}`,
         title, company, location, type:"Full-time",
-        salary:salaryMin>0?`$${salaryMin}k–$${salaryMax}k`:undefined,
+        salary:salMin>0?`$${salMin}k–$${salMax}k`:undefined,
         description:desc, applyUrl:(j.redirect_url as string)||"#",
         postedAt:createdAt, postedDate:ts?formatPostedDate(ts):"Recently",
         postedTimestamp:ts, source:"Adzuna", sourceType:"adzuna",
@@ -1078,94 +770,52 @@ async function fetchAdzuna(expansion: ReturnType<typeof expandQuery>, filter: Jo
   }
 }
 
-// ── TheirStack (optional) ─────────────────────────────────────────────────
-async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter: JobFilter): Promise<{jobs:Job[];status:SourceStatus}> {
-  const apiKey = process.env.THEIRSTACK_API_KEY;
-  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"THEIRSTACK_API_KEY not set"}};
-  const maxAgeDays: Record<JobFilter,number|undefined> = {"24h":1,"7d":7,"30d":30,"any":undefined};
-  const ageDays = maxAgeDays[filter];
+// ── Jooble (gap filler) ────────────────────────────────────────────────────
+async function fetchJooble(
+  query: string, filter: JobFilter
+): Promise<{jobs:Job[];status:SourceStatus}> {
+  const apiKey = process.env.JOOBLE_API_KEY;
+  if (!apiKey) return {jobs:[],status:{status:"skipped",fetched:0,kept:0,error:"JOOBLE_API_KEY not set"}};
+
+  // Jooble date filter: datePosted in days
+  const dateMap: Record<JobFilter,number|undefined> = {"24h":1,"3d":3,"7d":7,"any":undefined};
+  const dateDays = dateMap[filter];
+
   try {
-    // TheirStack v1 API body — verified schema
-    // job_title_or: array of strings
-    // job_country_code_or: array of ISO-2 country codes
-    // order_by: array of {desc, field} objects
-    // page: 0-indexed (NOT 1-indexed)
     const body: Record<string,unknown> = {
-      job_title_or: expansion.terms.slice(0,10),
-      job_country_code_or: ["US"],
-      order_by: [{ desc: true, field: "date_posted" }],
-      page: 0,
-      limit: 25,
+      keywords: query,
+      location: "United States",
+      page: 1,
     };
-    // posted_at_max_age_days is required by TheirStack — use selected range or 90d default
-    body.posted_at_max_age_days = ageDays ?? 90;
+    if (dateDays) body.datecreatedfrom = new Date(Date.now()-dateDays*86400000).toISOString().split("T")[0];
 
-    const reqBody = JSON.stringify(body);
-    // Log full final payload — confirm posted_at_max_age_days is present
-    console.log(`TheirStack FULL payload: ${reqBody}`);
-    console.log(`TheirStack posted_at_max_age_days=${body.posted_at_max_age_days} filter=${filter}`);
-
-    const res = await fetch("https://api.theirstack.com/v1/jobs/search", {
+    const res = await fetch(`https://jooble.org/api/${apiKey}`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
-      body: reqBody,
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body),
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      console.error(`TheirStack HTTP ${res.status}: ${errBody.slice(0,300)}`);
-      return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}: ${errBody.slice(0,100)}`}};
-    }
+    if (!res.ok) return {jobs:[],status:{status:"degraded",fetched:0,kept:0,error:`HTTP ${res.status}`}};
     const data = await res.json();
-    const raw = (data.data||[]) as Record<string,unknown>[];
-    console.log(`TheirStack raw count: ${raw.length}, total_results: ${data.total_results ?? "n/a"}`);
-
-    if (raw.length > 0) {
-      // Log first 10 raw jobs: title, location, employment type
-      const sample = raw.slice(0, 10).map(j => ({
-        title: (j.job_title as string)||"(no title)",
-        loc: (j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"(no loc)",
-        type: (j.employment_type as string)||(j.job_type as string)||"(no type)",
-      }));
-      console.log(`TheirStack first 10 raw: ${JSON.stringify(sample)}`);
-
-      // Log rejection reasons against relaxed filter
-      logRejectedJobs(
-        "theirstack", raw,
-        j => (j.job_title as string)||"",
-        j => (j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote",
-        j => (j.employment_type as string)||(j.job_type as string)||"Full-time",
-        j => (j.description as string)||""
-      );
-    } else {
-      console.log(`TheirStack 0 raw — response keys: ${JSON.stringify(Object.keys(data))}`);
-    }
-
+    const raw = (data.jobs||[]) as Record<string,unknown>[];
     const jobs: Job[] = [];
     for (const j of raw) {
-      const title=(j.job_title as string)||"";
-      const rawDesc=(j.description as string)||"";
-      const desc=cleanDescription(rawDesc).slice(0,800);
-      const companyObj=(j.company as Record<string,unknown>)||{};
-      const company=(companyObj.name as string)||(j.company_name as string)||"";
-      // TheirStack may return "Remote" or "US" or city+state — use relaxed location check
-      const location=(j.location as string)||(Array.isArray(j.locations)?(j.locations as string[]).join(", "):"")||"Remote";
-      // Use RELAXED filter — don't apply strict shouldExcludeTitle here
-      if (!shouldKeepJobRelaxed(title, desc, "Full-time", location)) continue;
-      const datePosted=(j.date_posted as string)||"";
-      const ts=datePosted?Math.floor(new Date(datePosted).getTime()/1000):0;
+      const title = (j.title as string)||"";
+      const rawDesc = (j.snippet as string)||(j.description as string)||"";
+      const desc = cleanDescription(rawDesc).slice(0,800);
+      const location = (j.location as string)||"United States";
+      const company = (j.company as string)||"";
+      const updatedAt = (j.updated as string)||"";
+      const ts = updatedAt?Math.floor(new Date(updatedAt).getTime()/1000):0;
+      if (!shouldKeepJob(title,desc,"Full-time",location,ts,filter)) continue;
+      const salaryStr = (j.salary as string)||"";
       jobs.push({
-        id:`ts-${j.id??Math.random()}`,
+        id:`jb-${j.id??Math.random()}`,
         title, company, location, type:"Full-time",
-        salary:j.salary_string?(j.salary_string as string):undefined,
-        description:desc, applyUrl:(j.url as string)||(j.final_url as string)||"#",
-        postedAt:datePosted, postedDate:ts?formatPostedDate(ts):"Recently",
-        postedTimestamp:ts, source:"TheirStack", sourceType:"other",
+        salary:salaryStr||undefined,
+        description:desc, applyUrl:(j.link as string)||"#",
+        postedAt:updatedAt, postedDate:ts?formatPostedDate(ts):"Recently",
+        postedTimestamp:ts, source:"Jooble", sourceType:"jooble",
         skills:extractMissingSkills(rawDesc),
         sponsorshipTag:detectSponsorship(rawDesc),
         experience:extractExperience(rawDesc),
@@ -1173,7 +823,6 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
         fortuneRank:getFortuneTier(company),
       });
     }
-    console.log(`TheirStack: ${raw.length} raw → ${jobs.length} kept`);
     return {jobs,status:{status:jobs.length>0?"healthy":"degraded",fetched:raw.length,kept:jobs.length}};
   } catch(e:unknown) {
     return {jobs:[],status:{status:"broken",fetched:0,kept:0,error:String(e)}};
@@ -1181,98 +830,88 @@ async function fetchTheirStack(expansion: ReturnType<typeof expandQuery>, filter
 }
 
 // ── Main Handler ───────────────────────────────────────────────────────────
+const FALLBACK_THRESHOLD = 150; // call JSearch/Adzuna/Jooble if primary sources < this
+
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
+  const {searchParams} = new URL(req.url);
   const query  = searchParams.get("q")||"";
   const filter = (searchParams.get("filter") as JobFilter)||"any";
   const sort   = (searchParams.get("sort") as SortOption)||"company_desc";
 
   if (!query.trim()) return NextResponse.json({error:"query required"},{status:400});
 
-  // Expand query
   const expansion = expandQuery(query);
 
-  // JSearch threshold: skip JSearch if cache already has results,
-  // or fire it alongside other sources but skip fallbacks if others succeed
-  const JSEARCH_SKIP_THRESHOLD = 150; // skip JSearch if other sources yield this many
-
   try {
-    // Fire all non-JSearch sources first + JSearch in parallel
-    // JSearch will self-short-circuit via cache or 429 detection
-    const [
-      rJS, rGH, rLV, rWD, rGS, rMS, rCI, rOR, rRM, rAZ, rTS,
-    ] = await Promise.allSettled([
-      withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchGreenhouse(expansion), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchLever(expansion), 50000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchWorkday(expansion, filter), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchGoldmanSachs(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchMorganStanley(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchCisco(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchOracle(expansion), 10000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}), // deprioritized — kept for shape discovery
-      withTimeout(fetchRemotive(expansion), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchAdzuna(expansion, filter), 15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
-      withTimeout(fetchTheirStack(expansion, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+    // ── Tier 1: Primary sources (always run) ─────────────────────────────
+    const [rGH, rWD, rFC] = await Promise.allSettled([
+      withTimeout(fetchGreenhouse(expansion, filter), 30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchWorkday(expansion, filter),    30000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      withTimeout(fetchFirecrawl(expansion, filter),  25000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
     ]);
 
-    const getResult = (r: typeof rJS) => r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"promise rejected"}};
+    const getR = <T extends {jobs:Job[];status:SourceStatus}>(r: PromiseSettledResult<T>) =>
+      r.status==="fulfilled" ? r.value : {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"promise rejected"}};
 
-    const results = [rJS,rGH,rLV,rWD,rGS,rMS,rCI,rOR,rRM,rAZ,rTS].map(getResult);
-    const sourceKeys = ["jsearch","greenhouse","lever","workday","goldman","morganstanley","cisco","oracle","remotive","adzuna","theirstack"];
+    const tier1 = [rGH, rWD, rFC].map(getR);
+    const tier1Jobs = tier1.flatMap(r=>r.jobs).filter(j=>j.title&&j.company);
+    const tier1Count = tier1Jobs.length;
 
-    const allJobs: Job[] = results.flatMap(r => r.jobs).filter(j=>j.title&&j.company);
+    console.log(`Tier 1 (GH+WD+FC): ${tier1Count} jobs`);
 
-    // Score all jobs
-    const scored = allJobs.map(j => ({...j, relevanceScore: computeRelevanceScore(j)}));
+    // ── Tier 2: Fallback aggregators (only if below threshold) ───────────
+    let rJS = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
+    let rAZ = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
+    let rJB = {jobs:[] as Job[], status:{status:"skipped" as const,fetched:0,kept:0,error:"threshold met"}};
 
-    // Deduplicate
-    const unique = deduplicateJobs(scored);
+    if (tier1Count < FALLBACK_THRESHOLD) {
+      console.log(`Tier 1 < ${FALLBACK_THRESHOLD} — calling fallback sources`);
+      const [rJSp, rAZp, rJBp] = await Promise.allSettled([
+        withTimeout(fetchJSearch(query, filter), 20000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+        withTimeout(fetchAdzuna(query, filter),  15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+        withTimeout(fetchJooble(query, filter),  15000, {jobs:[],status:{status:"broken" as const,fetched:0,kept:0,error:"timeout"}}),
+      ]);
+      rJS = getR(rJSp);
+      rAZ = getR(rAZp);
+      rJB = getR(rJBp);
+    }
 
-    // Per-company cap
-    const capped = applyPerCompanyCap(unique);
+    // ── Combine all results ───────────────────────────────────────────────
+    const sourceKeys = ["greenhouse","workday","firecrawl","jsearch","adzuna","jooble"] as const;
+    const allResults = [tier1[0], tier1[1], tier1[2], rJS, rAZ, rJB];
 
-    // Sort
-    const sorted = sortJobs(capped, sort);
+    const allJobs = allResults.flatMap(r=>r.jobs).filter(j=>j.title&&j.company);
+    const scored  = allJobs.map(j=>({...j, relevanceScore:computeRelevanceScore(j)}));
+    const unique  = deduplicateJobs(scored);
+    const capped  = applyPerCompanyCap(unique);
+    const sorted  = sortJobs(capped, sort);
+    const final   = sorted.slice(0, 500);
 
-    // Global cap 450
-    const final = sorted.slice(0, 450);
-
-    // Build full diagnostics
+    // ── Diagnostics ───────────────────────────────────────────────────────
     const sourceStatus: Record<string,SourceStatus> = {};
-    sourceKeys.forEach((k,i) => { sourceStatus[k] = results[i].status; });
+    sourceKeys.forEach((k,i) => { sourceStatus[k] = allResults[i].status; });
 
-    // Build source counts for UI (all sources, including zeros)
     const sources: Record<string,number> = {};
     sourceKeys.forEach(k => {
-      sources[k] = final.filter(j=>j.sourceType===k||(k==="theirstack"&&j.sourceType==="other")).length;
+      sources[k] = final.filter(j => j.sourceType === k).length;
     });
 
-    // Build rich sourceDiagnostics array
-    const sourceDiagnostics: SourceDiagnostic[] = sourceKeys.map((k, i) => {
-      const st = results[i].status;
+    const sourceDiagnostics: SourceDiagnostic[] = sourceKeys.map((k,i) => {
+      const st = allResults[i].status;
       const rawCount = st.fetched;
       const postFilterCount = sources[k];
       const called = st.status !== "skipped";
       let status: SourceDiagnostic["status"];
-      if (st.status === "skipped") status = "skipped";
-      else if (st.status === "rate_limited") status = "rate_limited";
-      else if (st.error === "timeout") status = "timeout";
-      else if (st.status === "healthy" && rawCount > 0) status = "success";
-      else if (st.status === "degraded" && rawCount > 0) status = "success";
-      else if (st.status === "degraded") status = "degraded";
-      else status = "error";
-      return {
-        source: k,
-        called,
-        status,
-        rawCount,
-        postFilterCount,
-        error: st.error || null,
-      };
+      if (st.status==="skipped")      status="skipped";
+      else if (st.status==="rate_limited") status="rate_limited";
+      else if (st.error==="timeout")  status="timeout";
+      else if (rawCount>0)            status="success";
+      else if (st.status==="degraded") status="degraded";
+      else                            status="error";
+      return {source:k, called, status, rawCount, postFilterCount, error:st.error||null};
     });
 
-    console.log(`Jobs "${query}" (${expansion.mode}) → ${final.length}`);
-    console.log("Diagnostics:", JSON.stringify(sourceDiagnostics.map(d=>({s:d.source,st:d.status,raw:d.rawCount,err:d.error}))));
+    console.log(`Final: ${final.length} jobs | Diag: ${JSON.stringify(sourceDiagnostics.map(d=>({s:d.source,st:d.status,raw:d.rawCount,kept:d.postFilterCount})))}`);
 
     return NextResponse.json({
       jobs: final,
@@ -1282,7 +921,10 @@ export async function GET(req: NextRequest) {
       sourceDiagnostics,
       queryMode: expansion.mode,
       expandedTerms: expansion.terms.length,
+      tier1Count,
+      usedFallback: tier1Count < FALLBACK_THRESHOLD,
     });
+
   } catch(err:unknown) {
     return NextResponse.json({error:err instanceof Error?err.message:"Unknown error"},{status:500});
   }

@@ -62,7 +62,7 @@ function loadSS():{query:string;filter:JobFilter;jobs:Job[];sources:Record<strin
 // ── Filter types ───────────────────────────────────────────────────────────
 type SponsorFilter = "all"|"yes"|"no_info";
 type ExpFilter = "0-1yr"|"1-3yr"|"4-6yr"|"6+yr";
-type SourceType = "jsearch"|"greenhouse"|"lever"|"remotive"|"theirstack"|"fantasticjobs"|"other";
+type SourceType = "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"firecrawl"|"other";
 
 interface Filters {
   datePosted: JobFilter;
@@ -242,7 +242,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
   const allCompanies=useMemo(()=>Array.from(new Set(allJobs.map(j=>j.company).filter(Boolean))).sort(),[allJobs]);
-  const allSources:SourceType[]=["jsearch","greenhouse","lever","remotive","theirstack","fantasticjobs","other"];
+  const allSources:SourceType[]=["greenhouse","workday","firecrawl","jsearch","adzuna","jooble"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
   const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
 
@@ -268,10 +268,10 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
           <div>
             <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"var(--muted)",marginBottom:8}}>📅 Date Posted</div>
             <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              {(["any","24h","7d","30d"] as JobFilter[]).map(v=>(
+              {(["any","24h","3d","7d"] as JobFilter[]).map(v=>(
                 <button key={v} onClick={()=>setDraft(d=>({...d,datePosted:v}))}
                   style={{padding:"6px 14px",borderRadius:100,fontSize:12,fontWeight:600,cursor:"pointer",border:"none",background:draft.datePosted===v?"var(--accent)":"var(--surface2)",color:draft.datePosted===v?"#fff":"var(--muted)"}}>
-                  {v==="any"?"Any time":v==="24h"?"Past 24h":v==="7d"?"Past week":"Past month"}
+                  {v==="any"?"Any time":v==="24h"?"Past 24h":v==="3d"?"Past 3 days":"Past week"}
                 </button>
               ))}
             </div>
@@ -315,14 +315,15 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {allSources.map(s=>{
                 const srcCount=sources[s===("other" as string)?"other":s]||0;
-                const srcLabel=s==="jsearch"?"Job Boards (JSearch)":s==="other"?"Remotive / Other":s==="theirstack"?"TheirStack":s==="fantasticjobs"?"Adzuna":s.charAt(0).toUpperCase()+s.slice(1);
+                const srcLabelMap:Record<string,string>={greenhouse:"Greenhouse (ATS)",workday:"Workday (20 cos)",firecrawl:"Firecrawl (direct)",jsearch:"JSearch (fallback)",adzuna:"Adzuna (backup)",jooble:"Jooble (gap filler)"};
+const label=srcLabelMap[s]||s;
                 const SC:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",remotive:"#9664ff",theirstack:"#ff8c00",fantasticjobs:"#00c8b4",other:"#7070a0"};
                 const dotColor=SC[s]||"#7070a0";
                 return (
                 <label key={s} style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",padding:"8px 12px",borderRadius:10,background:draft.sources.has(s)?"rgba(108,99,255,0.08)":"var(--surface2)",border:`1px solid ${draft.sources.has(s)?"var(--accent)":"var(--border)"}`}}>
                   <input type="checkbox" checked={draft.sources.has(s)} onChange={()=>setDraft(d=>({...d,sources:toggle(d.sources as Set<string>,s) as Set<SourceType>}))} style={{accentColor:"var(--accent)"}}/>
                   <span style={{width:8,height:8,borderRadius:"50%",background:dotColor,flexShrink:0}}/>
-                  <span style={{fontSize:13,color:"var(--text)",flex:1}}>{srcLabel}</span>
+                  <span style={{fontSize:13,color:"var(--text)",flex:1}}>{label}</span>
                   {srcCount>0&&<span style={{fontSize:11,color:dotColor,fontWeight:600,background:`${dotColor}18`,padding:"1px 7px",borderRadius:100}}>{srcCount}</span>}
                 </label>
                 );
@@ -372,7 +373,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function SourceBadge({source,sourceType}:{source:string;sourceType?:string}){
-  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},lever:{bg:"rgba(0,150,255,0.1)",color:"#0096ff"},remotive:{bg:"rgba(150,100,255,0.1)",color:"#9664ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},theirstack:{bg:"rgba(255,140,0,0.1)",color:"#ff8c00"},fantasticjobs:{bg:"rgba(0,200,180,0.1)",color:"#00c8b4"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
+  const C:Record<string,{bg:string;color:string}>={greenhouse:{bg:"rgba(0,200,100,0.1)",color:"#00c864"},workday:{bg:"rgba(207,69,0,0.1)",color:"#cf4500"},firecrawl:{bg:"rgba(108,99,255,0.1)",color:"#6c63ff"},jsearch:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"},adzuna:{bg:"rgba(0,200,180,0.1)",color:"#00c8b4"},jooble:{bg:"rgba(255,149,0,0.1)",color:"#ff9500"},other:{bg:"rgba(112,112,160,0.1)",color:"#7070a0"}};
   const c=C[sourceType||"other"]||C.other;
   return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:c.bg,color:c.color,border:`1px solid ${c.color}40`}}>{source}</span>;
 }
@@ -450,7 +451,7 @@ export default function JobsPage(){
     // Fix 9: Client-side date filter (covers Greenhouse/Lever/Remotive which ignore API date param)
     if(filters.datePosted!=="any"){
       const now=Date.now();
-      const cutoffs:Record<string,number>={"24h":now-86400000,"7d":now-604800000,"30d":now-2592000000};
+      const cutoffs:Record<string,number>={"24h":now-86400000,"3d":now-259200000,"7d":now-604800000};
       const cutoff=cutoffs[filters.datePosted];
       if(cutoff) list=list.filter(j=>{
         const ts=(j as Job&{postedTimestamp?:number}).postedTimestamp;
@@ -577,8 +578,8 @@ export default function JobsPage(){
               ? diagnostics
               : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
             ).map(d=>{
-              const COL:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",workday:"#cf4500",goldman:"#00a3e0",morganstanley:"#003087",cisco:"#1ba0d7",oracle:"#f80000",remotive:"#9664ff",adzuna:"#00c8b4",theirstack:"#ff8c00"};
-              const LBL:Record<string,string>={jsearch:"JSearch",greenhouse:"Greenhouse",lever:"Lever",workday:"Workday",goldman:"Goldman",morganstanley:"MS",cisco:"Cisco",oracle:"Oracle",remotive:"Remotive",adzuna:"Adzuna",theirstack:"TheirStack"};
+              const COL:Record<string,string>={greenhouse:"#00c864",workday:"#cf4500",firecrawl:"#6c63ff",jsearch:"#7070a0",adzuna:"#00c8b4",jooble:"#ff9500"};
+              const LBL:Record<string,string>={greenhouse:"Greenhouse",workday:"Workday",firecrawl:"Firecrawl",jsearch:"JSearch",adzuna:"Adzuna",jooble:"Jooble"};
               const col=COL[d.source]||"#888";
               const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"||d.status==="rate_limited"?"🟡":"🔴";
               return(
@@ -612,13 +613,15 @@ export default function JobsPage(){
                 </thead>
                 <tbody>
                   {diagnostics.map(d=>{
-                    const sColor={success:"#00c864",degraded:"#ff9500",error:"#ff6b6b",skipped:"#7070a0",timeout:"#ff9500",rate_limited:"#ff6b6b"}[d.status as string]||"#888";
-                    const sIcon={success:"✅",degraded:"⚠️",error:"❌",skipped:"⏭️",timeout:"⏱",rate_limited:"🚫"}[d.status as string]||"❓";
+                    const sColorMap:Record<string,string>={success:"#00c864",degraded:"#ff9500",error:"#ff6b6b",skipped:"#7070a0",timeout:"#ff9500",rate_limited:"#ff6b6b"};
+                    const stColor=sColorMap[d.status as string]||"#888";
+                    const sIconMap:Record<string,string>={success:"✅",degraded:"⚠️",error:"❌",skipped:"⏭️",timeout:"⏱",rate_limited:"🚫"};
+                    const sIcon=sIconMap[d.status as string]||"❓";
                     return(
                       <tr key={d.source} style={{borderBottom:"1px solid var(--border)",opacity:d.called?1:0.45}}>
                         <td style={{padding:"4px 8px",fontWeight:600,color:"var(--text)"}}>{d.source}</td>
                         <td style={{padding:"4px 8px",color:d.called?"#00c864":"#ff6b6b"}}>{d.called?"yes":"no"}</td>
-                        <td style={{padding:"4px 8px",color:sColor,fontWeight:600}}>{sIcon} {d.status}</td>
+                        <td style={{padding:"4px 8px",color:stColor,fontWeight:600}}>{sIcon} {d.status}</td>
                         <td style={{padding:"4px 8px",color:"var(--muted)"}}>{d.rawCount}</td>
                         <td style={{padding:"4px 8px",color:d.postFilterCount>0?"#00c864":"var(--muted)",fontWeight:d.postFilterCount>0?700:400}}>{d.postFilterCount}</td>
                         <td style={{padding:"4px 8px",color:"#ff6b6b",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis"}} title={d.error||undefined}>{d.error||"—"}</td>
