@@ -484,8 +484,6 @@ async function deactivateStaleJobs(): Promise<void> {
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────
-export const maxDuration = 60;
-
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const sourceFilter = (body.source as string) || "all"; // "all" | "greenhouse" | "workday"
