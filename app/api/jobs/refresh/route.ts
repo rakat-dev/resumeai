@@ -578,10 +578,19 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
       const company   = ((j.company as Record<string, unknown>)?.display_name as string) ?? companyName;
       const createdAt = (j.created as string) ?? null;
       if (createdAt && (Date.now() - new Date(createdAt).getTime()) / 86_400_000 > MAX_INGEST_DAYS) continue;
+
+      // Build a location that always passes isUSLocation(): Adzuna's area[] is
+      // ["US", "New Jersey", "Middlesex County", "Iselin"] — city = last, state = [1].
+      // display_name alone ("Iselin, Middlesex County") is missing the state and fails the filter.
+      const area = Array.isArray(locObj.area) ? (locObj.area as string[]) : [];
+      const city   = area[area.length - 1] ?? "";
+      const state  = area[1] ?? "";
+      const location = [city, state, "United States"].filter(Boolean).join(", ") || (locObj.display_name as string) || "United States";
+
       results.push({
         id: `azt-${j.id ?? Math.random()}`, source: "adzuna" as RefreshSource, company,
         title:       (j.title as string) ?? "",
-        location:    (locObj.display_name as string) ?? "United States",
+        location,
         description: (j.description as string) ?? "",
         applyUrl:    (j.redirect_url as string) ?? "#",
         postedAt:    createdAt, type: "Full-time",
