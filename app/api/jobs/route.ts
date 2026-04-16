@@ -155,25 +155,36 @@ export async function GET(req: NextRequest) {
   const pageSize = 2000; // return all, UI handles scrolling
 
   try {
-    // Build query — use service role key to bypass RLS
-    let query = supabaseAdmin
-      .from("jobs")
-      .select("*")
-      .eq("is_active", true)
-      .order("posted_at", { ascending: false })
-      .limit(2000);
-
+    // Paginate past PostgREST's 1000-row default cap.
+    // With ~1300+ active jobs in DB, a single .limit(5000) call still returns
+    // only 1000 rows because PostgREST enforces max-rows server-side. Loop
+    // with .range(offset, offset+PAGE-1) until we get a short page.
+    const PAGE_SIZE = 1000;
+    const MAX_ROWS  = 5000; // hard ceiling to protect memory/latency
+    const rows: JobRow[] = [];
     const cutoff = getDateCutoff(filter);
-    if (cutoff) query = query.gte("posted_at", cutoff);
+    let offset = 0;
 
-    const { data, error } = await query;
+    while (rows.length < MAX_ROWS) {
+      let q = supabaseAdmin
+        .from("jobs")
+        .select("*")
+        .eq("is_active", true)
+        .order("posted_at", { ascending: false })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (cutoff) q = q.gte("posted_at", cutoff);
 
-    if (error) {
-      console.error("[/api/jobs] Supabase error:", error.message);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      const { data, error } = await q;
+      if (error) {
+        console.error("[/api/jobs] Supabase error:", error.message);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      const page = (data ?? []) as JobRow[];
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) break; // short page = no more rows
+      offset += PAGE_SIZE;
     }
 
-    const rows = (data ?? []) as JobRow[];
     console.log(`[/api/jobs] rows=${rows.length} filter=${filter} sort=${sort}`);
 
     // Map -> score -> sort -> diversity cap -> paginate
