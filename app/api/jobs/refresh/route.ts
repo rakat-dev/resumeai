@@ -227,19 +227,19 @@ function filterJobsWithStats(jobs: NormalizedJob[]): { filtered: NormalizedJob[]
     location_removed, clearance_removed, horizon_removed, output: filtered.length } };
 }
 
-// ── Dedupe: ID first, then title+company+location ──────────────────────────
-// Uses stable external job IDs as primary key.
-// Cross-source dedup: title+company+location prevents same job from two APIs.
-// Does NOT collapse same-company different-location/role jobs (that was the old bug).
+// ── Dedupe by stable external ID only ──────────────────────────────────────
+// Previously also deduped on title+company+location, but that collapsed
+// genuinely-distinct requisitions at big companies: Microsoft posts ~50
+// "Software Engineer II" / "Senior Software Engineer" roles in "Redmond,
+// WA, US" at once — each is a separate team with its own requisition ID
+// and JD. Walmart hits the same issue with many "(USA) Senior, Software
+// Engineer" roles. The TLC dedup was eating 65%+ of Microsoft yield.
+// The ID-based dedup below handles the actual "same job twice" concern.
 function dedupeJobs(jobs: NormalizedJob[]): NormalizedJob[] {
-  const seenIds    = new Set<string>();
-  const seenTLCKey = new Set<string>();
+  const seenIds = new Set<string>();
   return jobs.filter(j => {
     if (seenIds.has(j.id)) return false;
     seenIds.add(j.id);
-    const key = `${j.title.toLowerCase().trim()}|||${j.company.toLowerCase().trim()}|||${j.location.toLowerCase().trim()}`;
-    if (seenTLCKey.has(key)) return false;
-    seenTLCKey.add(key);
     return true;
   });
 }
