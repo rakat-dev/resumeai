@@ -16,25 +16,25 @@ export interface ScrapedJob {
 }
 
 // ── Microsoft ─────────────────────────────────────────────────────────────
-// Uses msft careers search API — returns JSON job listings
-// Spec: sort by date, paginate up to 15 pages (no visible date on cards)
+// Uses apply.careers.microsoft.com pcsx search API (reverse-engineered
+// 2026-04-16 via Chrome DevTools — the old jobs.careers.microsoft.com
+// endpoint now redirects to this SPA). Default page size = 10.
+// Verified working from cold fetch (no cookies, no CSRF required).
 export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
   const results: ScrapedJob[] = [];
   const MAX_PAGES = 15;
-  const PAGE_SIZE = 20;
+  const PAGE_SIZE = 10; // Microsoft's default — matches what the SPA uses
 
   for (let page = 0; page < MAX_PAGES; page++) {
     try {
       const params = new URLSearchParams({
-        q:    "software engineer",
-        l:    "en_us",
-        pg:   String(page + 1),
-        pgSz: String(PAGE_SIZE),
-        o:    "Relevance",
-        flt:  "",
+        domain:   "microsoft.com",
+        location: "",
+        query:    "software engineer",
+        start:    String(page * PAGE_SIZE),
       });
       const res = await fetch(
-        `https://jobs.careers.microsoft.com/global/en/search?${params}`,
+        `https://apply.careers.microsoft.com/api/pcsx/search?${params}`,
         {
           headers: {
             "Accept": "application/json",
@@ -45,23 +45,27 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
       );
       if (!res.ok) break;
       const data = await res.json();
-      const jobs = (data.operationResult?.result?.jobs ?? []) as Record<string, unknown>[];
-      if (jobs.length === 0) break;
+      const positions = (data?.data?.positions ?? []) as Record<string, unknown>[];
+      if (positions.length === 0) break;
 
-      for (const j of jobs) {
-        const jobId = (j.jobId as string) ?? String(Math.random());
+      for (const p of positions) {
+        const numericId  = p.id as number | undefined;
+        const displayId  = (p.displayJobId as string) ?? String(numericId ?? Math.random());
+        const locStdArr  = (p.standardizedLocations as string[]) ?? [];
+        const locRawArr  = (p.locations as string[]) ?? [];
+        const postedTs   = p.postedTs as number | undefined;
         results.push({
-          id:          `msft-${jobId}`,
+          id:          `msft-${numericId ?? displayId}`,
           company:     "Microsoft",
-          title:       (j.title as string) ?? "",
-          location:    (j.location as string) ?? "United States",
-          description: (j.description as string) ?? "",
-          applyUrl:    `https://jobs.careers.microsoft.com/global/en/job/${jobId}`,
-          postedAt:    (j.postingDate as string) ?? null,
+          title:       (p.name as string) ?? "",
+          location:    locStdArr[0] ?? locRawArr[0] ?? "United States",
+          description: "", // position_details endpoint holds this — not fetched to keep refresh fast
+          applyUrl:    `https://jobs.careers.microsoft.com/global/en/job/${displayId}`,
+          postedAt:    postedTs ? new Date(postedTs * 1000).toISOString() : null,
           type:        "Full-time",
         });
       }
-      if (jobs.length < PAGE_SIZE) break;
+      if (positions.length < PAGE_SIZE) break;
     } catch { break; }
   }
 
