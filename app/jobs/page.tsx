@@ -136,7 +136,32 @@ function clientSort(jobs:Job[],sort:SortOption):Job[]{
 // When sort === "company_desc", results are rendered as collapsible
 // dropdowns: one per top-15 company, plus a "Remaining Jobs" dropdown
 // with a summary card listing the rest.
-const TOP_COMPANY_GROUP_LIMIT = 15;
+const TOP_COMPANY_GROUP_LIMIT = 15; // kept for backward compat but no longer used
+
+// Priority list from priority.rtf — all tiers (lowercase for matching)
+const PRIORITY_COMPANIES = new Set([
+  "microsoft","amazon","google","apple","meta","meta platforms","oracle",
+  "intel","cisco","cisco systems","ibm","salesforce","walmart",
+  "jpmorgan","jpmorgan chase","goldman sachs","morgan stanley",
+  "bank of america","wells fargo","capital one","target",
+  "home depot","the home depot","lowe's","lowes","costco","costco wholesale",
+  "unitedhealth","unitedhealth group","elevance","elevance health",
+  "cvs","cvs health",
+  "nvidia","databricks","snowflake","hashicorp","cloudflare","mongodb",
+  "confluent","servicenow","workday","atlassian","sap","adobe",
+  "t-mobile","at&t",
+  "cigna","openai","anthropic","accenture","cognizant","infosys",
+  "tata consultancy","tata consultancy services","tcs","capgemini",
+  "paypal","visa","mastercard","stripe","ups","fedex","verizon","verizon communications",
+]);
+
+function isOnPriorityList(company: string): boolean {
+  const lc = company.toLowerCase();
+  for (const p of PRIORITY_COMPANIES) {
+    if (lc === p || lc.includes(p) || p.includes(lc)) return true;
+  }
+  return false;
+}
 
 type CompanyGroup = {
   type: "company_group";
@@ -149,6 +174,7 @@ type RemainingGroup = {
   title: string;
   count: number;
   jobs: Job[];
+  subGroups: { company: string; count: number; jobs: Job[] }[];
   companiesSummary: { company: string; count: number }[];
 };
 // No-date Tier A companies (Google etc.). Always pinned at top of board.
@@ -189,14 +215,6 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
     byCompany.get(c)!.push(j);
   }
 
-  // Inside every group, cards are sorted by date posted (newest first).
-  // Group ORDER itself is unchanged — it reflects the outer sort
-  // (Fortune rank asc for Top Companies).
-  //
-  // null/0 timestamps render as "Recently" in the UI. These are jobs whose
-  // source didn't expose a posted_at date — they were JUST scraped though,
-  // so treat them as newest (+Infinity) rather than oldest. Otherwise a
-  // freshly-ingested job lands below a 3-week-old dated one.
   const byDateDesc = (a: Job, b: Job) => {
     const rawA = (a as Job & {postedTimestamp?: number}).postedTimestamp;
     const rawB = (b as Job & {postedTimestamp?: number}).postedTimestamp;
@@ -211,35 +229,49 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
     byCompany.get(c)!.sort(byDateDesc);
   }
 
-  const top = orderedCompanies.slice(0, TOP_COMPANY_GROUP_LIMIT);
-  const rest = orderedCompanies.slice(TOP_COMPANY_GROUP_LIMIT);
+  // Classify companies into 3 tiers:
+  //   tier1: priority list + ≥10 jobs → standalone dropdown
+  //   tier2: NOT on priority list + ≥10 jobs → sub-dropdown inside Remaining
+  //   tier3: <10 jobs (any) → compact alpha list inside Remaining
+  const tier1: string[] = [];
+  const tier2: string[] = [];
+  const tier3: string[] = [];
+  for (const c of orderedCompanies) {
+    const count = byCompany.get(c)!.length;
+    if (count >= 10 && isOnPriorityList(c)) tier1.push(c);
+    else if (count >= 10) tier2.push(c);
+    else tier3.push(c);
+  }
 
-  const view: GroupedView = top.map(c => ({
-    type: "company_group",
+  // Tier 1 — standalone company dropdowns (Fortune-rank ordered by outer sort)
+  const view: GroupedView = tier1.map((c, i) => ({
+    type: "company_group" as const,
     company: c,
     count: byCompany.get(c)!.length,
     jobs: byCompany.get(c)!,
   }));
 
-  if (rest.length > 0) {
+  // Remaining group (tier2 sub-dropdowns + tier3 compact list)
+  if (tier2.length > 0 || tier3.length > 0) {
+    const subGroups = tier2.map(c => ({
+      company: c,
+      count: byCompany.get(c)!.length,
+      jobs: byCompany.get(c)!,
+    }));
+    // Compact alpha list: sorted A→Z
+    const companiesSummary = [...tier3]
+      .sort((a, b) => a.localeCompare(b))
+      .map(c => ({ company: c, count: byCompany.get(c)!.length }));
     const restJobs: Job[] = [];
-    const summary: { company: string; count: number }[] = [];
-    for (const c of rest) {
-      const jobs = byCompany.get(c)!;
-      restJobs.push(...jobs);
-      summary.push({ company: c, count: jobs.length });
-    }
-    // Sort summary by count desc so heaviest remaining companies sit on top
-    summary.sort((a, b) => b.count - a.count);
-    // Remaining group is one combined card list — sort those by date too,
-    // so the newest jobs across all remaining companies surface first.
+    for (const c of [...tier2, ...tier3]) restJobs.push(...byCompany.get(c)!);
     restJobs.sort(byDateDesc);
     view.push({
-      type: "remaining_group",
+      type: "remaining_group" as const,
       title: "Remaining Jobs",
       count: restJobs.length,
       jobs: restJobs,
-      companiesSummary: summary,
+      subGroups,
+      companiesSummary,
     });
   }
 
@@ -933,20 +965,51 @@ export default function JobsPage(){
                       <span style={{fontSize:12,color:"var(--muted)",fontWeight:500,background:"var(--surface2)",padding:"3px 10px",borderRadius:999}}>{g.count}</span>
                     </summary>
                     <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
-                      {g.type==="remaining_group"&&g.companiesSummary.length>0&&(
-                        <div style={{background:"var(--surface2)",border:"1px dashed var(--border)",borderRadius:12,padding:"12px 14px",marginTop:6}}>
-                          <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--muted)",marginBottom:8,fontWeight:600}}>Companies in this group</div>
-                          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:"6px 16px",fontSize:13}}>
-                            {g.companiesSummary.map(c=>(
-                              <div key={c.company} style={{display:"flex",justifyContent:"space-between",gap:8,color:"var(--text)"}}>
-                                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.company}</span>
-                                <span style={{color:"var(--muted)",fontVariantNumeric:"tabular-nums"}}>— {c.count}</span>
+                      {g.type==="remaining_group"&&(
+                        <>
+                          {/* Sub-dropdowns: non-priority companies with ≥10 jobs */}
+                          {g.subGroups.length>0&&(
+                            <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:6}}>
+                              {g.subGroups.map(sg=>(
+                                <details key={`sub-${sg.company}`}
+                                  style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,overflow:"hidden"}}>
+                                  <summary style={{padding:"11px 15px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:14,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                                    <span>{sg.company}</span>
+                                    <span style={{fontSize:11,color:"var(--muted)",background:"var(--surface2)",padding:"2px 9px",borderRadius:999}}>{sg.count}</span>
+                                  </summary>
+                                  <div style={{padding:"4px 12px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                                    {sg.jobs.map(job=>(
+                                      <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                                    ))}
+                                  </div>
+                                </details>
+                              ))}
+                            </div>
+                          )}
+                          {/* Compact alpha list: companies with <10 jobs */}
+                          {g.companiesSummary.length>0&&(
+                            <div style={{background:"var(--surface2)",border:"1px dashed var(--border)",borderRadius:12,padding:"12px 16px",marginTop:g.subGroups.length>0?4:6}}>
+                              <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--muted)",marginBottom:8,fontWeight:600}}>Other companies (&lt;10 jobs)</div>
+                              <div style={{fontSize:12,color:"var(--text)",lineHeight:2.0,wordBreak:"break-word"}}>
+                                {g.companiesSummary.map((c,idx)=>(
+                                  <span key={c.company}>
+                                    <span style={{color:"var(--text)"}}>{c.company}</span>
+                                    <span style={{color:"var(--muted)",fontSize:11}}> ({c.count})</span>
+                                    {idx<g.companiesSummary.length-1&&<span style={{color:"var(--border)",margin:"0 6px"}}>·</span>}
+                                  </span>
+                                ))}
                               </div>
+                            </div>
+                          )}
+                          {/* Job cards from all remaining companies */}
+                          <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:4}}>
+                            {g.jobs.map(job=>(
+                              <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
                             ))}
                           </div>
-                        </div>
+                        </>
                       )}
-                      {g.jobs.map(job=>(
+                      {g.type==="company_group"&&g.jobs.map(job=>(
                         <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
                       ))}
                     </div>
