@@ -617,18 +617,21 @@ export default function JobsPage(){
   },[]);
 
   // ── Load jobs from DB ──────────────────────────────────────────────────
-  const loadJobs=async(dateFilter:JobFilter,sortOpt:SortOption)=>{
+  // Always fetches with filter=any so no-date pinned sources (Google, Meta)
+  // are always returned. Date filtering is done entirely client-side in the
+  // useMemo below, which keeps pinned dropdowns visible at all times.
+  const loadJobs=async(_dateFilter:JobFilter,sortOpt:SortOption)=>{
     setLoading(true);setLoadErr("");setDisplayLimit(50);setTotalJobs(0);
     try{
-      const res=await fetch(`/api/jobs?filter=${dateFilter}&sort=${sortOpt}`);
+      const res=await fetch(`/api/jobs?filter=any&sort=${sortOpt}`);
       if(!res.ok)throw new Error(`HTTP ${res.status}`);
       const data=await res.json();
       const nj=(data.jobs as Job[])||[];
       const ns=(data.sources as Record<string,number>)||{};
       const nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
       setJobs(nj);setSources(ns);setDiagnostics(nd);
-      setTotalJobs(nj.length); // use actual fetched count, not data.total which can be stale
-      saveSS(dateFilter,nj,ns);
+      setTotalJobs(nj.length);
+      saveSS("any",nj,ns);
       if(nj.length===0)setLoadErr(data.message||"No jobs in DB yet — click \"Refresh Now\" to ingest jobs.");
     }catch(e:unknown){setLoadErr(e instanceof Error?e.message:"Failed to load jobs.");}
     setLoading(false);
@@ -713,9 +716,9 @@ export default function JobsPage(){
   const currentResume=step===2?v2Resume:v1Resume;
   const currentAts=step===2?v2Ats:v1Ats;
 
-  // Re-load when filter or sort changes
+  // Re-load when sort changes (date filter is client-side only, no re-fetch needed)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(()=>{if(jobs.length>0||loading)loadJobs(filters.datePosted,sort);},[filters.datePosted,sort]);
+  useEffect(()=>{if(jobs.length>0||loading)loadJobs("any",sort);},[sort]);
 
   const handleSaveResume=()=>{
     saveBaseResume(resume);
