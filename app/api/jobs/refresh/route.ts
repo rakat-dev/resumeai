@@ -212,25 +212,52 @@ function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] 
 }
 
 // ── Ingest pipeline ────────────────────────────────────────────────────────
+// Per-source horizon overrides: some companies keep reqs open for months.
+// Using the global 30-day horizon drops 78%+ of Meta/Tier-A inventory.
+const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
+  meta:       180,  // Meta keeps reqs open 4-9 months routinely
+  playwright: 180,  // Tier A scrapers (Microsoft, Google, Amazon, Apple etc.) also do
+  phenom:     180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
+};
+
 async function ingestSource(
   source: RefreshSource,
   fetchFn: () => Promise<{ raw: RawJob[]; fetched: number; error: string | null }>,
   label: string
 ): Promise<{ raw: number; kept: number; stored: number; error: string | null; filterStats?: FilterStats }> {
   const startedAt = markRunning(label, source);
+  // Use per-source horizon if configured; otherwise fall back to global 30-day default.
+  const horizonDays = SOURCE_HORIZON_OVERRIDES[source] ?? MAX_INGEST_DAYS;
+  const horizonMs   = horizonDays * 86_400_000;
+  function isWithinHorizon(iso: string | null): boolean {
+    if (!iso) return true;
+    return Date.now() - new Date(iso).getTime() <= horizonMs;
+  }
   try {
     const { raw: rawJobs, fetched, error: fetchErr } = await fetchFn();
     if (fetchErr) {
       markDone(label, source, startedAt, 0, 0, fetchErr);
       return { raw: 0, kept: 0, stored: 0, error: fetchErr };
     }
-    const normalized          = normalizeJobs(rawJobs);
-    const { filtered, stats } = filterJobsWithStats(normalized);
+    const normalized = normalizeJobs(rawJobs);
+    // Apply per-source horizon inside the filter pass
+    let title_removed = 0, type_removed = 0, location_removed = 0,
+        clearance_removed = 0, horizon_removed = 0;
+    const filtered = normalized.filter(j => {
+      if (!shouldIncludeTitle(j.title))                       { title_removed++;    return false; }
+      if (!isFullTime(j.employment_type, j.description))     { type_removed++;     return false; }
+      if (!isUSLocation(j.location))                         { location_removed++; return false; }
+      if (requiresSecurityClearance(j.title, j.description)) { clearance_removed++;return false; }
+      if (!isWithinHorizon(j.posted_at))                     { horizon_removed++;  return false; }
+      return true;
+    });
+    const stats: FilterStats = { input: normalized.length, title_removed, type_removed,
+      location_removed, clearance_removed, horizon_removed, output: filtered.length };
     const deduped             = dedupeJobs(filtered);
     const capped              = applySourceCap(deduped, source);
     const { stored, error: storeErr } = await storeJobs(capped);
     markDone(label, source, startedAt, fetched, capped.length, storeErr);
-    console.log(`[refresh:${label}] raw=${fetched} norm=${normalized.length} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} type_drop=${stats.type_removed} clearance_drop=${stats.clearance_removed} horizon_drop=${stats.horizon_removed} filtered=${filtered.length} deduped=${deduped.length} capped=${capped.length} stored=${stored}`);
+    console.log(`[refresh:${label}] horizonDays=${horizonDays} raw=${fetched} norm=${normalized.length} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} type_drop=${stats.type_removed} clearance_drop=${stats.clearance_removed} horizon_drop=${stats.horizon_removed} filtered=${filtered.length} deduped=${deduped.length} capped=${capped.length} stored=${stored}`);
     return { raw: fetched, kept: capped.length, stored, error: storeErr, filterStats: stats };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -801,7 +828,18 @@ export async function POST(req: NextRequest) {
       try {
         const { raw, fetched, companyResults } = await fetchPlaywrightTierA();
         const normalized          = normalizeJobs(raw);
-        const { filtered, stats } = filterJobsWithStats(normalized);
+        // Playwright Tier-A: use SOURCE_HORIZON_OVERRIDES["playwright"] = 180 days
+        const pwHorizonMs = (SOURCE_HORIZON_OVERRIDES["playwright"] ?? MAX_INGEST_DAYS) * 86_400_000;
+        let pw_title = 0, pw_type = 0, pw_loc = 0, pw_clear = 0, pw_hor = 0;
+        const filtered = normalized.filter(j => {
+          if (!shouldIncludeTitle(j.title))                       { pw_title++; return false; }
+          if (!isFullTime(j.employment_type, j.description))     { pw_type++;  return false; }
+          if (!isUSLocation(j.location))                         { pw_loc++;   return false; }
+          if (requiresSecurityClearance(j.title, j.description)) { pw_clear++; return false; }
+          if (Date.now() - new Date(j.posted_at ?? 0).getTime() > pwHorizonMs && j.posted_at) { pw_hor++; return false; }
+          return true;
+        });
+        const stats = { title_removed: pw_title, type_removed: pw_type, location_removed: pw_loc, clearance_removed: pw_clear, horizon_removed: pw_hor, input: normalized.length, output: filtered.length };
         const deduped             = dedupeJobs(filtered);
         const capped              = applySourceCap(deduped, "playwright");
         const { stored, error: storeErr } = await storeJobs(capped);

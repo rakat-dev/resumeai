@@ -321,6 +321,10 @@ export const INCLUDE_KEYWORDS = [
   "application engineer", "application developer",
   "web developer", "product engineer",
   "api engineer", "integration engineer",
+  "machine learning engineer",   // e.g. Meta "Machine Learning Engineer"
+  "production engineer",          // Meta/Google infra role = SRE-equivalent
+  "research engineer",            // IC SWE role at Meta/Google/DeepMind
+  "partner engineer",             // Meta external-facing SWE role
   // SWE-IC architect titles — non-SWE architects already excluded below
   "application architect",  // covers "Backend Application Architect", "Cloud Application Architect"
   "backend architect",
@@ -350,6 +354,7 @@ export const INCLUDE_KEYWORDS = [
 export const INCLUDE_TECH_WORDS = [
   "software", "backend", "frontend", "cloud", "devops", "platform",
   "data", "infrastructure", "reliability", "distributed",
+  "machine learning", "ml",  // catch "ML Engineer" etc.
   "java", "python", "golang", "go", "ruby", "scala", "kotlin",
   "ios", "android", "react", "node", "typescript", "javascript",
   "spark", "kafka", "kubernetes", "aws", "azure", "gcp",
@@ -390,7 +395,7 @@ export const EXCLUDE_SUBSTRINGS = [
 ];
 
 // Whole-word excludes (regex \b...\b)
-export const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
+export const EXCLUDE_WHOLE_WORDS = ["vp"];  // "ml" removed 2026-04-17 — now included via explicit "machine learning engineer" phrase
 
 export function shouldIncludeTitle(title: string): boolean {
   const tl = title.toLowerCase();
