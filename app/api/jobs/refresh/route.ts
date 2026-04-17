@@ -215,8 +215,9 @@ function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] 
 // Per-source horizon overrides: some companies keep reqs open for months.
 // Using the global 30-day horizon drops 78%+ of Meta/Tier-A inventory.
 const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
-  meta:       180,  // Meta keeps reqs open 4-9 months routinely
-  playwright: 180,  // Tier A scrapers (Microsoft, Google, Amazon, Apple etc.) also do
+  // meta: removed — Meta adapter now sets postedAt=null (no-date source, like Google/Apple).
+  //        null postedAt passes isWithinHorizon unconditionally so no override needed.
+  playwright: 180,  // Tier A scrapers (Microsoft, Google, Amazon, Apple) keep reqs open months
   phenom:     180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
 };
 

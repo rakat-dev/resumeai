@@ -321,9 +321,7 @@ export const INCLUDE_KEYWORDS = [
   "application engineer", "application developer",
   "web developer", "product engineer",
   "api engineer", "integration engineer",
-  "machine learning engineer",   // e.g. Meta "Machine Learning Engineer"
   "production engineer",          // Meta/Google infra role = SRE-equivalent
-  "research engineer",            // IC SWE role at Meta/Google/DeepMind
   "partner engineer",             // Meta external-facing SWE role
   // SWE-IC architect titles — non-SWE architects already excluded below
   "application architect",  // covers "Backend Application Architect", "Cloud Application Architect"
@@ -340,12 +338,11 @@ export const INCLUDE_KEYWORDS = [
   "android engineer","android developer",
   "ui engineer",     "ui developer",
   // Infrastructure / data engineering
-  "data engineer",
   "systems engineer",    // "Systems Engineer, Backend" etc.
   "infrastructure engineer",
   "reliability engineer",
   // QA / test engineering
-  "qa engineer", "quality engineer", "test engineer", "automation engineer",
+  "test engineer", "automation engineer",
 ];
 
 // Single-word qualifiers: if the title contains one of these AND also contains
@@ -353,8 +350,7 @@ export const INCLUDE_KEYWORDS = [
 // Examples: "Kafka Engineer", "React Developer", "Spark Engineer"
 export const INCLUDE_TECH_WORDS = [
   "software", "backend", "frontend", "cloud", "devops", "platform",
-  "data", "infrastructure", "reliability", "distributed",
-  "machine learning", "ml",  // catch "ML Engineer" etc.
+  "infrastructure", "reliability", "distributed",
   "java", "python", "golang", "go", "ruby", "scala", "kotlin",
   "ios", "android", "react", "node", "typescript", "javascript",
   "spark", "kafka", "kubernetes", "aws", "azure", "gcp",
@@ -376,8 +372,12 @@ export const EXCLUDE_SUBSTRINGS = [
   "intern", "internship",
   // Language-specific we don't target
   ".net developer", "dotnet", "c# developer",
-  // Research / clearance
-  "research scientist",
+  // Research / clearance / data science (not target roles for Rahul)
+  "research scientist", "research engineer",
+  "data engineer", "data scientist",
+  "machine learning engineer",   // ML Eng at Meta/Google skews heavily toward research
+  // QA (not target)
+  "qa engineer", "quality engineer",
   // Non-SWE tech
   "security engineer", "cybersecurity", "network engineer",
   // Business / process
@@ -395,7 +395,7 @@ export const EXCLUDE_SUBSTRINGS = [
 ];
 
 // Whole-word excludes (regex \b...\b)
-export const EXCLUDE_WHOLE_WORDS = ["vp"];  // "ml" removed 2026-04-17 — now included via explicit "machine learning engineer" phrase
+export const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
 
 export function shouldIncludeTitle(title: string): boolean {
   const tl = title.toLowerCase();

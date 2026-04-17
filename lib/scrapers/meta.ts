@@ -40,15 +40,16 @@ import type { RefreshSource } from "@/app/api/jobs/types";
 
 /** Output shape — matches the RawJob interface in app/api/jobs/refresh/route.ts */
 export interface MetaScrapedJob {
-  id:          string;
-  source:      RefreshSource;
-  company:     string;
-  title:       string;
-  location:    string;
-  description: string;
-  applyUrl:    string;
-  postedAt:    string | null;
-  type:        string;
+  id:            string;
+  source:        RefreshSource;
+  company:       string;
+  title:         string;
+  location:      string;
+  description:   string;
+  applyUrl:      string;
+  postedAt:      null;           // Meta shows no date in their UI — treated as no-date source
+  type:          string;
+  positionRank:  number;         // 1-based sitemap order (relevance-ranked by Meta)
 }
 
 const SITEMAP_URL    = "https://www.metacareers.com/jobs/sitemap.xml";
@@ -167,7 +168,7 @@ function parseJobPostingJsonLd(html: string): MetaJobPosting | null {
  * Build a MetaScrapedJob from a successfully-fetched job page.
  * Returns null if the job is non-US (we only ingest US jobs).
  */
-function buildScrapedJob(url: string, jp: MetaJobPosting): MetaScrapedJob | null {
+function buildScrapedJob(url: string, jp: MetaJobPosting, rank: number): MetaScrapedJob | null {
   if (!jp.title) return null;
 
   // US filter — early. Saves DB writes downstream.
@@ -183,20 +184,21 @@ function buildScrapedJob(url: string, jp: MetaJobPosting): MetaScrapedJob | null
   const description = descParts.join("\n\n");
 
   return {
-    id:          `meta-${id}`,
-    source:      "meta" as RefreshSource,
-    company:     COMPANY_NAME,
-    title:       jp.title,
-    location:    buildLocation(jp),
+    id:           `meta-${id}`,
+    source:       "meta" as RefreshSource,
+    company:      COMPANY_NAME,
+    title:        jp.title,
+    location:     buildLocation(jp),
     description,
-    applyUrl:    url,                                      // page IS the apply URL (directApply: true)
-    postedAt:    jp.datePosted ?? null,
-    type:        jp.employmentType ?? "Full-time",
+    applyUrl:     url,                 // page IS the apply URL (directApply: true)
+    postedAt:     null,                // Meta shows no date in UI — treated as no-date source
+    type:         jp.employmentType ?? "Full-time",
+    positionRank: rank,                // 1-based sitemap order
   };
 }
 
 /** Fetch + parse a single job detail page. Returns null on any failure. */
-async function fetchAndParseJob(url: string): Promise<MetaScrapedJob | null> {
+async function fetchAndParseJob(url: string, rank: number): Promise<MetaScrapedJob | null> {
   try {
     const res = await fetch(url, {
       headers: {
@@ -210,7 +212,7 @@ async function fetchAndParseJob(url: string): Promise<MetaScrapedJob | null> {
     const html = await res.text();
     const jp = parseJobPostingJsonLd(html);
     if (!jp) return null;
-    return buildScrapedJob(url, jp);
+    return buildScrapedJob(url, jp, rank);
   } catch {
     return null;
   }
@@ -287,7 +289,11 @@ export async function fetchMetaSitemapJobs(): Promise<MetaScrapedJob[]> {
   if (urls.length > MAX_SITEMAP_JOBS) urls = urls.slice(0, MAX_SITEMAP_JOBS);
 
   const t1 = Date.now();
-  const fetched = await mapWithConcurrency(urls, CONCURRENCY, fetchAndParseJob);
+  const fetched = await mapWithConcurrency(
+    urls.map((url, i) => ({ url, rank: i + 1 })),
+    CONCURRENCY,
+    ({ url, rank }) => fetchAndParseJob(url, rank),
+  );
   const t2 = Date.now();
 
   const jobs = fetched.filter((j): j is MetaScrapedJob => j !== null);
