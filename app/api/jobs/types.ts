@@ -19,6 +19,8 @@ export type RefreshSource =
   | "jsearch"
   | "adzuna"
   | "jooble"
+  | "phenom"                       // Phenom-People-hosted careers sites (CVS Health, etc.)
+  | "meta"                         // Meta sitemap-based scrape (replaces broken playwright_meta)
   | "playwright_microsoft"
   | "playwright_google"
   | "playwright_apple"

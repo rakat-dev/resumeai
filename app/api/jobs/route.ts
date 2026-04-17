@@ -28,7 +28,7 @@ export interface Job {
   postedDate: string;
   postedTimestamp: number;
   source: string;
-  sourceType: "greenhouse" | "workday" | "jsearch" | "adzuna" | "jooble" | "playwright" | "other";
+  sourceType: "greenhouse" | "workday" | "jsearch" | "adzuna" | "jooble" | "phenom" | "meta" | "playwright" | "other";
   skills: string[];
   sponsorshipTag: "mentioned" | "not_mentioned";
   experience?: string;
@@ -213,7 +213,7 @@ export async function GET(req: NextRequest) {
       sourceCountMap.set(key, (sourceCountMap.get(key) ?? 0) + 1);
     });
 
-    const SOURCE_KEYS = ["greenhouse", "workday", "playwright", "jsearch", "adzuna", "jooble"];
+    const SOURCE_KEYS = ["greenhouse", "workday", "playwright", "jsearch", "adzuna", "jooble", "phenom", "meta"];
     const sources: Record<string, number> = {};
     SOURCE_KEYS.forEach(k => { sources[k] = sourceCountMap.get(k) ?? 0; });
 

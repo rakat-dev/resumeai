@@ -313,6 +313,7 @@ export const INCLUDE_KEYWORDS = [
   // Specialisations
   "backend engineer", "backend developer",
   "frontend engineer", "frontend developer",
+  "front end engineer", "front end developer",  // 2026-04-17: catch space-separated variant (CVS uses "Senior Front End Engineer")
   "full stack", "fullstack", "full-stack",
   "cloud engineer", "devops engineer", "platform engineer",
   "site reliability", "sre",

@@ -13,6 +13,7 @@ export type AtsType =
   | "eightfold"
   | "successfactors"
   | "icims"
+  | "phenom"
   | "custom";
 
 export interface CompanyAtsConfig {
@@ -42,7 +43,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "T-Mobile",        ats: "workday", careersUrl: "https://tmobile.wd1.myworkdayjobs.com/External",                   adapter: "workday", enabled: true  },
   { company: "S&P Global",      ats: "workday", careersUrl: "https://spglobal.wd1.myworkdayjobs.com/Careers",                   adapter: "workday", enabled: false,
     note: "HTTP 422/404 on spglobal/spgi × wd1/wd5 × Careers/External variants (probe 2026-04-16). Cloudflare bot protection. Jobs sourced via Adzuna." },
-  { company: "CVS Health",      ats: "workday", careersUrl: "https://cvshealth.wd1.myworkdayjobs.com/CVS_Health_Careers",        adapter: "workday", enabled: true  },
+  { company: "CVS Health",      ats: "workday", careersUrl: "https://cvshealth.wd1.myworkdayjobs.com/CVS_Health_Careers",        adapter: "workday", enabled: false,
+    note: "Switched to direct Phenom scrape 2026-04-17 (jobs.cvshealth.com). Phenom returns 215 IT jobs (ground truth) vs Workday SWE-keyword search returning 53 with worse coverage. Apply URLs from Phenom point to the same cvshealth.wd1.myworkdayjobs.com tenant, so candidates land in the identical Workday application flow." },
   { company: "UnitedHealth",    ats: "workday", careersUrl: "https://uhg.wd5.myworkdayjobs.com/External",                       adapter: "workday", enabled: true  },
   { company: "Elevance Health", ats: "workday", careersUrl: "https://elevancehealth.wd1.myworkdayjobs.com/ANT",                 adapter: "workday", enabled: true  },
   { company: "Walmart",         ats: "workday", careersUrl: "https://walmart.wd5.myworkdayjobs.com/WalmartExternal",            adapter: "workday", enabled: true  },
@@ -177,11 +179,29 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "Eightfold adapter not yet implemented",
   },
 
+  // ── PHENOM PEOPLE ─────────────────────────────────────────────────────────
+  // Direct scrape of Phenom-hosted careers sites. Adapter implemented in
+  // lib/scrapers/phenom.ts — tenant config (refNum, hostname, category) lives
+  // in PHENOM_TENANTS over there, this entry is just for registry visibility
+  // and Adzuna exclusion logic (see PHENOM_ONLY_COMPANIES below).
+  { company: "CVS Health",     ats: "phenom", careersUrl: "https://jobs.cvshealth.com",          adapter: "phenom", enabled: true,
+    note: "Replaced Workday adapter on 2026-04-17. Phenom returns 215 IT jobs (ground truth from CVS's own site) with real cvshealth.wd1.myworkdayjobs.com apply URLs and no Adzuna geo-fanout." },
+
+  // META (sitemap + JSON-LD). Direct sitemap-based scrape of metacareers.com.
+  // Adapter implemented in lib/scrapers/meta.ts. Replaces the broken
+  // playwright_meta scraper (the playwright entry below is set enabled:false).
+  // Sitemap exposes ~918 job URLs each with full JSON-LD JobPosting; ~78%
+  // are US-anchored. Excluded from Adzuna by META_DIRECT_COMPANIES below to
+  // prevent re-import of the 89%-duplicate Adzuna data we observed for Meta.
+  { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/jobs/sitemap.xml", adapter: "meta",   enabled: true,
+    note: "Sitemap+JSON-LD scrape added 2026-04-17. Replaces playwright_meta (HTTP 400 since Meta added per-request anti-replay tokens to GraphQL)." },
+
   // ── PLAYWRIGHT / CUSTOM CAREER PAGE APIs (Tier A) ─────────────────────────
   { company: "Microsoft",      ats: "custom", careersUrl: "https://jobs.careers.microsoft.com/global/en/search",   adapter: "playwright_microsoft", enabled: true },
   { company: "Google",         ats: "custom", careersUrl: "https://careers.google.com/api/v3/search",              adapter: "playwright_google",    enabled: true },
   { company: "Apple",          ats: "custom", careersUrl: "https://jobs.apple.com/api/role/search",                adapter: "playwright_apple",     enabled: true },
-  { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: true },
+  { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: false,
+    note: "Disabled 2026-04-17 — Meta added per-request anti-replay tokens to its GraphQL endpoint, breaking server-side replay (returns HTTP 400 / noncoercible_variable_value). Replaced by the meta sitemap+JSON-LD adapter (above, adapter:'meta')." },
   { company: "Amazon",         ats: "custom", careersUrl: "https://www.amazon.jobs/en/search.json",               adapter: "playwright_amazon",    enabled: true },
 ];
 
@@ -218,3 +238,43 @@ export function getGreenhouseSlugs(): Array<{ company: string; slug: string }> {
     return { company: c.company, slug };
   }).filter(x => x.slug !== "");
 }
+
+// ── Adzuna exclusion list ───────────────────────────────────────────────
+// Companies whose primary source is a direct adapter (Phenom, Workday, etc.)
+// AND whose Adzuna data is unreliable enough to want excluded entirely.
+// CVS Health: Adzuna fans out a single requisition across 30+ state capitals,
+// each with a broken /land/ad/ apply URL pointing back to Adzuna's own site.
+// Direct Phenom scrape returns one row per real requisition with the actual
+// Workday apply URL.
+//
+// Names must match the EXACT strings used by ADZUNA_TARGETED_COMPANIES in
+// app/api/jobs/refresh/route.ts AND the company names returned by Adzuna's
+// API in `company.display_name` (which is what gets stored in `company`).
+export const PHENOM_ONLY_COMPANIES: ReadonlySet<string> = new Set([
+  "CVS Health",
+  "CVS",          // legacy variant Adzuna sometimes returns
+]);
+
+export function isPhenomOnly(company: string): boolean {
+  return PHENOM_ONLY_COMPANIES.has(company)
+      || PHENOM_ONLY_COMPANIES.has(company.trim());
+}
+
+// Meta is sourced directly from www.metacareers.com via sitemap+JSON-LD
+// (lib/scrapers/meta.ts). Adzuna's Meta data was 89% duplicates from feed
+// fanout (124 rows collapsing to 13 unique fingerprints, observed 2026-04-17),
+// so we exclude it the same way CVS is excluded above.
+// Adzuna's company.display_name returns "Meta" for Meta Platforms postings;
+// keep the variants list small and exact so we don't accidentally drop
+// genuinely-different companies (e.g. "MetaBank", "Meta Financial").
+export const META_DIRECT_COMPANIES: ReadonlySet<string> = new Set([
+  "Meta",
+  "Meta Platforms",
+  "Meta Platforms, Inc.",
+]);
+
+export function isMetaDirect(company: string): boolean {
+  return META_DIRECT_COMPANIES.has(company)
+      || META_DIRECT_COMPANIES.has(company.trim());
+}
+

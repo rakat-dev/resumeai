@@ -9,11 +9,13 @@ import {
 } from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
-  fetchMetaJobs, fetchAmazonJobs, fetchJPMJobs,
+  fetchAmazonJobs, fetchJPMJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs, fetchNetflixJobs,
   type ScrapedJob,
 } from "@/lib/playwrightScrapers";
-import { getWorkdayConfigs, getGreenhouseSlugs } from "@/lib/companyAtsRegistry";
+import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } from "@/lib/companyAtsRegistry";
+import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
+import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 
 export const maxDuration = 60;
 
@@ -202,6 +204,8 @@ function markDone(company: string, source: RefreshSource,
 const SOURCE_STORE_CAPS: Record<string, number> = {
   greenhouse: 3000, workday: 1500, jsearch: 500,
   adzuna: 1000, jooble: 1000, playwright: 1500,
+  phenom: 800,  // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
+  meta: 1000,   // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -433,6 +437,10 @@ async function fetchAdzunaSource(): Promise<{ raw: RawJob[]; fetched: number; er
       for (const j of raw) {
         const locObj    = (j.location as Record<string, unknown>) ?? {};
         const company   = ((j.company as Record<string, unknown>)?.display_name as string) ?? "";
+        // Skip companies whose primary source is a direct adapter (Phenom, etc.)
+        // — Adzuna's data for them has fanout / broken /land/ad/ links.
+        if (isPhenomOnly(company)) continue;
+        if (isMetaDirect(company)) continue;
         const createdAt = (j.created as string) ?? null;
         if (createdAt && (Date.now() - new Date(createdAt).getTime()) / 86_400_000 > MAX_INGEST_DAYS) {
           hitHorizon = true; break;
@@ -480,7 +488,10 @@ const ADZUNA_TARGETED_COMPANIES = [
   "Capgemini",          //  94 jobs
   // Third expansion — Meta scraper broken + Walmart/Target undercovered by Workday:
   "Walmart",            // 400 jobs — Workday pipeline finds only 38; Adzuna indexes Walmart corporate SWE roles more thoroughly
-  "Meta",               // 238 jobs — playwright Meta scraper returns HTTP 400, Adzuna is the entire Meta pipeline for now
+  // Meta removed 2026-04-17 — now sourced via direct sitemap+JSON-LD scrape
+  // (lib/scrapers/meta.ts). Adzuna's Meta data was 89% duplicates from feed
+  // fanout (124 rows collapsing to 13 unique fingerprints). Blocked at the
+  // per-row level too by isMetaDirect() in fetchAdzunaSource for safety.
   "Target",             //   4 jobs — small add, but target company on the priority list
   // Fourth expansion (2026-04-16, partial workflow rollout):
   //   Banks / finance that live on Oracle HCM or proprietary sites with
@@ -494,7 +505,10 @@ const ADZUNA_TARGETED_COMPANIES = [
   "AT&T",
   //   Healthcare giants whose direct ATS fetches are blocked or unreliable.
   "Elevance Health",
-  "CVS Health",
+  // CVS Health removed 2026-04-17 — now sourced via direct Phenom scrape.
+  // Adzuna fanned out a single requisition across 30+ state-capital cities
+  // each with a broken /land/ad/ apply URL. Blocked at the per-row level too
+  // by isPhenomOnly() in fetchAdzunaSource for safety.
   //   IT consulting (complements Accenture/Cognizant/Capgemini already on list).
   "Infosys",
   "Tata Consultancy Services",
@@ -576,6 +590,10 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
 
       const locObj    = (j.location as Record<string, unknown>) ?? {};
       const company   = ((j.company as Record<string, unknown>)?.display_name as string) ?? companyName;
+      // Defense in depth: even if a Phenom-only company sneaks back into
+      // ADZUNA_TARGETED_COMPANIES, drop the row at ingest time.
+      if (isPhenomOnly(company)) continue;
+      if (isMetaDirect(company)) continue;
       const createdAt = (j.created as string) ?? null;
       const title     = (j.title as string) ?? "";
       const id        = `azt-${j.id ?? Math.random()}`;
@@ -661,11 +679,46 @@ async function fetchJoobleSource(): Promise<{ raw: RawJob[]; fetched: number; er
 // Companies with no standard ATS — scraped via their career page APIs.
 // Each company maps to EXACTLY ONE fetcher. No company appears in Workday/GH too.
 // Goldman Sachs: Oracle HCM (not Workday). OpenAI: Ashby. Netflix: Lever.
+// 1g. Phenom (CVS Health, others). Direct scrape of Phenom-hosted
+// careers sites. CVS Health is the first tenant. The adapter
+// (lib/scrapers/phenom.ts) fetches 215 IT jobs (ground truth from CVS's
+// own site, vs the 53 Workday SWE-keyword search returns) with real
+// Workday apply URLs and no Adzuna geo-fanout. New Phenom tenants are
+// added in PHENOM_TENANTS inside the adapter file (no changes here).
+async function fetchPhenomSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const scraped = await fetchAllPhenomTenants();
+    // Output of fetchAllPhenomTenants already matches RawJob shape
+    // (id/source/company/title/location/description/applyUrl/postedAt/type).
+    return { raw: scraped, fetched: scraped.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
+// 1h. Meta sitemap+JSON-LD (lib/scrapers/meta.ts).
+// Replaces playwright_meta which broke when Meta added per-request anti-replay
+// tokens to its GraphQL endpoint. Sitemap exposes ~918 job URLs each with full
+// JSON-LD JobPosting; ~78% are US-anchored. Concurrency-limited inside the
+// adapter so fetch wall-time stays under the 60s function limit.
+async function fetchMetaSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const scraped = await fetchMetaSitemapJobs();
+    return { raw: scraped, fetched: scraped.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
 const TIER_A_COMPANIES: Array<{ name: string; source: RefreshSource; fetcher: () => Promise<ScrapedJob[]> }> = [
   { name: "Microsoft",      source: "playwright_microsoft", fetcher: fetchMicrosoftJobs    },
   { name: "Google",         source: "playwright_google",    fetcher: fetchGoogleJobs       },
   { name: "Apple",          source: "playwright_apple",     fetcher: fetchAppleJobs        },
-  { name: "Meta",           source: "playwright_meta",      fetcher: fetchMetaJobs         },
+  // Meta removed 2026-04-17 — fetchMetaJobs returns HTTP 400 since Meta added
+  // per-request anti-replay tokens to its GraphQL endpoint. Replaced by the
+  // sitemap+JSON-LD adapter in lib/scrapers/meta.ts (run via source="meta").
   { name: "Amazon",         source: "playwright_amazon",    fetcher: fetchAmazonJobs       },
   { name: "JPMorgan Chase", source: "playwright_jpmorgan",  fetcher: fetchJPMJobs          },
   { name: "Goldman Sachs",  source: "playwright_google",    fetcher: fetchGoldmanSachsJobs }, // Oracle HCM
@@ -739,6 +792,8 @@ export async function POST(req: NextRequest) {
   if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaSource,     "adzuna"    ).then(r => { results.adzuna     = r; }));
   if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaTargetedSource, "adzuna_targeted").then(r => { results.adzuna_targeted = r; }));
   if (run("jooble"))     tasks.push(ingestSource("jooble",     fetchJoobleSource,     "jooble"    ).then(r => { results.jooble     = r; }));
+  if (run("phenom"))     tasks.push(ingestSource("phenom",     fetchPhenomSource,     "phenom"    ).then(r => { results.phenom     = r; }));
+  if (run("meta"))       tasks.push(ingestSource("meta",       fetchMetaSource,       "meta"      ).then(r => { results.meta       = r; }));
 
   if (run("playwright")) {
     tasks.push((async () => {
