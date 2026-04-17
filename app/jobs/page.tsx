@@ -167,11 +167,11 @@ type GroupedView = (CompanyGroup | RemainingGroup)[];
 // Jobs with positionRank are surfaced via a per-company dropdown instead of
 // flat cards — they have no real posted_at to compare against the time
 // filter. Trim by rank as a synthetic recency proxy.
-function rankCutoffFor(filter: JobFilter): number {
-  if (filter === "24h") return 30;
-  if (filter === "3d")  return 60;
-  if (filter === "7d")  return 90;
-  return 120;
+function rankFractionFor(filter: JobFilter): number {
+  if (filter === "24h") return 0.25;
+  if (filter === "3d")  return 0.5;
+  if (filter === "7d")  return 0.75;
+  return 1.0;
 }
 
 function normalizeCompany(c: string | null | undefined): string {
@@ -252,7 +252,7 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
 // Returns BOTH the no-date groups AND the remaining (dated) jobs.
 function buildNoDateGroups(
   allJobs: Job[],
-  rankCutoff: number,
+  rankFraction: number,   // 0.25 | 0.5 | 0.75 | 1.0 based on date filter
 ): { noDateGroups: NoDateCompanyGroup[]; datedJobs: Job[] } {
   const datedJobs: Job[] = [];
   const byCompany = new Map<string, Job[]>();
@@ -260,8 +260,9 @@ function buildNoDateGroups(
   for (const j of allJobs) {
     const rank = (j as Job & { positionRank?: number }).positionRank;
     if (typeof rank === "number" && rank > 0) {
-      // Trim by rank cutoff (24h→30, 3d→60, 7d→90, any→120)
-      if (rank > rankCutoff) continue;
+      // Don't apply rankCutoff here — always collect ALL no-date jobs.
+      // We trim inside the group below after sorting, so the dropdown
+      // always appears (never vanishes on date filter).
       const c = normalizeCompany(j.company);
       if (!byCompany.has(c)) { byCompany.set(c, []); orderedCompanies.push(c); }
       byCompany.get(c)!.push(j);
@@ -280,12 +281,23 @@ function buildNoDateGroups(
   // Companies with the most jobs first — Google with 120 outranks future
   // Tier A no-date companies that may have fewer.
   orderedCompanies.sort((a, b) => byCompany.get(b)!.length - byCompany.get(a)!.length);
-  const noDateGroups: NoDateCompanyGroup[] = orderedCompanies.map(c => ({
-    type: "no_date_company_group",
-    company: c,
-    count: byCompany.get(c)!.length,
-    jobs: byCompany.get(c)!,
-  }));
+  const noDateGroups: NoDateCompanyGroup[] = orderedCompanies.map(c => {
+    const all = byCompany.get(c)!;
+    // Trim by fraction AFTER sorting: 24h=1/4, 3d=1/2, 7d=3/4, any=all.
+    // Math.ceil so at minimum 1 job always shows.
+    const trimCount = Math.max(1, Math.ceil(all.length * rankFraction));
+    const trimmed = all.slice(0, trimCount);
+    const renumbered = trimmed.map((j, idx) => ({
+      ...j,
+      positionRank: idx + 1,
+    })) as Job[];
+    return {
+      type: "no_date_company_group" as const,
+      company: c,
+      count: renumbered.length,
+      jobs: renumbered,
+    };
+  });
   return { noDateGroups, datedJobs };
 }
 
@@ -667,7 +679,7 @@ export default function JobsPage(){
 
     // Split: no-date (positionRank set) jobs go into per-company dropdowns
     // pinned at top; dated jobs go through the normal sort + filter path.
-    const cutoff = rankCutoffFor(filters.datePosted);
+    const cutoff = rankFractionFor(filters.datePosted);
     const { noDateGroups, datedJobs } = buildNoDateGroups(list, cutoff);
 
     // Date-filter applies only to dated jobs.
@@ -871,23 +883,30 @@ export default function JobsPage(){
                 Time-filter trims contents (24h→30, 3d→60, 7d→90, any→120). */}
             {noDateGroups.length>0&&(
               <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:10}}>
-                {noDateGroups.map(g=>(
-                  <details key={`nodate-${g.company}`} open={false}
-                    style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:14,overflow:"hidden",boxShadow:"0 0 0 1px rgba(108,99,255,0.15)"}}>
-                    <summary style={{padding:"14px 18px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,background:"linear-gradient(to right, rgba(108,99,255,0.08), transparent)"}}>
-                      <span style={{display:"flex",alignItems:"center",gap:10}}>
-                        <span style={{fontSize:11,color:"var(--accent)",fontWeight:700,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,0.12)",border:"1px solid rgba(108,99,255,0.3)"}}>📌 PINNED</span>
-                        <span>{g.company}</span>
-                      </span>
-                      <span style={{fontSize:12,color:"var(--accent)",fontWeight:600,background:"rgba(108,99,255,0.1)",padding:"3px 10px",borderRadius:999,border:"1px solid rgba(108,99,255,0.3)"}}>{g.count}</span>
-                    </summary>
-                    <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
-                      {g.jobs.map(job=>(
-                        <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
-                      ))}
-                    </div>
-                  </details>
-                ))}
+            {noDateGroups.map(g=>{
+              // Badge label: show fraction info when a date filter is active
+              const dateFilter = filters.datePosted;
+              const fractionLabel = dateFilter==="24h" ? "top ¼" : dateFilter==="3d" ? "top ½" : dateFilter==="7d" ? "top ¾" : null;
+              return (
+              <details key={`nodate-${g.company}`} open={false}
+                style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:14,overflow:"hidden",boxShadow:"0 0 0 1px rgba(108,99,255,0.15)"}}>
+                <summary style={{padding:"14px 18px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,background:"linear-gradient(to right, rgba(108,99,255,0.08), transparent)"}}>
+                  <span style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:11,color:"var(--accent)",fontWeight:700,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,0.12)",border:"1px solid rgba(108,99,255,0.3)"}}>📌 PINNED</span>
+                    <span>{g.company}</span>
+                  </span>
+                  <span style={{fontSize:12,color:"var(--accent)",fontWeight:600,background:"rgba(108,99,255,0.1)",padding:"3px 10px",borderRadius:999,border:"1px solid rgba(108,99,255,0.3)"}}>
+                    {fractionLabel ? `${g.count} (${fractionLabel})` : g.count}
+                  </span>
+                </summary>
+                <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
+                  {g.jobs.map(job=>(
+                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                  ))}
+                </div>
+              </details>
+              );
+            })}
               </div>
             )}
 
