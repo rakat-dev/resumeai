@@ -5,7 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import {
   cleanDescription, detectSponsorship, isUSLocation,
   isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
-  normalizeCompany,
+  normalizeCompany, shouldIncludeTitle,
 } from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
@@ -48,125 +48,12 @@ interface NormalizedJob {
   is_active:           boolean;
 }
 
-// ── Title filter ───────────────────────────────────────────────────────────
-// Strategy:
-//   1. Hard-exclude list checked FIRST — always wins
-//   2. Include list checked second — must match at least one term
-//   3. Default = exclude
-//
-// INCLUDE terms are intentionally broad single/double words so titles like
-// "Java Engineer", "Sr. Software Eng", "Cloud Infrastructure Engineer" all pass.
-
-const INCLUDE_KEYWORDS = [
-  // Core SWE
-  "software engineer", "software developer", "software eng",
-  // Specialisations
-  "backend engineer", "backend developer",
-  "frontend engineer", "frontend developer",
-  "full stack", "fullstack",
-  "cloud engineer", "devops engineer", "platform engineer",
-  "site reliability", "sre",
-  "distributed systems",
-  "application engineer", "application developer",
-  "web developer", "product engineer",
-  "api engineer", "integration engineer",
-  // SWE-IC architect titles — non-SWE architects already excluded above
-  "application architect",  // covers "Backend Application Architect", "Cloud Application Architect"
-  "backend architect",
-  "frontend architect",
-  // Language-named engineer/developer roles
-  "python engineer", "python developer",
-  "java engineer",   "java developer",
-  "golang engineer", "go engineer",
-  "ruby engineer",   "ruby developer",
-  "scala engineer",  "scala developer",
-  "kotlin engineer", "kotlin developer",
-  "ios engineer",    "ios developer",
-  "android engineer","android developer",
-  "ui engineer",     "ui developer",
-  // Infrastructure / data engineering
-  "data engineer",
-  "systems engineer",    // "Systems Engineer, Backend" etc.
-  "infrastructure engineer",
-  "reliability engineer",
-  // QA / test engineering
-  "qa engineer", "quality engineer", "test engineer", "automation engineer",
-  // Broad fallback: any title containing bare "engineer" or "developer"
-  // combined with a qualifying tech word handled below
-];
-
-// Single-word qualifiers: if the title contains one of these AND also contains
-// "engineer" or "developer", include it even without an exact phrase match.
-// Examples: "Kafka Engineer", "React Developer", "Spark Engineer"
-const INCLUDE_TECH_WORDS = [
-  "software", "backend", "frontend", "cloud", "devops", "platform",
-  "data", "infrastructure", "reliability", "distributed",
-  "java", "python", "golang", "go", "ruby", "scala", "kotlin",
-  "ios", "android", "react", "node", "typescript", "javascript",
-  "spark", "kafka", "kubernetes", "aws", "azure", "gcp",
-  "mobile", "embedded", "firmware",
-];
-
-// EXCLUDE: checked BEFORE includes — always wins
-const EXCLUDE_SUBSTRINGS = [
-  // Seniority tiers to exclude (per spec)
-  "principal",   // kills "Principal Software Engineer"
-  "staff",       // kills "Staff Software Engineer"
-  "lead",        // kills "Lead Software Engineer", "Tech Lead"
-  // "architect" alone was too broad — rejected "Backend Application
-  // Architect" / "Cloud Application Architect" which are legitimate
-  // senior IC SWE roles. Replaced with specific non-SWE architect variants:
-  "solutions architect",
-  "solution architect",
-  "software architect",
-  "enterprise architect",
-  "systems architect",     // usually hardware/infra, not SWE
-  "data architect",        // DBA-adjacent, not SWE IC
-  "cloud architect",       // usually consulting/sales-engineer flavor
-  "technical architect",
-  "information architect",
-  // Management / non-IC
-  "manager", "director", "vice president", "head of", "chief",
-  "intern", "internship",
-  // Language-specific we don't target
-  ".net developer", "dotnet", "c# developer",
-  // Research / clearance
-  "research scientist",
-  // Non-SWE tech
-  "security engineer", "cybersecurity", "network engineer",
-  // Business / process
-  "business analyst", "scrum master", "project manager",
-  "recruiter", "marketing engineer",
-  // Junk roles from retail / ops / physical
-  "technician", "mechanic", "electrician", "machinist",
-  "warehouse", "retail associate", "store associate",
-  "robotics engineer", "controls engineer",
-  "mechanical engineer", "electrical engineer", "civil engineer",
-  "nurse", "pharmacist", "physician", "therapist",
-  "sales representative", "account executive", "account manager",
-  "data center technician", "field technician", "field service",
-  "customer service", "customer support",
-];
-
-// Whole-word excludes
-const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
-
-function shouldIncludeTitle(title: string): boolean {
-  const tl = title.toLowerCase();
-
-  // 1. Hard excludes always win
-  for (const kw of EXCLUDE_SUBSTRINGS)  { if (tl.includes(kw))                     return false; }
-  for (const kw of EXCLUDE_WHOLE_WORDS) { if (new RegExp(`\\b${kw}\\b`).test(tl)) return false; }
-
-  // 2. Direct phrase match
-  if (INCLUDE_KEYWORDS.some(kw => tl.includes(kw))) return true;
-
-  // 3. Broad fallback: title contains "engineer" or "developer" + a tech qualifier
-  const hasEngineerOrDev = tl.includes("engineer") || tl.includes("developer");
-  if (hasEngineerOrDev && INCLUDE_TECH_WORDS.some(w => tl.includes(w))) return true;
-
-  return false;
-}
+// ── Title filter ──────────────────────────────────────────────────────────
+// Strict shouldIncludeTitle now lives in lib/jobUtils.ts so it can be shared
+// with the Tier A playwright scrapers (otherwise the 80-job per-company cap
+// gets wasted on titles the ingest pipeline drops downstream).
+// All keyword arrays (INCLUDE_KEYWORDS, INCLUDE_TECH_WORDS, EXCLUDE_SUBSTRINGS,
+// EXCLUDE_WHOLE_WORDS) are now defined and exported there too.
 
 function isFullTime(type: string, desc: string): boolean {
   return !/\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/

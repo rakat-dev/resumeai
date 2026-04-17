@@ -6,21 +6,36 @@
 
 import {
   isRelevantTitleEarly,
+  shouldIncludeTitle,
   isUSLocation,
   isWithinEarlyHorizon,
   EARLY_HORIZON_DAYS_FULL,
 } from "./jobUtils";
 
 // ── Full-workflow helper (workflow spec §§1-10) ───────────────────────────
-// Shared pipeline for "full workflow" scrapers (Microsoft, Amazon, etc.).
-// Runs primary + optional secondary query. Per query, paginates up to
-// maxPages. For each returned job:
-//   1. early dedupe by id
-//   2. early title filter (isRelevantTitleEarly)
+// Shared pipeline for "full workflow" scrapers (Microsoft, Amazon, Apple, etc.).
+// Runs primary + optional secondary query. Per query, paginates up to maxPages.
+// For each returned job:
+//   1. dedupe by id
+//   2. STRICT title filter (shouldIncludeTitle — same one ingest pipeline uses)
+//      → previously used the loose isRelevantTitleEarly which let titles like
+//        "Engineering Manager" / "ML Engineer" / "Mechanical Engineer" through
+//        only to be dropped downstream, wasting cap slots
 //   3. early location filter (isUSLocation)
 //   4. early 25-day horizon check
 // Stops pagination when: (a) page is empty, (b) cap reached, or (c) oldest
 // job on the page crosses the horizon.
+//
+// EXTENSION MODE (user directive 2026-04-17):
+//   When the standard 80-job cap is reached AND the oldest job kept (which
+//   equals the most recent to hit the cap when sort=newest) is < 14 days
+//   old, the workflow keeps paginating until either:
+//     - the next job's postedAt is older than 20 days, OR
+//     - total kept reaches 120,
+//   whichever comes first. Extension mode REPLACES the normal stop logic
+//   for that company on that refresh — so a company with a backlog of fresh
+//   roles isn't artificially capped at 80.
+//
 // No adaptive stop (removed per user directive).
 export interface FullWorkflowStats {
   company:               string;
@@ -33,10 +48,14 @@ export interface FullWorkflowStats {
   rejectedByDate:        number;
   dedupeDropped:         number;
   finalKept:             number;
-  stopReason:            "page_limit" | "date_threshold" | "cap_reached" | "no_results" | "error";
+  extensionTriggered:    boolean;
+  stopReason:            "page_limit" | "date_threshold" | "cap_reached" | "ext_cap_reached" | "ext_date_threshold" | "no_results" | "error";
 }
 
-export const FULL_WORKFLOW_MAX_JOBS_PER_COMPANY = 80;
+export const FULL_WORKFLOW_MAX_JOBS_PER_COMPANY     = 80;
+export const FULL_WORKFLOW_EXTENSION_FRESHNESS_DAYS = 14;
+export const FULL_WORKFLOW_EXTENSION_HORIZON_DAYS   = 20;
+export const FULL_WORKFLOW_EXTENSION_CAP            = 120;
 
 export async function runFullWorkflow<TRawJob>(opts: {
   company:       string;
@@ -49,16 +68,44 @@ export async function runFullWorkflow<TRawJob>(opts: {
 }): Promise<{ jobs: ScrapedJob[]; stats: FullWorkflowStats }> {
   const seen = new Set<string>();
   const out: ScrapedJob[] = [];
+  // Track each kept job's postedAt timestamp (parallel to out[]).
+  // Used to evaluate the freshness check when the standard cap is reached.
+  const keptTimestamps: Array<number | null> = [];
   const stats: FullWorkflowStats = {
     company: opts.company, queries: opts.queries, nativeFilters: opts.nativeFilters,
     pagesFetched: 0, rawJobs: 0, rejectedByEarlyTitle: 0, rejectedByLocation: 0,
-    rejectedByDate: 0, dedupeDropped: 0, finalKept: 0, stopReason: "page_limit",
+    rejectedByDate: 0, dedupeDropped: 0, finalKept: 0, extensionTriggered: false,
+    stopReason: "page_limit",
   };
+
+  // Effective cap and horizon mutate when extension mode activates mid-loop.
+  let currentCap     = FULL_WORKFLOW_MAX_JOBS_PER_COMPANY;
+  let currentHorizon = EARLY_HORIZON_DAYS_FULL;
+  let extensionMode  = false;
+
+  // Helper: did we just hit the standard cap with a fresh-enough oldest-kept?
+  // Returns true if extension should activate.
+  function shouldEnterExtension(): boolean {
+    if (extensionMode) return false;                       // already extended
+    if (out.length < FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) return false; // not at cap yet
+    // Find oldest kept job timestamp (assuming sort=newest, this is the
+    // last one pushed into out[]; but be defensive — scan the array).
+    let oldest: number | null = null;
+    for (const t of keptTimestamps) {
+      if (t === null) continue;
+      if (oldest === null || t < oldest) oldest = t;
+    }
+    if (oldest === null) return false;                     // no parseable date → no extension
+    const ageDays = (Date.now() - oldest) / 86_400_000;
+    return ageDays < FULL_WORKFLOW_EXTENSION_FRESHNESS_DAYS;
+  }
 
   queryLoop: for (const query of opts.queries) {
     for (let page = 0; page < opts.maxPages; page++) {
-      if (out.length >= FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) {
-        stats.stopReason = "cap_reached"; break queryLoop;
+      // Cap-reached check (uses currentCap which extension mode may have raised)
+      if (out.length >= currentCap) {
+        stats.stopReason = extensionMode ? "ext_cap_reached" : "cap_reached";
+        break queryLoop;
       }
       let rawPage: TRawJob[];
       try {
@@ -74,32 +121,51 @@ export async function runFullWorkflow<TRawJob>(opts: {
 
       let oldestOnPageTs: number | null = null;
       for (const raw of rawPage) {
-        if (out.length >= FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) break;
+        if (out.length >= currentCap) break;
         const j = opts.toScrapedJob(raw);
         if (!j) continue;
-        // early dedupe
+        // dedupe
         if (seen.has(j.id)) { stats.dedupeDropped += 1; continue; }
         seen.add(j.id);
-        // early title filter
-        if (!isRelevantTitleEarly(j.title)) { stats.rejectedByEarlyTitle += 1; continue; }
+        // STRICT title filter (item #6) — matches downstream ingest pipeline
+        if (!shouldIncludeTitle(j.title)) { stats.rejectedByEarlyTitle += 1; continue; }
         // early location filter
         if (!isUSLocation(j.location))      { stats.rejectedByLocation  += 1; continue; }
-        // early date filter
-        if (!isWithinEarlyHorizon(j.postedAt, EARLY_HORIZON_DAYS_FULL)) {
+        // early date filter — uses currentHorizon (20d in extension mode, 25d normally)
+        if (!isWithinEarlyHorizon(j.postedAt, currentHorizon)) {
           stats.rejectedByDate += 1;
           const t = j.postedAt ? new Date(j.postedAt).getTime() : 0;
           if (t && (oldestOnPageTs === null || t < oldestOnPageTs)) oldestOnPageTs = t;
+          // Extension mode date-threshold: stop the moment we see a job
+          // older than 20 days (per spec — "stop extending when next job
+          // is >20 days old"). No 50%-of-page heuristic in extension mode.
+          if (extensionMode) {
+            stats.stopReason = "ext_date_threshold";
+            break queryLoop;
+          }
           continue;
         }
         out.push(j);
+        keptTimestamps.push(j.postedAt ? new Date(j.postedAt).getTime() : null);
+
+        // Check extension trigger as soon as we cross the standard cap.
+        // (Inline so we can immediately raise the limits and continue with
+        // the same page — no "miss" of jobs already on this page.)
+        if (!extensionMode && shouldEnterExtension()) {
+          extensionMode      = true;
+          stats.extensionTriggered = true;
+          currentCap         = FULL_WORKFLOW_EXTENSION_CAP;
+          currentHorizon     = FULL_WORKFLOW_EXTENSION_HORIZON_DAYS;
+        }
       }
 
-      // Early-stop on date threshold: if every job we saw was out of horizon
-      // AND the oldest parsed date is older than horizon, stop paginating
-      // this query.
-      if (oldestOnPageTs !== null) {
+      // Normal-mode early-stop on date threshold: if every job we saw was
+      // out of horizon AND the oldest parsed date is older than horizon,
+      // stop paginating this query. Suppressed during extension mode (which
+      // has its own per-job stop logic).
+      if (!extensionMode && oldestOnPageTs !== null) {
         const ageDays = (Date.now() - oldestOnPageTs) / 86_400_000;
-        if (ageDays > EARLY_HORIZON_DAYS_FULL && stats.rejectedByDate >= rawPage.length / 2) {
+        if (ageDays > currentHorizon && stats.rejectedByDate >= rawPage.length / 2) {
           stats.stopReason = "date_threshold"; break; // try next query
         }
       }
@@ -109,7 +175,7 @@ export async function runFullWorkflow<TRawJob>(opts: {
   }
 
   stats.finalKept = out.length;
-  console.log(`[playwright:${opts.company}] queries=${opts.queries.join("|")} filters=${opts.nativeFilters.join("|")} pages=${stats.pagesFetched} raw=${stats.rawJobs} earlyTitle_drop=${stats.rejectedByEarlyTitle} loc_drop=${stats.rejectedByLocation} date_drop=${stats.rejectedByDate} dup_drop=${stats.dedupeDropped} kept=${stats.finalKept} stop=${stats.stopReason}`);
+  console.log(`[playwright:${opts.company}] queries=${opts.queries.join("|")} filters=${opts.nativeFilters.join("|")} pages=${stats.pagesFetched} raw=${stats.rawJobs} title_drop=${stats.rejectedByEarlyTitle} loc_drop=${stats.rejectedByLocation} date_drop=${stats.rejectedByDate} dup_drop=${stats.dedupeDropped} kept=${stats.finalKept} ext=${stats.extensionTriggered} stop=${stats.stopReason}`);
   return { jobs: out, stats };
 }
 

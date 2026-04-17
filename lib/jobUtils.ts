@@ -278,11 +278,11 @@ export function isUSLocation(location: string): boolean {
 // ── Early-filter helpers (workflow spec §5) ───────────────────────────────
 // Lightweight title pre-filter run IMMEDIATELY after fetch — BEFORE any other
 // filtering / normalization / dedupe. Drops obvious junk before it touches
-// the rest of the pipeline. This is NOT a replacement for shouldIncludeTitle()
-// in refresh/route.ts — the full filter still runs later in the pipeline.
+// the rest of the pipeline. Used as a fast pre-screen before the strict
+// shouldIncludeTitle below.
 // Broad keyword match, case-insensitive. Returns true on ANY keyword hit.
 const EARLY_TITLE_KEYWORDS = [
-  "software", "engineer", "developer", "backend", "java", "full stack", "fullstack",
+  "software", "engineer", "developer", "backend", "java", "full stack", "fullstack", "full-stack",
 ];
 export function isRelevantTitleEarly(title: string): boolean {
   if (!title) return false;
@@ -290,6 +290,117 @@ export function isRelevantTitleEarly(title: string): boolean {
   for (const kw of EARLY_TITLE_KEYWORDS) {
     if (tl.includes(kw)) return true;
   }
+  return false;
+}
+
+// ── Strict title filter (used by ingest pipeline + Tier A scrapers) ──────
+// Single source of truth for "is this a SWE-IC role we want?"
+// Promoted from app/api/jobs/refresh/route.ts (2026-04-17) so playwright
+// scrapers can apply the SAME strict filter inside their per-company cap
+// — otherwise the 80-job cap is wasted on titles that get dropped later.
+//
+// Strategy:
+//   1. Hard-exclude list checked FIRST — always wins
+//   2. Include list checked second — must match at least one term
+//   3. Default = exclude
+//
+// INCLUDE terms are intentionally broad single/double words so titles like
+// "Java Engineer", "Sr. Software Eng", "Cloud Infrastructure Engineer" all pass.
+
+export const INCLUDE_KEYWORDS = [
+  // Core SWE
+  "software engineer", "software developer", "software eng",
+  // Specialisations
+  "backend engineer", "backend developer",
+  "frontend engineer", "frontend developer",
+  "full stack", "fullstack", "full-stack",
+  "cloud engineer", "devops engineer", "platform engineer",
+  "site reliability", "sre",
+  "distributed systems",
+  "application engineer", "application developer",
+  "web developer", "product engineer",
+  "api engineer", "integration engineer",
+  // SWE-IC architect titles — non-SWE architects already excluded below
+  "application architect",  // covers "Backend Application Architect", "Cloud Application Architect"
+  "backend architect",
+  "frontend architect",
+  // Language-named engineer/developer roles
+  "python engineer", "python developer",
+  "java engineer",   "java developer",
+  "golang engineer", "go engineer",
+  "ruby engineer",   "ruby developer",
+  "scala engineer",  "scala developer",
+  "kotlin engineer", "kotlin developer",
+  "ios engineer",    "ios developer",
+  "android engineer","android developer",
+  "ui engineer",     "ui developer",
+  // Infrastructure / data engineering
+  "data engineer",
+  "systems engineer",    // "Systems Engineer, Backend" etc.
+  "infrastructure engineer",
+  "reliability engineer",
+  // QA / test engineering
+  "qa engineer", "quality engineer", "test engineer", "automation engineer",
+];
+
+// Single-word qualifiers: if the title contains one of these AND also contains
+// "engineer" or "developer", include it even without an exact phrase match.
+// Examples: "Kafka Engineer", "React Developer", "Spark Engineer"
+export const INCLUDE_TECH_WORDS = [
+  "software", "backend", "frontend", "cloud", "devops", "platform",
+  "data", "infrastructure", "reliability", "distributed",
+  "java", "python", "golang", "go", "ruby", "scala", "kotlin",
+  "ios", "android", "react", "node", "typescript", "javascript",
+  "spark", "kafka", "kubernetes", "aws", "azure", "gcp",
+  "mobile", "embedded", "firmware",
+];
+
+// EXCLUDE: checked BEFORE includes — always wins
+export const EXCLUDE_SUBSTRINGS = [
+  // Seniority tiers to exclude (per spec)
+  "principal",   // kills "Principal Software Engineer"
+  "staff",       // kills "Staff Software Engineer"
+  "lead",        // kills "Lead Software Engineer", "Tech Lead"
+  // Specific non-SWE architect variants (bare "architect" was too broad)
+  "solutions architect", "solution architect", "software architect",
+  "enterprise architect", "systems architect", "data architect",
+  "cloud architect", "technical architect", "information architect",
+  // Management / non-IC
+  "manager", "director", "vice president", "head of", "chief",
+  "intern", "internship",
+  // Language-specific we don't target
+  ".net developer", "dotnet", "c# developer",
+  // Research / clearance
+  "research scientist",
+  // Non-SWE tech
+  "security engineer", "cybersecurity", "network engineer",
+  // Business / process
+  "business analyst", "scrum master", "project manager",
+  "recruiter", "marketing engineer",
+  // Junk roles from retail / ops / physical
+  "technician", "mechanic", "electrician", "machinist",
+  "warehouse", "retail associate", "store associate",
+  "robotics engineer", "controls engineer",
+  "mechanical engineer", "electrical engineer", "civil engineer",
+  "nurse", "pharmacist", "physician", "therapist",
+  "sales representative", "account executive", "account manager",
+  "data center technician", "field technician", "field service",
+  "customer service", "customer support",
+];
+
+// Whole-word excludes (regex \b...\b)
+export const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
+
+export function shouldIncludeTitle(title: string): boolean {
+  const tl = title.toLowerCase();
+  // 1. Hard excludes always win
+  for (const kw of EXCLUDE_SUBSTRINGS)  { if (tl.includes(kw))                     return false; }
+  for (const kw of EXCLUDE_WHOLE_WORDS) { if (new RegExp(`\\b${kw}\\b`).test(tl)) return false; }
+  // 2. Direct phrase match
+  if (INCLUDE_KEYWORDS.some(kw => tl.includes(kw))) return true;
+  // 3. Broad fallback: title contains "engineer" or "developer" + a tech qualifier
+  const hasEngineerOrDev = tl.includes("engineer") || tl.includes("developer");
+  if (hasEngineerOrDev && INCLUDE_TECH_WORDS.some(w => tl.includes(w))) return true;
   return false;
 }
 
