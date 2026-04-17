@@ -307,6 +307,44 @@ export function isWithinEarlyHorizon(isoDate: string | null, days: number): bool
   return Date.now() - t <= days * 86_400_000;
 }
 
+
+// ── Company-name canonicalization ──────────────────────────────────────────
+// Different job sources return the same company under different display
+// names (Adzuna gives "Fidelity" while the job board convention is
+// "Fidelity Investments"; Oracle HCM gives "JPMorganChase" without a space;
+// Adzuna also gives "Citi" / "Wells Fargo Bank" / "The Cigna Group" /
+// "MasterCard" / "Apple Inc." / "Salesforce, Inc." / etc.).
+// Without normalization the board fragments into multiple entries per
+// company. Map is lowercase-keyed; unmatched inputs are returned as-is.
+const COMPANY_CANONICAL_MAP: Record<string, string> = {
+  // Adzuna abbreviations / variants
+  "fidelity":            "Fidelity Investments",
+  "citi":                "Citigroup",
+  "wells fargo bank":    "Wells Fargo",
+  "the cigna group":     "Cigna Group",
+  // Oracle HCM no-space variant
+  "jpmorganchase":       "JPMorgan Chase",
+  // Case fixes (toLowerCase keys mean these handle ALL case variants of the input)
+  "mastercard":          "Mastercard",     // covers "MasterCard"
+  "mongodb":             "MongoDB",        // covers "Mongodb"
+  "gusto":               "Gusto",          // covers "gusto"
+  // Legal-suffix strips
+  "salesforce, inc.":    "Salesforce",
+  "salesforce, inc":     "Salesforce",
+  "salesforce inc":      "Salesforce",
+  "servicenow, inc.":    "ServiceNow",
+  "servicenow, inc":     "ServiceNow",
+  "servicenow inc":      "ServiceNow",
+  "apple inc.":          "Apple",
+  "apple inc":           "Apple",
+};
+
+export function normalizeCompany(raw: string): string {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+  return COMPANY_CANONICAL_MAP[trimmed.toLowerCase()] ?? trimmed;
+}
+
 // ── Quality buckets (spec §19) ───────────────────────────────────────────────────
 // hot      → score >= 22  (very recent + high title relevance + Tier A company)
 // strong   → score >= 12

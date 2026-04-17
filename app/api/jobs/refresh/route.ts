@@ -5,6 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import {
   cleanDescription, detectSponsorship, isUSLocation,
   isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
+  normalizeCompany,
 } from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
@@ -194,7 +195,7 @@ function normalizeJobs(raw: RawJob[]): NormalizedJob[] {
   return raw.map(r => ({
     id:                  r.id,
     source:              r.source,
-    company:             r.company.trim(),
+    company:             normalizeCompany(r.company),
     title:               r.title.trim(),
     location:            r.location || "United States",
     country:             "US",
