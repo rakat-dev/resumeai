@@ -245,57 +245,116 @@ export async function fetchGoogleJobs(): Promise<ScrapedJob[]> {
 }
 
 // ── Apple ─────────────────────────────────────────────────────────────────
-// Uses jobs.apple.com search API (JSON)
+// jobs.apple.com SSR scraper (reverse-engineered 2026-04-16 via Chrome DevTools).
+// jobs.apple.com is a React Router SSR app — each search page response embeds
+// the result list as JSON in window.__staticRouterHydrationData inside a
+// <script> tag. No JSON API, no CSRF, no cookies — plain GET with browser
+// User-Agent works.
+//
+// FULL WORKFLOW (Tier A treatment per user directive 2026-04-17):
+//   - 30 pages × 20 = up to 600 raw jobs scanned per refresh
+//   - location=united-states-USA native filter
+//   - team=<9 software-and-services sub-teams> (manually validated by user —
+//     excludes Engineering Project Management which is non-IC)
+//   - sort=newest (Apr 17 first)
+//   - Standard FULL_WORKFLOW_MAX_JOBS_PER_COMPANY (80) cap applies
+//   - Workflow stops at cap_reached or date_threshold, typically within
+//     ~5-10 pages.
+type AppleSearchResult = {
+  id?:             string;
+  reqId?:          string;
+  postingTitle?:   string;
+  postDateInGMT?:  string;
+  locations?:      Array<{
+    name?:         string;
+    city?:         string;
+    stateProvince?:string;
+    countryName?:  string;
+    countryID?:    string;
+  }>;
+  team?: { teamName?: string; teamCode?: string };
+};
+
+const APPLE_TEAM_FILTER = [
+  "core-operating-systems-SFTWR-COS",
+  "apps-and-frameworks-SFTWR-AF",
+  "cloud-and-infrastructure-SFTWR-CLD",
+  "devops-and-site-reliability-SFTWR-DSR",
+  "information-systems-and-technology-SFTWR-ISTECH",
+  "machine-learning-and-ai-SFTWR-MCHLN",
+  "security-and-privacy-SFTWR-SEC",
+  "software-quality-automation-and-tools-SFTWR-SQAT",
+  "wireless-software-SFTWR-WSFT",
+].join("+");  // joined with raw + (URLSearchParams would re-encode the +)
+
+// Hydration extraction regex: window.__staticRouterHydrationData = JSON.parse("escaped")
+const APPLE_HYDRATION_RE = /window\.__staticRouterHydrationData\s*=\s*JSON\.parse\("((?:\\.|[^"\\])*)"\s*\)/;
+
 export async function fetchAppleJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
-  const MAX_PAGES = 15;
+  const MAX_PAGES = 30;
   const PAGE_SIZE = 20;
 
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    try {
+  const { jobs } = await runFullWorkflow<AppleSearchResult>({
+    company:       "Apple",
+    queries:       ["Software Engineer"],   // single query — team filter does the heavy lifting
+    nativeFilters: ["location=united-states-USA", "team=<9 software sub-teams>", "sort=newest"],
+    maxPages:      MAX_PAGES,
+    pageSize:      PAGE_SIZE,
+    fetchPage: async (query, page) => {
+      // Apple uses 1-indexed pages
       const params = new URLSearchParams({
-        search:   "software engineer",
+        search:   query,
         sort:     "newest",
-        filters:  "location=US",
-        page:     String(page),
-        pageSize: String(PAGE_SIZE),
+        location: "united-states-USA",
+        page:     String(page + 1),
       });
-      const res = await fetch(
-        `https://jobs.apple.com/api/role/search?${params}`,
-        {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-      if (!res.ok) break;
-      const data = await res.json();
-      const jobs = (data.searchResults ?? []) as Record<string, unknown>[];
-      if (jobs.length === 0) break;
-
-      for (const j of jobs) {
-        const jobId   = (j.positionId as string) ?? String(Math.random());
-        const locArr  = (j.locations ?? []) as Array<Record<string, unknown>>;
-        const locName = (locArr[0]?.name as string) ?? "United States";
-        results.push({
-          id:          `aapl-${jobId}`,
-          company:     "Apple",
-          title:       (j.postingTitle as string) ?? "",
-          location:    locName,
-          description: (j.jobSummary as string) ?? "",
-          applyUrl:    `https://jobs.apple.com/en-us/details/${jobId}`,
-          postedAt:    (j.postDateInGMT as string) ?? null,
-          type:        "Full-time",
-        });
+      // team must be appended raw (URLSearchParams would re-encode the +)
+      const url = `https://jobs.apple.com/en-us/search?${params}&team=${APPLE_TEAM_FILTER}`;
+      const res = await fetch(url, {
+        headers: {
+          "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return [];
+      const html = await res.text();
+      const m = html.match(APPLE_HYDRATION_RE);
+      if (!m) return [];
+      try {
+        const hydration = JSON.parse(JSON.parse(`"${m[1]}"`));
+        return (hydration?.loaderData?.search?.searchResults ?? []) as AppleSearchResult[];
+      } catch {
+        return [];
       }
-      if (jobs.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
+    },
+    toScrapedJob: (r) => {
+      const id = r.id ?? r.reqId ?? "";
+      if (!id || !r.postingTitle) return null;
+      const loc0 = r.locations?.[0];
+      // Build a clean location string the downstream isUSLocation filter understands.
+      // locations[].name is typically the city. Empty for multi-location postings,
+      // in which case fall back to country name.
+      const city = loc0?.name ?? loc0?.city ?? "";
+      const country = loc0?.countryName ?? "";
+      const location = city
+        ? (country ? `${city}, ${country}` : city)
+        : (country || "United States");
+      return {
+        id:          `aapl-${id}`,
+        company:     "Apple",
+        title:       r.postingTitle,
+        location,
+        description: "",
+        applyUrl:    `https://jobs.apple.com/en-us/details/${id}`,
+        postedAt:    r.postDateInGMT ?? null,
+        type:        "Full-time",
+      };
+    },
+  });
 
-  console.log(`[playwright] Apple: ${results.length} raw`);
-  return results;
+  return jobs;
 }
 
 // ── Meta ──────────────────────────────────────────────────────────────────
