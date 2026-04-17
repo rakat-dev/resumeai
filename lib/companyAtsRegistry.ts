@@ -36,7 +36,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "HTTP 422 — Cloudflare bot protection blocks server-side fetches. Jobs sourced via JSearch/Adzuna instead." },
   { company: "Capital One",     ats: "workday", careersUrl: "https://capitalone.wd1.myworkdayjobs.com/Capital_One_External",     adapter: "workday", enabled: false,
     note: "HTTP 422 — Cloudflare bot protection blocks server-side fetches. Jobs sourced via JSearch/Adzuna instead." },
-  { company: "Verizon",         ats: "workday", careersUrl: "https://verizon.wd5.myworkdayjobs.com/External",                   adapter: "workday", enabled: true  },
+  { company: "Verizon",         ats: "workday", careersUrl: "https://verizon.wd5.myworkdayjobs.com/External",                   adapter: "workday", enabled: false,
+    note: "HTTP 422 on both wd5/External and wd1/VerizonCareers (2026-04-16 probe). Cloudflare bot protection. No direct ATS source currently working; Adzuna also has 0 matches. TODO: find real endpoint or accept no Verizon coverage." },
   { company: "T-Mobile",        ats: "workday", careersUrl: "https://tmobile.wd1.myworkdayjobs.com/External",                   adapter: "workday", enabled: true  },
   { company: "S&P Global",      ats: "workday", careersUrl: "https://spglobal.wd1.myworkdayjobs.com/Careers",                   adapter: "workday", enabled: true  },
   { company: "CVS Health",      ats: "workday", careersUrl: "https://cvshealth.wd1.myworkdayjobs.com/CVS_Health_Careers",        adapter: "workday", enabled: true  },
@@ -48,7 +49,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "HTTP 404 — site name 'External' is wrong for this tenant. Jobs sourced via JSearch/Adzuna instead." },
   { company: "NVIDIA",          ats: "workday", careersUrl: "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite",    adapter: "workday", enabled: true  },
   { company: "Lowe's",          ats: "workday", careersUrl: "https://lowes.wd1.myworkdayjobs.com/External",                     adapter: "workday", enabled: true  },
-  { company: "Costco",          ats: "workday", careersUrl: "https://costco.wd5.myworkdayjobs.com/External",                    adapter: "workday", enabled: true  },
+  { company: "Costco",          ats: "workday", careersUrl: "https://costco.wd5.myworkdayjobs.com/External",                    adapter: "workday", enabled: false,
+    note: "HTTP 422 (2026-04-16 probe). Cloudflare bot protection. www.costco.com/jobs has no JSON API (SPA only). No direct source currently working; Adzuna also returns 0." },
   { company: "FedEx",           ats: "workday", careersUrl: "https://fedex.wd1.myworkdayjobs.com/External",                     adapter: "workday", enabled: true  },
   { company: "UPS",             ats: "workday", careersUrl: "https://ups.wd1.myworkdayjobs.com/External",                       adapter: "workday", enabled: true  },
   { company: "Morgan Stanley",  ats: "workday", careersUrl: "https://morganstanley.wd5.myworkdayjobs.com/External",             adapter: "workday", enabled: false,
@@ -56,7 +58,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Fidelity",        ats: "workday", careersUrl: "https://fmr.wd1.myworkdayjobs.com/FidelityCareers",                adapter: "workday", enabled: true  },
   // Added: major companies previously missing
   { company: "Citi",            ats: "workday", careersUrl: "https://citi.wd5.myworkdayjobs.com/2",                             adapter: "workday", enabled: true  },
-  { company: "American Express",ats: "workday", careersUrl: "https://aexp.wd5.myworkdayjobs.com/globalcareers",                 adapter: "workday", enabled: true  },
+  { company: "American Express",ats: "workday", careersUrl: "https://aexp.wd5.myworkdayjobs.com/globalcareers",                 adapter: "workday", enabled: false,
+    note: "HTTP 422 on aexp.wd5/globalcareers, aexp.wd1/External, americanexpress.wd1/External (2026-04-16 probe). Cloudflare bot protection. No direct source currently working; Adzuna also returns 0. TODO: try Oracle HCM (may require careersUrl like careers.americanexpress.com exposed via browser)." },
   { company: "Deloitte",        ats: "workday", careersUrl: "https://deloitte.wd5.myworkdayjobs.com/DTUSCareers",               adapter: "workday", enabled: true  },
   { company: "Lockheed Martin", ats: "workday", careersUrl: "https://lmcocareers.wd5.myworkdayjobs.com/LMCareers",              adapter: "workday", enabled: true  },
 
@@ -120,7 +123,12 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Sourcegraph",  ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/sourcegraph",  adapter: "greenhouse", enabled: true },
   { company: "LaunchDarkly", ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/launchdarkly", adapter: "greenhouse", enabled: true },
   { company: "Neo4j",        ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/neo4j",        adapter: "greenhouse", enabled: true },
-  { company: "PayPal",       ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/paypal",       adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s. Adzuna returns 0. TODO: PayPal uses Workday at paypal.wd1.myworkdayjobs.com — add to Workday registry." },
+  // PayPal — verified 2026-04-16: paypal.wd1.myworkdayjobs.com/jobs returns
+  // HTTP 200 with 255 SWE jobs. Moved from Greenhouse (404) to Workday.
+  // NOTE: the site path is "jobs" (not "External" like most tenants) —
+  // visible in the Workday URL scheme as /wday/cxs/paypal/jobs/jobs.
+  { company: "PayPal",       ats: "workday", careersUrl: "https://paypal.wd1.myworkdayjobs.com/jobs",            adapter: "workday", enabled: true,
+    note: "Unusual site path 'jobs' — do not rewrite to 'External'." },
   { company: "Visa",         ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/visa",         adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s. Sourced via Adzuna targeted." },
   { company: "Mastercard",   ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/mastercard",   adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s. Sourced via Adzuna targeted." },
   { company: "Infosys",      ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/infosys",      adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s. Adzuna 400s on name. TODO: Infosys uses SAP SuccessFactors." },
