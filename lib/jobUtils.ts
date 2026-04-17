@@ -371,7 +371,8 @@ export const EXCLUDE_SUBSTRINGS = [
   "manager", "director", "vice president", "head of", "chief",
   "intern", "internship",
   // Language-specific we don't target
-  ".net developer", "dotnet", "c# developer",
+  ".net",                // catches ".NET Senior Software Engineer", ".NET Developer", etc.
+  "dotnet", "c# developer",
   // Research / clearance / data science (not target roles for Rahul)
   "research scientist", "research engineer",
   "data engineer", "data scientist",
