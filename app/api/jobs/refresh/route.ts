@@ -5,7 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import {
   cleanDescription, detectSponsorship, isUSLocation,
   isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
-  normalizeCompany, shouldIncludeTitle,
+  normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
@@ -121,7 +121,8 @@ function normalizeJobs(raw: RawJob[]): NormalizedJob[] {
 // ── Filter with per-filter counts ──────────────────────────────────────────
 interface FilterStats {
   input: number; title_removed: number; type_removed: number;
-  location_removed: number; clearance_removed: number; horizon_removed: number; output: number;
+  location_removed: number; clearance_removed: number; horizon_removed: number;
+  company_blocked: number; output: number;
 }
 
 function filterJobsWithStats(jobs: NormalizedJob[]): { filtered: NormalizedJob[]; stats: FilterStats } {
@@ -135,7 +136,7 @@ function filterJobsWithStats(jobs: NormalizedJob[]): { filtered: NormalizedJob[]
     return true;
   });
   return { filtered, stats: { input: jobs.length, title_removed, type_removed,
-    location_removed, clearance_removed, horizon_removed, output: filtered.length } };
+    location_removed, clearance_removed, horizon_removed: 0, company_blocked: 0, output: filtered.length } };
 }
 
 // ── Dedupe by stable external ID only ──────────────────────────────────────
@@ -243,8 +244,9 @@ async function ingestSource(
     const normalized = normalizeJobs(rawJobs);
     // Apply per-source horizon inside the filter pass
     let title_removed = 0, type_removed = 0, location_removed = 0,
-        clearance_removed = 0, horizon_removed = 0;
+        clearance_removed = 0, horizon_removed = 0, company_blocked = 0;
     const filtered = normalized.filter(j => {
+      if (isBlockedCompany(j.company))                        { company_blocked++; return false; }
       if (!shouldIncludeTitle(j.title))                       { title_removed++;    return false; }
       if (!isFullTime(j.employment_type, j.description))     { type_removed++;     return false; }
       if (!isUSLocation(j.location))                         { location_removed++; return false; }
@@ -253,7 +255,7 @@ async function ingestSource(
       return true;
     });
     const stats: FilterStats = { input: normalized.length, title_removed, type_removed,
-      location_removed, clearance_removed, horizon_removed, output: filtered.length };
+      location_removed, clearance_removed, horizon_removed, company_blocked, output: filtered.length };
     const deduped             = dedupeJobs(filtered);
     // For no-date positionRank sources (Meta), renumber ranks 1→N after
     // title filtering so the pin badge shows clean sequential numbers.

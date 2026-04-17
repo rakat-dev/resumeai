@@ -258,8 +258,11 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
       count: byCompany.get(c)!.length,
       jobs: byCompany.get(c)!,
     }));
-    // Compact alpha list: sorted A→Z
+    // Compact alpha list for tier3 (<10 jobs) — alphabetical.
+    // Only show companies with >=2 jobs to reduce noise from one-off postings.
+    const COMPACT_MIN_JOBS = 2;
     const companiesSummary = [...tier3]
+      .filter(c => byCompany.get(c)!.length >= COMPACT_MIN_JOBS)
       .sort((a, b) => a.localeCompare(b))
       .map(c => ({ company: c, count: byCompany.get(c)!.length }));
     const restJobs: Job[] = [];

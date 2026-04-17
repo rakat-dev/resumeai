@@ -426,6 +426,37 @@ export function isWithinEarlyHorizon(isoDate: string | null, days: number): bool
 }
 
 
+// ── Company blocklist (staffing agencies / body shops) ───────────────
+// Jobs from these companies are dropped at ingest regardless of title.
+// They are staffing/contracting agencies that post on behalf of undisclosed
+// clients — apply links usually go to the agency, not the real employer.
+const BLOCKED_COMPANY_SUBSTRINGS: string[] = [
+  "jobleads", "jobgether", "eliassen", "insight global",
+  "synergisticit", "mastech", "techdigital", "techstaffers", "techsoft",
+  "radiant infotech", "supportfinity", "nupeople", "pop-up talent",
+  "saidgig", "solomon page", "robert half", "harnham",
+  "it recruitment", "greenfield talent", "talent'd", "talented advisors",
+  "fasttek", "federated it", "compunnel", "mthree", "aptask",
+  "pi-square", "koitecc", "vish consulting", "sa technologies",
+  "emonics", "united it solutions", "osc global", "nextgentechinc",
+  "latamways", "globalsouthopportunities", "liberty personnel",
+  "phase2 technology", "global connect technologies", "belay technologies",
+  "powertonefly", "clutch canada", "ic resources",
+  "goliath partners", "intelliforce", "data intelligence",
+  "eightelevengroup", "tanaq", "itmc systems",
+];
+const BLOCKED_COMPANY_EXACT = new Set([
+  "Unknown Company", "Open Roles", "Open Roles At Safety Radar",
+  "Jack & Jill/External ATS", "FULL CIRCLE GROUP & THE LEADERSHIP CIRCLE",
+  "mthree Recruiting Portal", "Jobleads-US",
+]);
+export function isBlockedCompany(company: string): boolean {
+  if (!company) return false;
+  if (BLOCKED_COMPANY_EXACT.has(company)) return true;
+  const lc = company.toLowerCase();
+  return BLOCKED_COMPANY_SUBSTRINGS.some(s => lc.includes(s));
+}
+
 // ── Company-name canonicalization ──────────────────────────────────────────
 // Different job sources return the same company under different display
 // names (Adzuna gives "Fidelity" while the job board convention is
