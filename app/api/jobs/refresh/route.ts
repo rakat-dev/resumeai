@@ -70,6 +70,10 @@ const INCLUDE_KEYWORDS = [
   "application engineer", "application developer",
   "web developer", "product engineer",
   "api engineer", "integration engineer",
+  // SWE-IC architect titles — non-SWE architects already excluded above
+  "application architect",  // covers "Backend Application Architect", "Cloud Application Architect"
+  "backend architect",
+  "frontend architect",
   // Language-named engineer/developer roles
   "python engineer", "python developer",
   "java engineer",   "java developer",
