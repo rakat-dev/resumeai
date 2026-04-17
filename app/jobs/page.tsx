@@ -259,10 +259,33 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
       jobs: byCompany.get(c)!,
     }));
     // Compact alpha list for tier3 (<10 jobs) — alphabetical.
-    // Only show companies with >=2 jobs to reduce noise from one-off postings.
-    const COMPACT_MIN_JOBS = 2;
+    // Rules:
+    //   1. Minimum 3 jobs (single/pair postings are too noisy)
+    //   2. Exclude priority-list companies (they belong in tier1; showing
+    //      them here with 2-9 jobs is misleading when they have a standalone
+    //      dropdown above for their 10+ jobs from a different source variant)
+    //   3. Exclude obvious staffing/agency names (blocklist)
+    const COMPACT_MIN_JOBS = 3;
+    const COMPACT_AGENCY_PATTERNS = [
+      "jobleads","jobgether","eliassen","insight global","synergisticit",
+      "mastech","techdigital","techstaffers","techsoft","radiant infotech",
+      "supportfinity","nupeople","pop-up talent","saidgig","solomon page",
+      "robert half","harnham","it recruitment","greenfield talent",
+      "compunnel","mthree","aptask","pi-square","koitecc","vish consulting",
+      "sa technologies","emonics","united it solutions","liberty personnel",
+      "phase2 technology","global connect","belay tech","intelliforce",
+      "tanaq","itmc","eightelevengroup","full circle group","open roles",
+    ];
     const companiesSummary = [...tier3]
-      .filter(c => byCompany.get(c)!.length >= COMPACT_MIN_JOBS)
+      .filter(c => {
+        const count = byCompany.get(c)!.length;
+        if (count < COMPACT_MIN_JOBS) return false;
+        if (isOnPriorityList(c)) return false;  // already in tier1 or close to it
+        const lc = c.toLowerCase();
+        if (COMPACT_AGENCY_PATTERNS.some(p => lc.includes(p))) return false;
+        if (!c.trim()) return false;  // empty company name
+        return true;
+      })
       .sort((a, b) => a.localeCompare(b))
       .map(c => ({ company: c, count: byCompany.get(c)!.length }));
     const restJobs: Job[] = [];
@@ -1004,12 +1027,6 @@ export default function JobsPage(){
                               </div>
                             </div>
                           )}
-                          {/* Job cards from all remaining companies */}
-                          <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:4}}>
-                            {g.jobs.map(job=>(
-                              <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
-                            ))}
-                          </div>
                         </>
                       )}
                       {g.type==="company_group"&&g.jobs.map(job=>(
