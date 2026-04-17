@@ -109,7 +109,18 @@ const EXCLUDE_SUBSTRINGS = [
   "principal",   // kills "Principal Software Engineer"
   "staff",       // kills "Staff Software Engineer"
   "lead",        // kills "Lead Software Engineer", "Tech Lead"
-  "architect",   // kills "Solutions Architect", "Software Architect"
+  // "architect" alone was too broad — rejected "Backend Application
+  // Architect" / "Cloud Application Architect" which are legitimate
+  // senior IC SWE roles. Replaced with specific non-SWE architect variants:
+  "solutions architect",
+  "solution architect",
+  "software architect",
+  "enterprise architect",
+  "systems architect",     // usually hardware/infra, not SWE
+  "data architect",        // DBA-adjacent, not SWE IC
+  "cloud architect",       // usually consulting/sales-engineer flavor
+  "technical architect",
+  "information architect",
   // Management / non-IC
   "manager", "director", "vice president", "head of", "chief",
   "intern", "internship",
@@ -583,23 +594,28 @@ const ADZUNA_TARGETED_COMPANIES = [
   "Bank of America",
   "Citigroup",
   "Fidelity Investments",
-  "American Express",
   "U.S. Bank",
-  "PayPal",
   //   Telecom.
   "T-Mobile",
   "AT&T",
-  "Verizon Communications",
   //   Healthcare giants whose direct ATS fetches are blocked or unreliable.
   "Elevance Health",
   "CVS Health",
-  //   Retail (complements Walmart/Target/Home Depot already on list).
-  "Costco Wholesale",
   //   IT consulting (complements Accenture/Cognizant/Capgemini already on list).
   "Infosys",
   "Tata Consultancy Services",
   "Wipro",
   "Deloitte",
+  // TODO (next session): direct ATS scrapers for companies Adzuna does NOT index:
+  //   - American Express        → Oracle HCM (similar to JPMorgan Chase)
+  //   - PayPal                  → Workday (paypal.wd1.myworkdayjobs.com/paypal)
+  //   - Verizon Communications  → Workday (mycareer.verizon.com, Workday-backed)
+  //   - Costco Wholesale        → custom careers.costco.com scraper
+  // Probed 2026-04-16: Adzuna US index returns 0 SWE jobs for all four under
+  // every name variant tried (American Express/Amex, PayPal/Paypal,
+  // Verizon/Verizon Communications/Verizon Wireless, Costco/Costco Wholesale).
+  // Keeping them in this list wastes one API call + rate-limit budget per
+  // refresh while never returning data. Removed until direct scrapers are built.
 ];
 
 // Partial workflow (workflow spec §§3, 5-9) applied inside the per-company
