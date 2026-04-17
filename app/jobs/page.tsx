@@ -151,7 +151,28 @@ type RemainingGroup = {
   jobs: Job[];
   companiesSummary: { company: string; count: number }[];
 };
+// No-date Tier A companies (Google etc.). Always pinned at top of board.
+// Inside the dropdown, jobs sort by positionRank ASC.
+type NoDateCompanyGroup = {
+  type: "no_date_company_group";
+  company: string;
+  count: number;
+  jobs: Job[];
+};
+// GroupedView only used by sort==="company_desc" path through buildGroupedView.
+// NoDateCompanyGroup is rendered separately via the noDateGroups variable.
 type GroupedView = (CompanyGroup | RemainingGroup)[];
+
+// ── Time filter → max positionRank for no-date jobs ────────────────────
+// Jobs with positionRank are surfaced via a per-company dropdown instead of
+// flat cards — they have no real posted_at to compare against the time
+// filter. Trim by rank as a synthetic recency proxy.
+function rankCutoffFor(filter: JobFilter): number {
+  if (filter === "24h") return 30;
+  if (filter === "3d")  return 60;
+  if (filter === "7d")  return 90;
+  return 120;
+}
 
 function normalizeCompany(c: string | null | undefined): string {
   const trimmed = (c ?? "").trim();
@@ -223,6 +244,49 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
   }
 
   return view;
+}
+
+// ── Build no-date company groups (always pinned at top) ───────────────────
+// Walks the input jobs, splits out any with positionRank set, groups them
+// per company, sorts each group by rank ASC, and trims by rankCutoff.
+// Returns BOTH the no-date groups AND the remaining (dated) jobs.
+function buildNoDateGroups(
+  allJobs: Job[],
+  rankCutoff: number,
+): { noDateGroups: NoDateCompanyGroup[]; datedJobs: Job[] } {
+  const datedJobs: Job[] = [];
+  const byCompany = new Map<string, Job[]>();
+  const orderedCompanies: string[] = [];
+  for (const j of allJobs) {
+    const rank = (j as Job & { positionRank?: number }).positionRank;
+    if (typeof rank === "number" && rank > 0) {
+      // Trim by rank cutoff (24h→30, 3d→60, 7d→90, any→120)
+      if (rank > rankCutoff) continue;
+      const c = normalizeCompany(j.company);
+      if (!byCompany.has(c)) { byCompany.set(c, []); orderedCompanies.push(c); }
+      byCompany.get(c)!.push(j);
+    } else {
+      datedJobs.push(j);
+    }
+  }
+  // Sort each group by rank ASC (1 first, 120 last)
+  for (const c of orderedCompanies) {
+    byCompany.get(c)!.sort((a, b) => {
+      const ra = (a as Job & { positionRank?: number }).positionRank ?? 9999;
+      const rb = (b as Job & { positionRank?: number }).positionRank ?? 9999;
+      return ra - rb;
+    });
+  }
+  // Companies with the most jobs first — Google with 120 outranks future
+  // Tier A no-date companies that may have fewer.
+  orderedCompanies.sort((a, b) => byCompany.get(b)!.length - byCompany.get(a)!.length);
+  const noDateGroups: NoDateCompanyGroup[] = orderedCompanies.map(c => ({
+    type: "no_date_company_group",
+    company: c,
+    count: byCompany.get(c)!.length,
+    jobs: byCompany.get(c)!,
+  }));
+  return { noDateGroups, datedJobs };
 }
 
 function wordOverlap(a:string,b:string):number{
@@ -583,21 +647,11 @@ export default function JobsPage(){
   };
 
   // ── Client-side filtering ─────────────────────────────────────────────
-  const {filteredJobs,visibleJobs,groupedView}=useMemo(()=>{
+  const {filteredJobs,visibleJobs,groupedView,noDateGroups}=useMemo(()=>{
     let list=jobs;
 
-    // Client-side date filter
-    if(filters.datePosted!=="any"){
-      const now=Date.now();
-      const cutoffs:Record<string,number>={"24h":now-86400000,"3d":now-259200000,"7d":now-604800000};
-      const cutoff=cutoffs[filters.datePosted];
-      if(cutoff) list=list.filter(j=>{
-        const ts=(j as Job&{postedTimestamp?:number}).postedTimestamp;
-        if(!ts)return false;
-        return ts*1000>=cutoff;
-      });
-    }
-
+    // Apply non-date filters FIRST. The date-filter only affects dated jobs;
+    // no-date jobs are filtered separately by rank cutoff below.
     if(filters.sponsorship==="yes")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag==="mentioned");
     if(filters.sponsorship==="no_info")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag!=="mentioned");
     if(filters.companies.size>0)list=list.filter(j=>filters.companies.has(j.company));
@@ -611,11 +665,36 @@ export default function JobsPage(){
       });
     }
 
-    const sorted=clientSort(list,sort);
-    // Grouped view only for Top Companies sort — null otherwise so the
-    // normal flat render path is untouched.
+    // Split: no-date (positionRank set) jobs go into per-company dropdowns
+    // pinned at top; dated jobs go through the normal sort + filter path.
+    const cutoff = rankCutoffFor(filters.datePosted);
+    const { noDateGroups, datedJobs } = buildNoDateGroups(list, cutoff);
+
+    // Date-filter applies only to dated jobs.
+    let datedFiltered = datedJobs;
+    if(filters.datePosted!=="any"){
+      const now=Date.now();
+      const cutoffs:Record<string,number>={"24h":now-86400000,"3d":now-259200000,"7d":now-604800000};
+      const dCutoff=cutoffs[filters.datePosted];
+      if(dCutoff) datedFiltered=datedFiltered.filter(j=>{
+        const ts=(j as Job&{postedTimestamp?:number}).postedTimestamp;
+        if(!ts)return false;
+        return ts*1000>=dCutoff;
+      });
+    }
+
+    const sorted=clientSort(datedFiltered,sort);
+    // company_desc sort gets the existing top-15 + remaining groupings;
+    // other sorts use a flat list.
     const groupedView=sort==="company_desc"?buildGroupedView(sorted):null;
-    return{filteredJobs:sorted,visibleJobs:sorted.slice(0,displayLimit),groupedView};
+
+    // For the user-visible "filteredJobs" count in the header strip, include
+    // both no-date (after cutoff) and dated (after date filter).
+    const totalFiltered = noDateGroups.reduce((s,g)=>s+g.count,0) + sorted.length;
+    // Synthesize a "filteredJobs" array that just exposes the count via .length
+    // for the existing UI consumer. Real rendering uses noDateGroups + sorted.
+    const filteredJobs = sorted; // length used for the "Load More" math
+    return{filteredJobs,visibleJobs:sorted.slice(0,displayLimit),groupedView,noDateGroups,totalFilteredCount:totalFiltered};
   },[jobs,filters,sort,displayLimit]);
 
   const activeFilterCount=countActiveFilters(filters);
@@ -703,7 +782,7 @@ export default function JobsPage(){
       {jobs.length>0&&(
         <div style={{marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:6}}>
-            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length} jobs{filteredJobs.length!==jobs.length?` (filtered from ${jobs.length})`:""}</span>
+            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0)} jobs{(filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0))!==jobs.length?` (filtered from ${jobs.length})`:""}</span>
             {(diagnostics.length>0
               ? diagnostics
               : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
@@ -784,6 +863,31 @@ export default function JobsPage(){
                 <div style={{fontSize:48,marginBottom:12}}>📭</div>
                 <p style={{fontSize:14}}>No jobs in DB yet</p>
                 <p style={{fontSize:12,marginTop:6}}>Click <strong>Refresh Now</strong> to ingest jobs from all sources</p>
+              </div>
+            )}
+
+            {/* No-date Tier A companies (Google etc.) — always pinned at top.
+                Each company is a collapsed dropdown sorted by positionRank ASC.
+                Time-filter trims contents (24h→30, 3d→60, 7d→90, any→120). */}
+            {noDateGroups.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:10}}>
+                {noDateGroups.map(g=>(
+                  <details key={`nodate-${g.company}`} open={false}
+                    style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:14,overflow:"hidden",boxShadow:"0 0 0 1px rgba(108,99,255,0.15)"}}>
+                    <summary style={{padding:"14px 18px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,background:"linear-gradient(to right, rgba(108,99,255,0.08), transparent)"}}>
+                      <span style={{display:"flex",alignItems:"center",gap:10}}>
+                        <span style={{fontSize:11,color:"var(--accent)",fontWeight:700,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,0.12)",border:"1px solid rgba(108,99,255,0.3)"}}>📌 PINNED</span>
+                        <span>{g.company}</span>
+                      </span>
+                      <span style={{fontSize:12,color:"var(--accent)",fontWeight:600,background:"rgba(108,99,255,0.1)",padding:"3px 10px",borderRadius:999,border:"1px solid rgba(108,99,255,0.3)"}}>{g.count}</span>
+                    </summary>
+                    <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
+                      {g.jobs.map(job=>(
+                        <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                      ))}
+                    </div>
+                  </details>
+                ))}
               </div>
             )}
 
@@ -992,7 +1096,13 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           <div style={{fontSize:12,color:"var(--accent2)",fontWeight:500}}>{job.company}</div>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
-          <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>🕐 {job.postedDate}</span>
+          {(() => {
+            const rank=(job as Job&{positionRank?:number}).positionRank;
+            if (typeof rank === "number" && rank > 0) {
+              return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,.1)",color:"var(--accent)",border:"1px solid rgba(108,99,255,.3)",whiteSpace:"nowrap",fontWeight:600}}>#{rank}</span>;
+            }
+            return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>🕐 {job.postedDate}</span>;
+          })()}
           {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
           <SourceBadge source={job.source} sourceType={sourceType}/>
         </div>

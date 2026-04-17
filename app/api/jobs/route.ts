@@ -36,6 +36,7 @@ export interface Job {
   fortuneRank?: number;
   relevanceScore?: number;
   bucket?: QualityBucket;
+  positionRank?: number;   // 1..120 for jobs from no-date Tier A scrapers (Google etc.)
 }
 
 export interface SourceStatus {
@@ -80,6 +81,7 @@ function rowToJob(row: JobRow): Job {
     experience:      undefined,
     priorityTier:    getPriorityTier(row.company),
     fortuneRank:     getFortuneTier(row.company),
+    positionRank:    row.position_rank ?? undefined,
   };
 }
 
