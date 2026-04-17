@@ -138,7 +138,7 @@ function applyDiversityCaps(jobs: Job[]): Job[] {
   const sourceCounts  = new Map<string, number>();
   const companyCounts = new Map<string, number>();
   const MAX_PER_SOURCE  = 1000; // raised from 500: priority-company fixes pushed greenhouse+workday past 500 each
-  const MAX_PER_COMPANY = 100; // raised from 60 — Tier A companies (Microsoft, JPM, Amazon, Walmart) routinely have 80+ US SWE roles; 60 was artificially capping visibility
+  const MAX_PER_COMPANY = 120; // raised from 100 to match FULL_WORKFLOW_EXTENSION_CAP — Tier A scrapers in extension mode produce up to 120 fresh IC SWE rows when there's a backlog; cap at 100 was hiding ~20 jobs/company
   return jobs.filter(j => {
     const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
     const sc = sourceCounts.get(sk) ?? 0;
