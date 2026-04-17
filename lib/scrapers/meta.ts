@@ -60,10 +60,10 @@ const PAGE_TIMEOUT_MS = 15_000;
 // to avoid spurious 429s and to leave headroom for other refresh sources
 // running in parallel.
 const CONCURRENCY    = 30;
-// Hard cap on jobs to fetch from sitemap. Sitemap has 918 entries; at 30-wide
-// concurrency that's ~15-25s. If sitemap balloons (Meta hiring spree),
-// this bounds the function execution time.
-const MAX_SITEMAP_JOBS = 1200;
+// Hard cap on sitemap URLs to fetch. Meta's sitemap currently has ~127 entries
+// (April 2026). We fetch all of them since we need to check each page for US
+// location and title relevance. This cap guards against future sitemap growth.
+const MAX_SITEMAP_JOBS = 300;
 
 /** Raw shape of the JSON-LD JobPosting block on a Meta job page */
 interface MetaJobPosting {

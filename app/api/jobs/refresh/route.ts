@@ -255,6 +255,11 @@ async function ingestSource(
     const stats: FilterStats = { input: normalized.length, title_removed, type_removed,
       location_removed, clearance_removed, horizon_removed, output: filtered.length };
     const deduped             = dedupeJobs(filtered);
+    // For no-date positionRank sources (Meta), renumber ranks 1→N after
+    // title filtering so the pin badge shows clean sequential numbers.
+    if (source === "meta") {
+      deduped.forEach((j, idx) => { j.position_rank = idx + 1; });
+    }
     const capped              = applySourceCap(deduped, source);
     const { stored, error: storeErr } = await storeJobs(capped);
     markDone(label, source, startedAt, fetched, capped.length, storeErr);
