@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { persistState, persistRun } from "@/app/api/jobs/refresh-store";
 import type { RefreshState, RefreshSource } from "@/app/api/jobs/types";
 import { supabaseAdmin } from "@/lib/supabase";
-import { cleanDescription, detectSponsorship, isUSLocation } from "@/lib/jobUtils";
+import {
+  cleanDescription, detectSponsorship, isUSLocation,
+  isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
+} from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
   fetchMetaJobs, fetchAmazonJobs, fetchJPMJobs,
@@ -573,7 +576,35 @@ const ADZUNA_TARGETED_COMPANIES = [
   "Walmart",            // 400 jobs — Workday pipeline finds only 38; Adzuna indexes Walmart corporate SWE roles more thoroughly
   "Meta",               // 238 jobs — playwright Meta scraper returns HTTP 400, Adzuna is the entire Meta pipeline for now
   "Target",             //   4 jobs — small add, but target company on the priority list
+  // Fourth expansion (2026-04-16, partial workflow rollout):
+  //   Banks / finance that live on Oracle HCM or proprietary sites with
+  //   bot-protection — Adzuna indexes all of them reliably.
+  "Bank of America",
+  "Citigroup",
+  "Fidelity Investments",
+  "American Express",
+  "U.S. Bank",
+  "PayPal",
+  //   Telecom.
+  "T-Mobile",
+  "AT&T",
+  "Verizon Communications",
+  //   Healthcare giants whose direct ATS fetches are blocked or unreliable.
+  "Elevance Health",
+  "CVS Health",
+  //   Retail (complements Walmart/Target/Home Depot already on list).
+  "Costco Wholesale",
+  //   IT consulting (complements Accenture/Cognizant/Capgemini already on list).
+  "Infosys",
+  "Tata Consultancy Services",
+  "Wipro",
+  "Deloitte",
 ];
+
+// Partial workflow (workflow spec §§3, 5-9) applied inside the per-company
+// ingestion loop below: early dedupe, early title filter, early location
+// filter, 30-day horizon, MAX_JOBS_PER_COMPANY = 60 cap.
+const ADZUNA_TARGETED_MAX_PER_COMPANY = 60;
 
 async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   const appId  = process.env.ADZUNA_APP_ID;
@@ -615,36 +646,67 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
     await new Promise(r => setTimeout(r, 300));
   }
 
+  // Partial workflow: per-company early-filter stats for logging.
+  const perCompany: Record<string, {
+    raw: number; keptEarly: number;
+    dropTitle: number; dropLoc: number; dropDate: number; dropDup: number;
+  }> = {};
+  const seenIds = new Set<string>();
+
   for (const result of settled) {
     if (result.status !== "fulfilled") continue;
     const { companyName, raw } = result.value;
     totalFetched += raw.length;
+    const s = perCompany[companyName] = { raw: raw.length, keptEarly: 0, dropTitle: 0, dropLoc: 0, dropDate: 0, dropDup: 0 };
+
+    let keptForCompany = 0;
     for (const j of raw) {
+      if (keptForCompany >= ADZUNA_TARGETED_MAX_PER_COMPANY) break; // MAX_JOBS_PER_COMPANY cap
+
       const locObj    = (j.location as Record<string, unknown>) ?? {};
       const company   = ((j.company as Record<string, unknown>)?.display_name as string) ?? companyName;
       const createdAt = (j.created as string) ?? null;
-      if (createdAt && (Date.now() - new Date(createdAt).getTime()) / 86_400_000 > MAX_INGEST_DAYS) continue;
+      const title     = (j.title as string) ?? "";
+      const id        = `azt-${j.id ?? Math.random()}`;
 
-      // Build a location that always passes isUSLocation(): Adzuna's area[] is
-      // ["US", "New Jersey", "Middlesex County", "Iselin"] — city = last, state = [1].
-      // display_name alone ("Iselin, Middlesex County") is missing the state and fails the filter.
+      // EARLY DEDUPE (step 7)
+      if (seenIds.has(id)) { s.dropDup += 1; continue; }
+
+      // EARLY TITLE FILTER (step 5) — lightweight, NOT the full filter
+      if (!isRelevantTitleEarly(title)) { s.dropTitle += 1; continue; }
+
+      // Build the location string (same logic as before — must pass full
+      // isUSLocation downstream)
       const area = Array.isArray(locObj.area) ? (locObj.area as string[]) : [];
       const city   = area[area.length - 1] ?? "";
       const state  = area[1] ?? "";
       const location = [city, state, "United States"].filter(Boolean).join(", ") || (locObj.display_name as string) || "United States";
 
+      // EARLY LOCATION FILTER (step 6)
+      if (!isUSLocation(location)) { s.dropLoc += 1; continue; }
+
+      // EARLY DATE FILTER (step 4) — 30-day horizon preserved for partial workflow
+      if (!isWithinEarlyHorizon(createdAt, EARLY_HORIZON_DAYS_PARTIAL)) { s.dropDate += 1; continue; }
+
+      seenIds.add(id);
       results.push({
-        id: `azt-${j.id ?? Math.random()}`, source: "adzuna" as RefreshSource, company,
-        title:       (j.title as string) ?? "",
+        id, source: "adzuna" as RefreshSource, company,
+        title,
         location,
         description: (j.description as string) ?? "",
         applyUrl:    (j.redirect_url as string) ?? "#",
         postedAt:    createdAt, type: "Full-time",
       });
+      keptForCompany += 1;
+      s.keptEarly += 1;
     }
   }
 
-  console.log(`[adzuna_targeted] companies=${ADZUNA_TARGETED_COMPANIES.length} raw=${totalFetched} kept=${results.length}`);
+  // Per-company log line — visibility into the partial workflow funnel.
+  for (const [co, s] of Object.entries(perCompany)) {
+    console.log(`[adzuna_targeted:${co}] raw=${s.raw} early_title_drop=${s.dropTitle} loc_drop=${s.dropLoc} date_drop=${s.dropDate} dup_drop=${s.dropDup} keptEarly=${s.keptEarly}`);
+  }
+  console.log(`[adzuna_targeted] companies=${ADZUNA_TARGETED_COMPANIES.length} raw=${totalFetched} kept=${results.length} maxPerCompany=${ADZUNA_TARGETED_MAX_PER_COMPANY}`);
   return { raw: results, fetched: totalFetched, error: null };
 }
 

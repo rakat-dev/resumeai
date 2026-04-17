@@ -275,6 +275,38 @@ export function isUSLocation(location: string): boolean {
   return false;
 }
 
+// ── Early-filter helpers (workflow spec §5) ───────────────────────────────
+// Lightweight title pre-filter run IMMEDIATELY after fetch — BEFORE any other
+// filtering / normalization / dedupe. Drops obvious junk before it touches
+// the rest of the pipeline. This is NOT a replacement for shouldIncludeTitle()
+// in refresh/route.ts — the full filter still runs later in the pipeline.
+// Broad keyword match, case-insensitive. Returns true on ANY keyword hit.
+const EARLY_TITLE_KEYWORDS = [
+  "software", "engineer", "developer", "backend", "java", "full stack", "fullstack",
+];
+export function isRelevantTitleEarly(title: string): boolean {
+  if (!title) return false;
+  const tl = title.toLowerCase();
+  for (const kw of EARLY_TITLE_KEYWORDS) {
+    if (tl.includes(kw)) return true;
+  }
+  return false;
+}
+
+// Date horizons
+// Full workflow (site scrapers): 25 days — stop pagination when oldest job
+// on a page crosses this threshold (spec §4).
+// Partial workflow (Adzuna Targeted): 30 days — preserved per user directive.
+export const EARLY_HORIZON_DAYS_FULL    = 25;
+export const EARLY_HORIZON_DAYS_PARTIAL = 30;
+
+export function isWithinEarlyHorizon(isoDate: string | null, days: number): boolean {
+  if (!isoDate) return true; // unknown date → don't drop prematurely; downstream horizon decides
+  const t = new Date(isoDate).getTime();
+  if (isNaN(t)) return true;
+  return Date.now() - t <= days * 86_400_000;
+}
+
 // ── Quality buckets (spec §19) ───────────────────────────────────────────────────
 // hot      → score >= 22  (very recent + high title relevance + Tier A company)
 // strong   → score >= 12

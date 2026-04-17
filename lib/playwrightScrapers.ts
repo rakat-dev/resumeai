@@ -4,6 +4,115 @@
 // Vercel serverless does not support browser binaries.
 // Named fetchXxxJobs() per spec contract.
 
+import {
+  isRelevantTitleEarly,
+  isUSLocation,
+  isWithinEarlyHorizon,
+  EARLY_HORIZON_DAYS_FULL,
+} from "./jobUtils";
+
+// ── Full-workflow helper (workflow spec §§1-10) ───────────────────────────
+// Shared pipeline for "full workflow" scrapers (Microsoft, Amazon, etc.).
+// Runs primary + optional secondary query. Per query, paginates up to
+// maxPages. For each returned job:
+//   1. early dedupe by id
+//   2. early title filter (isRelevantTitleEarly)
+//   3. early location filter (isUSLocation)
+//   4. early 25-day horizon check
+// Stops pagination when: (a) page is empty, (b) cap reached, or (c) oldest
+// job on the page crosses the horizon.
+// No adaptive stop (removed per user directive).
+export interface FullWorkflowStats {
+  company:               string;
+  queries:               string[];
+  nativeFilters:         string[];
+  pagesFetched:          number;
+  rawJobs:               number;
+  rejectedByEarlyTitle:  number;
+  rejectedByLocation:    number;
+  rejectedByDate:        number;
+  dedupeDropped:         number;
+  finalKept:             number;
+  stopReason:            "page_limit" | "date_threshold" | "cap_reached" | "no_results" | "error";
+}
+
+export const FULL_WORKFLOW_MAX_JOBS_PER_COMPANY = 80;
+
+export async function runFullWorkflow<TRawJob>(opts: {
+  company:       string;
+  queries:       string[];          // primary + optional secondary (1-2 items)
+  nativeFilters: string[];          // just for logging ("location=US", "sort=newest", etc.)
+  maxPages:      number;
+  pageSize:      number;
+  fetchPage:     (query: string, pageIndex: number) => Promise<TRawJob[]>;
+  toScrapedJob:  (raw: TRawJob) => ScrapedJob | null;
+}): Promise<{ jobs: ScrapedJob[]; stats: FullWorkflowStats }> {
+  const seen = new Set<string>();
+  const out: ScrapedJob[] = [];
+  const stats: FullWorkflowStats = {
+    company: opts.company, queries: opts.queries, nativeFilters: opts.nativeFilters,
+    pagesFetched: 0, rawJobs: 0, rejectedByEarlyTitle: 0, rejectedByLocation: 0,
+    rejectedByDate: 0, dedupeDropped: 0, finalKept: 0, stopReason: "page_limit",
+  };
+
+  queryLoop: for (const query of opts.queries) {
+    for (let page = 0; page < opts.maxPages; page++) {
+      if (out.length >= FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) {
+        stats.stopReason = "cap_reached"; break queryLoop;
+      }
+      let rawPage: TRawJob[];
+      try {
+        rawPage = await opts.fetchPage(query, page);
+      } catch {
+        stats.stopReason = "error"; break queryLoop;
+      }
+      if (!rawPage || rawPage.length === 0) {
+        stats.stopReason = "no_results"; break; // try next query
+      }
+      stats.pagesFetched += 1;
+      stats.rawJobs += rawPage.length;
+
+      let oldestOnPageTs: number | null = null;
+      for (const raw of rawPage) {
+        if (out.length >= FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) break;
+        const j = opts.toScrapedJob(raw);
+        if (!j) continue;
+        // early dedupe
+        if (seen.has(j.id)) { stats.dedupeDropped += 1; continue; }
+        seen.add(j.id);
+        // early title filter
+        if (!isRelevantTitleEarly(j.title)) { stats.rejectedByEarlyTitle += 1; continue; }
+        // early location filter
+        if (!isUSLocation(j.location))      { stats.rejectedByLocation  += 1; continue; }
+        // early date filter
+        if (!isWithinEarlyHorizon(j.postedAt, EARLY_HORIZON_DAYS_FULL)) {
+          stats.rejectedByDate += 1;
+          const t = j.postedAt ? new Date(j.postedAt).getTime() : 0;
+          if (t && (oldestOnPageTs === null || t < oldestOnPageTs)) oldestOnPageTs = t;
+          continue;
+        }
+        out.push(j);
+      }
+
+      // Early-stop on date threshold: if every job we saw was out of horizon
+      // AND the oldest parsed date is older than horizon, stop paginating
+      // this query.
+      if (oldestOnPageTs !== null) {
+        const ageDays = (Date.now() - oldestOnPageTs) / 86_400_000;
+        if (ageDays > EARLY_HORIZON_DAYS_FULL && stats.rejectedByDate >= rawPage.length / 2) {
+          stats.stopReason = "date_threshold"; break; // try next query
+        }
+      }
+
+      if (rawPage.length < opts.pageSize) { stats.stopReason = "no_results"; break; }
+    }
+  }
+
+  stats.finalKept = out.length;
+  console.log(`[playwright:${opts.company}] queries=${opts.queries.join("|")} filters=${opts.nativeFilters.join("|")} pages=${stats.pagesFetched} raw=${stats.rawJobs} earlyTitle_drop=${stats.rejectedByEarlyTitle} loc_drop=${stats.rejectedByLocation} date_drop=${stats.rejectedByDate} dup_drop=${stats.dedupeDropped} kept=${stats.finalKept} stop=${stats.stopReason}`);
+  return { jobs: out, stats };
+}
+
 export interface ScrapedJob {
   id:          string;
   company:     string;
@@ -16,26 +125,35 @@ export interface ScrapedJob {
 }
 
 // ── Microsoft ─────────────────────────────────────────────────────────────
-// Uses apply.careers.microsoft.com pcsx search API (reverse-engineered
-// 2026-04-16 via Chrome DevTools — the old jobs.careers.microsoft.com
-// endpoint now redirects to this SPA). Default page size = 10.
-// Verified working from cold fetch (no cookies, no CSRF required).
-// 2026-04-16 raised pagination from 15 → 30 pages: Microsoft has ~946 total
-// "software engineer" matches; 15 pages (150 jobs) only saw 16% of the pool
-// and post-filter yield hit only 25-40 jobs. 30 pages (300 jobs) ~32% of
-// pool, yielding 80+ after filters, comfortably filling the 100-row cap.
+// apply.careers.microsoft.com pcsx search API (reverse-engineered 2026-04-16
+// via Chrome DevTools). Page size = 10.
+// FULL WORKFLOW (workflow spec): primary query "software engineer" + optional
+// secondary "full stack developer", location=United States native filter,
+// sort=timestamp (newest first), early title + location + 25-day-horizon
+// filters applied inside the fetch loop. MAX_PAGES preserved at 30 per user.
 export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
   const MAX_PAGES = 30;
-  const PAGE_SIZE = 10; // Microsoft's default — matches what the SPA uses
+  const PAGE_SIZE = 10;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
+  type MsftPosition = {
+    id?: number; displayJobId?: string; name?: string;
+    standardizedLocations?: string[]; locations?: string[];
+    postedTs?: number;
+  };
+
+  const { jobs } = await runFullWorkflow<MsftPosition>({
+    company:       "Microsoft",
+    queries:       ["software engineer", "full stack developer"],
+    nativeFilters: ["location=United States", "sort=timestamp"],
+    maxPages:      MAX_PAGES,
+    pageSize:      PAGE_SIZE,
+    fetchPage: async (query, page) => {
       const params = new URLSearchParams({
         domain:   "microsoft.com",
-        location: "",
-        query:    "software engineer",
+        location: "United States",
+        query,
         start:    String(page * PAGE_SIZE),
+        sortBy:   "timestamp",
       });
       const res = await fetch(
         `https://apply.careers.microsoft.com/api/pcsx/search?${params}`,
@@ -47,34 +165,28 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
           signal: AbortSignal.timeout(12_000),
         }
       );
-      if (!res.ok) break;
+      if (!res.ok) return [];
       const data = await res.json();
-      const positions = (data?.data?.positions ?? []) as Record<string, unknown>[];
-      if (positions.length === 0) break;
+      return ((data?.data?.positions ?? []) as MsftPosition[]);
+    },
+    toScrapedJob: (p) => {
+      const numericId = p.id;
+      const displayId = p.displayJobId ?? String(numericId ?? Math.random());
+      const loc = p.standardizedLocations?.[0] ?? p.locations?.[0] ?? "United States";
+      return {
+        id:          `msft-${numericId ?? displayId}`,
+        company:     "Microsoft",
+        title:       p.name ?? "",
+        location:    loc,
+        description: "",
+        applyUrl:    `https://jobs.careers.microsoft.com/global/en/job/${displayId}`,
+        postedAt:    p.postedTs ? new Date(p.postedTs * 1000).toISOString() : null,
+        type:        "Full-time",
+      };
+    },
+  });
 
-      for (const p of positions) {
-        const numericId  = p.id as number | undefined;
-        const displayId  = (p.displayJobId as string) ?? String(numericId ?? Math.random());
-        const locStdArr  = (p.standardizedLocations as string[]) ?? [];
-        const locRawArr  = (p.locations as string[]) ?? [];
-        const postedTs   = p.postedTs as number | undefined;
-        results.push({
-          id:          `msft-${numericId ?? displayId}`,
-          company:     "Microsoft",
-          title:       (p.name as string) ?? "",
-          location:    locStdArr[0] ?? locRawArr[0] ?? "United States",
-          description: "", // position_details endpoint holds this — not fetched to keep refresh fast
-          applyUrl:    `https://jobs.careers.microsoft.com/global/en/job/${displayId}`,
-          postedAt:    postedTs ? new Date(postedTs * 1000).toISOString() : null,
-          type:        "Full-time",
-        });
-      }
-      if (positions.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
-
-  console.log(`[playwright] Microsoft: ${results.length} raw`);
-  return results;
+  return jobs;
 }
 
 // ── Google ────────────────────────────────────────────────────────────────
@@ -260,24 +372,41 @@ export async function fetchMetaJobs(): Promise<ScrapedJob[]> {
 }
 
 // ── Amazon ────────────────────────────────────────────────────────────────
-// Uses Amazon Jobs API
+// Uses Amazon Jobs API.
+// FULL WORKFLOW (workflow spec): primary query "software engineer" + optional
+// secondary "full stack developer", location=United States + sort=recent
+// native filters, early filters + 25-day horizon applied inside fetch loop.
+// MAX_PAGES preserved at 15 per user.
 export async function fetchAmazonJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
 
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    try {
+  type AmznJob = {
+    id_icims?: string;
+    title?: string;
+    normalized_location?: string;
+    city?: string;
+    description?: string;
+    description_short?: string;
+    posted_date?: string;
+  };
+
+  const { jobs } = await runFullWorkflow<AmznJob>({
+    company:       "Amazon",
+    queries:       ["software engineer", "full stack developer"],
+    nativeFilters: ["loc_query=United States", "sort=recent"],
+    maxPages:      MAX_PAGES,
+    pageSize:      PAGE_SIZE,
+    fetchPage: async (query, page) => {
       const params = new URLSearchParams({
-        base_query:    "software engineer",
+        base_query:    query,
         loc_query:     "United States",
         type:          "FULL_TIME",
         sort:          "recent",
         this_week:     "0",
-        offset:        String((page - 1) * PAGE_SIZE),
+        offset:        String(page * PAGE_SIZE),
         result_limit:  String(PAGE_SIZE),
         format:        "json",
-        "radius[]:":   "24km",
       });
       const res = await fetch(
         `https://www.amazon.jobs/en/search.json?${params}`,
@@ -289,30 +418,26 @@ export async function fetchAmazonJobs(): Promise<ScrapedJob[]> {
           signal: AbortSignal.timeout(12_000),
         }
       );
-      if (!res.ok) break;
+      if (!res.ok) return [];
       const data = await res.json();
-      const jobs = (data.jobs ?? []) as Record<string, unknown>[];
-      if (jobs.length === 0) break;
+      return ((data.jobs ?? []) as AmznJob[]);
+    },
+    toScrapedJob: (j) => {
+      const jobId = j.id_icims ?? String(Math.random());
+      return {
+        id:          `amzn-${jobId}`,
+        company:     "Amazon",
+        title:       j.title ?? "",
+        location:    j.normalized_location ?? j.city ?? "United States",
+        description: j.description ?? j.description_short ?? "",
+        applyUrl:    `https://www.amazon.jobs/en/jobs/${jobId}`,
+        postedAt:    j.posted_date ?? null,
+        type:        "Full-time",
+      };
+    },
+  });
 
-      for (const j of jobs) {
-        const jobId = (j.id_icims as string) ?? String(Math.random());
-        results.push({
-          id:          `amzn-${jobId}`,
-          company:     "Amazon",
-          title:       (j.title as string) ?? "",
-          location:    (j.normalized_location as string) ?? (j.city as string) ?? "United States",
-          description: (j.description as string) ?? (j.description_short as string) ?? "",
-          applyUrl:    `https://www.amazon.jobs/en/jobs/${jobId}`,
-          postedAt:    (j.posted_date as string) ?? null,
-          type:        "Full-time",
-        });
-      }
-      if (jobs.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
-
-  console.log(`[playwright] Amazon: ${results.length} raw`);
-  return results;
+  return jobs;
 }
 
 // ── JPMorgan Chase ────────────────────────────────────────────────────────
