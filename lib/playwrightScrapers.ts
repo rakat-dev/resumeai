@@ -144,7 +144,7 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
   const { jobs } = await runFullWorkflow<MsftPosition>({
     company:       "Microsoft",
     queries:       ["software engineer", "full stack developer"],
-    nativeFilters: ["location=United States", "sort=timestamp"],
+    nativeFilters: ["location=United States", "sort_by=timestamp"],
     maxPages:      MAX_PAGES,
     pageSize:      PAGE_SIZE,
     fetchPage: async (query, page) => {
@@ -153,7 +153,7 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
         location: "United States",
         query,
         start:    String(page * PAGE_SIZE),
-        sortBy:   "timestamp",
+        sort_by:  "timestamp",   // snake_case — verified against careers UI; camelCase is silently ignored
       });
       const res = await fetch(
         `https://apply.careers.microsoft.com/api/pcsx/search?${params}`,
