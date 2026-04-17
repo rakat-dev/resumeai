@@ -28,6 +28,7 @@ interface RawJob {
   applyUrl:    string;
   postedAt:    string | null;
   type:        string;
+  positionRank?: number;  // preserved through pipeline for no-date Tier A scrapers
 }
 
 interface NormalizedJob {
@@ -46,6 +47,7 @@ interface NormalizedJob {
   sponsorship_signals: unknown;
   fetched_at:          string;
   is_active:           boolean;
+  position_rank:       number | null;   // 1..120 for no-date Tier A scrapers; NULL otherwise
 }
 
 // ── Title filter ──────────────────────────────────────────────────────────
@@ -110,6 +112,7 @@ function normalizeJobs(raw: RawJob[]): NormalizedJob[] {
     sponsorship_signals: null,
     fetched_at:          now,
     is_active:           true,
+    position_rank:       r.positionRank ?? null,
   }));
 }
 
@@ -690,6 +693,7 @@ async function fetchPlaywrightTierA(): Promise<{
           id: s.id, source: source as RefreshSource, company: s.company,
           title: s.title, location: s.location, description: s.description,
           applyUrl: s.applyUrl, postedAt: s.postedAt, type: s.type,
+          positionRank: s.positionRank,
         }));
         const now = Date.now();
         persistState({ company: name, source, status: "success",

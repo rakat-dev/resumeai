@@ -35,4 +35,5 @@ export interface JobRow {
   sponsorship_signals: unknown | null;
   fetched_at:          string;
   is_active:           boolean;
+  position_rank:       number | null;   // 1..120 for no-date Tier A scrapers (Google etc.); NULL otherwise
 }

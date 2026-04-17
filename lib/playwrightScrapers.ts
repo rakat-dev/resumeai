@@ -179,6 +179,90 @@ export async function runFullWorkflow<TRawJob>(opts: {
   return { jobs: out, stats };
 }
 
+// ── No-date workflow helper (Tier A scrapers without posted-date field) ───
+// Some Tier A career sites (Google careers etc.) sort by date but do not
+// expose the actual posted date on each card. For these:
+//   - Cap = FULL_WORKFLOW_NO_DATE_CAP (120) from the start (no extension trigger)
+//   - Strict shouldIncludeTitle filter (same as normal workflow)
+//   - US location filter
+//   - NO date horizon filter (we have no date to compare)
+//   - Helper assigns each kept job a 1..120 positionRank in the order it
+//     passes the filter (sort=date input → rank 1 = freshest)
+//
+// On the board, jobs with positionRank become "synthetic-date" entries shown
+// in a per-company collapsed dropdown pinned at the top of the board, with
+// time filters trimming by rank (24h→1-30, 3d→1-60, 7d→1-90, any→all 120).
+export const FULL_WORKFLOW_NO_DATE_CAP = 120;
+
+export interface NoDateWorkflowStats {
+  company:               string;
+  queries:               string[];
+  nativeFilters:         string[];
+  pagesFetched:          number;
+  rawJobs:               number;
+  rejectedByEarlyTitle:  number;
+  rejectedByLocation:    number;
+  dedupeDropped:         number;
+  finalKept:             number;
+  stopReason:            "page_limit" | "cap_reached" | "no_results" | "error";
+}
+
+export async function runFullWorkflowNoDate<TRawJob>(opts: {
+  company:       string;
+  queries:       string[];
+  nativeFilters: string[];
+  maxPages:      number;
+  pageSize:      number;
+  fetchPage:     (query: string, pageIndex: number) => Promise<TRawJob[]>;
+  toScrapedJob:  (raw: TRawJob) => ScrapedJob | null;
+}): Promise<{ jobs: ScrapedJob[]; stats: NoDateWorkflowStats }> {
+  const seen = new Set<string>();
+  const out: ScrapedJob[] = [];
+  const stats: NoDateWorkflowStats = {
+    company: opts.company, queries: opts.queries, nativeFilters: opts.nativeFilters,
+    pagesFetched: 0, rawJobs: 0, rejectedByEarlyTitle: 0, rejectedByLocation: 0,
+    dedupeDropped: 0, finalKept: 0, stopReason: "page_limit",
+  };
+
+  queryLoop: for (const query of opts.queries) {
+    for (let page = 0; page < opts.maxPages; page++) {
+      if (out.length >= FULL_WORKFLOW_NO_DATE_CAP) {
+        stats.stopReason = "cap_reached"; break queryLoop;
+      }
+      let rawPage: TRawJob[];
+      try {
+        rawPage = await opts.fetchPage(query, page);
+      } catch {
+        stats.stopReason = "error"; break queryLoop;
+      }
+      if (!rawPage || rawPage.length === 0) {
+        stats.stopReason = "no_results"; break;
+      }
+      stats.pagesFetched += 1;
+      stats.rawJobs += rawPage.length;
+
+      for (const raw of rawPage) {
+        if (out.length >= FULL_WORKFLOW_NO_DATE_CAP) break;
+        const j = opts.toScrapedJob(raw);
+        if (!j) continue;
+        if (seen.has(j.id)) { stats.dedupeDropped += 1; continue; }
+        seen.add(j.id);
+        if (!shouldIncludeTitle(j.title)) { stats.rejectedByEarlyTitle += 1; continue; }
+        if (!isUSLocation(j.location))    { stats.rejectedByLocation  += 1; continue; }
+        // Assign rank as we push — 1-indexed, in order of appearance after filters.
+        j.positionRank = out.length + 1;
+        out.push(j);
+      }
+
+      if (rawPage.length < opts.pageSize) { stats.stopReason = "no_results"; break; }
+    }
+  }
+
+  stats.finalKept = out.length;
+  console.log(`[playwright:${opts.company}] (no-date) queries=${opts.queries.join("|")} filters=${opts.nativeFilters.join("|")} pages=${stats.pagesFetched} raw=${stats.rawJobs} title_drop=${stats.rejectedByEarlyTitle} loc_drop=${stats.rejectedByLocation} dup_drop=${stats.dedupeDropped} kept=${stats.finalKept} stop=${stats.stopReason}`);
+  return { jobs: out, stats };
+}
+
 export interface ScrapedJob {
   id:          string;
   company:     string;
@@ -188,6 +272,10 @@ export interface ScrapedJob {
   applyUrl:    string;
   postedAt:    string | null;
   type:        string;
+  // Set by runFullWorkflowNoDate for sources without a posted-date field
+  // (Google careers etc.). 1..120 in order of appearance after title filter.
+  // NULL for normal scrapers — those use postedAt directly.
+  positionRank?: number;
 }
 
 // ── Microsoft ─────────────────────────────────────────────────────────────
