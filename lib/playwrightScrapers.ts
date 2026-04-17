@@ -344,58 +344,115 @@ export async function fetchMicrosoftJobs(): Promise<ScrapedJob[]> {
 }
 
 // ── Google ────────────────────────────────────────────────────────────────
-// Uses careers.google.com JSON API
-// Spec: sort by date, 15 pages (no visible posted date on cards)
+// SSR HTML scraper for www.google.com/about/careers (reverse-engineered
+// 2026-04-17 via Chrome DevTools). Each /jobs/results/ page response embeds
+// 20 job cards as rendered HTML. No JSON API is exposed.
+//
+// Card structure (per card):
+//   <h3 class="QJPWVe">Title</h3>
+//   <span class="r0wTof">Location, Country</span>
+//   <a href="jobs/results/{numericId}-{kebab-slug}">…</a>
+//
+// No posted-date is shown on Google's cards. Uses runFullWorkflowNoDate:
+//   - Cap = 120 from start (no extension trigger)
+//   - Strict shouldIncludeTitle filter
+//   - US location filter (most results are already US since location=United States,
+//     but some are tagged with multiple cities including non-US — filter handles it)
+//   - Helper assigns positionRank 1..120 in order of appearance after filter
+//
+// URL params validated by user manually in browser:
+//   q="software engineer"  (quoted phrase forces exact match, weeds out
+//                           unrelated roles like "Hardware Engineer")
+//   location=United States
+//   sort_by=date           (returns newest first)
+//   page=N                 (1-indexed, 20 cards per page)
+type GoogleRawJob = {
+  title:    string;
+  location: string;
+  jobId:    string;
+  slug:     string;
+};
+
+const GOOGLE_TITLE_RE    = /<h3\s+class="QJPWVe[^"]*">([^<]+)<\/h3>/g;
+const GOOGLE_LOCATION_RE = /<span\s+class="r0wTof[^"]*">([^<]+)<\/span>/g;
+const GOOGLE_HREF_RE     = /href="jobs\/results\/(\d+)-([a-z0-9\-]+)/g;
+
+function parseGooglePage(html: string): GoogleRawJob[] {
+  const titles    = [...html.matchAll(GOOGLE_TITLE_RE)].map(m => m[1].trim());
+  const locations = [...html.matchAll(GOOGLE_LOCATION_RE)].map(m => m[1].trim());
+  // Hrefs may repeat (apply + share + email links per card all use the same path)
+  const seen = new Set<string>();
+  const hrefs: Array<{ id: string; slug: string }> = [];
+  for (const m of html.matchAll(GOOGLE_HREF_RE)) {
+    const k = `${m[1]}-${m[2]}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    hrefs.push({ id: m[1], slug: m[2] });
+  }
+  // The per-card location is "City, State, Country" — but Google sometimes
+  // emits multiple location <span>s per card (when a job has 2+ offices).
+  // We only want one location per card; take the first locationsCount/cardCount.
+  const cardCount = Math.min(titles.length, hrefs.length);
+  // Heuristic: use one location per card from the start of the location list.
+  // If there are more locations than cards, take the first cardCount entries.
+  const out: GoogleRawJob[] = [];
+  for (let i = 0; i < cardCount; i++) {
+    out.push({
+      title:    titles[i],
+      location: locations[i] ?? "United States",
+      jobId:    hrefs[i].id,
+      slug:     hrefs[i].slug,
+    });
+  }
+  return out;
+}
+
 export async function fetchGoogleJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
-  const MAX_PAGES = 15;
+  const MAX_PAGES = 30;     // 30 × 20 = 600 raw scanned (Google reports ~614 jobs match)
   const PAGE_SIZE = 20;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
+  const { jobs } = await runFullWorkflowNoDate<GoogleRawJob>({
+    company:       "Google",
+    queries:       ["\"software engineer\""],   // quoted phrase — Google honors it
+    nativeFilters: ["location=United States", "sort_by=date"],
+    maxPages:      MAX_PAGES,
+    pageSize:      PAGE_SIZE,
+    fetchPage: async (query, page) => {
       const params = new URLSearchParams({
-        q:           "software engineer",
-        location:    "United States",
-        employment_type: "FULL_TIME",
-        page:        String(page),
-        num:         String(PAGE_SIZE),
-        sort_by:     "date",
+        location: "United States",
+        q:        query,
+        sort_by:  "date",
+        page:     String(page + 1),   // Google uses 1-indexed page numbers
       });
-      const res = await fetch(
-        `https://careers.google.com/api/v3/search/?${params}`,
-        {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-      if (!res.ok) break;
-      const data = await res.json();
-      const jobs = (data.jobs ?? []) as Record<string, unknown>[];
-      if (jobs.length === 0) break;
+      const url = `https://www.google.com/about/careers/applications/jobs/results/?${params}`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+          "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return [];
+      const html = await res.text();
+      return parseGooglePage(html);
+    },
+    toScrapedJob: (r) => {
+      if (!r.jobId || !r.title) return null;
+      return {
+        id:          `goog-${r.jobId}`,
+        company:     "Google",
+        title:       r.title,
+        location:    r.location,
+        description: "",
+        applyUrl:    `https://www.google.com/about/careers/applications/jobs/results/${r.jobId}-${r.slug}`,
+        postedAt:    null,    // no posted-date exposed; positionRank is set by helper
+        type:        "Full-time",
+      };
+    },
+  });
 
-      for (const j of jobs) {
-        const jobId = (j.id as string) ?? String(Math.random());
-        const locs  = (j.locations ?? []) as string[];
-        results.push({
-          id:          `goog-${jobId}`,
-          company:     "Google",
-          title:       (j.title as string) ?? "",
-          location:    locs[0] ?? "United States",
-          description: (j.description as string) ?? "",
-          applyUrl:    `https://careers.google.com/jobs/results/${jobId}`,
-          postedAt:    (j.publish_date as string) ?? null,
-          type:        "Full-time",
-        });
-      }
-      if (jobs.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
-
-  console.log(`[playwright] Google: ${results.length} raw`);
-  return results;
+  return jobs;
 }
 
 // ── Apple ─────────────────────────────────────────────────────────────────
