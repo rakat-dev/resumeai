@@ -1023,14 +1023,19 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         continue;
       }
 
-      // ── Apply link (Section 6) ────────────────────────────────────────
-      // Primary: canonical careers.walmart.com URL — always trusted if reqId present.
-      // Fallback: direct Workday URL from externalPath.
+      // ── Apply link (Section 6, updated 2026-04-18) ────────────────────────────
+      // Priority: Workday /details/ URL (PRIMARY) → canonical careers.walmart.com (fallback).
+      // externalPath shape from API: "/job/{location}/{slug}"
+      // Correct format:  /en-US/WalmartExternal/details/{slug}  (strip /job/{location}/ prefix)
+      // Confirmed live:  /details/Software-Engineer-III_R-2464506
+      //                  /details/Senior--Software-Engineer_R-2263009
       const externalPath = (j.externalPath as string) ?? "";
-      const applyUrl = reqId
-        ? `https://careers.walmart.com/us/jobs/${reqId}`
-        : externalPath
-          ? `https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/job${externalPath}`
+      // Extract just the last path segment: "/job/Bentonville-AR/Slug_R-xxx" → "Slug_R-xxx"
+      const slug = externalPath.split("/").filter(Boolean).pop() ?? "";
+      const applyUrl = slug
+        ? `https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/details/${slug}`
+        : reqId
+          ? `https://careers.walmart.com/us/en/jobs/${reqId}` // fallback: no externalPath
           : null;
 
       // Section 9: job must have a valid apply link
