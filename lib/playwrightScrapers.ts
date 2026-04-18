@@ -943,6 +943,7 @@ function parseWalmartPostedOn(raw: string | null | undefined): number | null {
   if (!raw) return null;
   const s = raw.trim();
   if (/^posted today$/i.test(s))           return 0;
+  if (/^posted yesterday$/i.test(s))       return 1;  // "Posted Yesterday" → 1 day old
   const plural   = s.match(/^posted (\d+) days? ago$/i);
   if (plural)                              return parseInt(plural[1], 10);
   const singular = s.match(/^posted (\d+) day ago$/i);
