@@ -1197,7 +1197,17 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
     <div style={{...S.card,border:selected?.id===job.id?"1px solid var(--accent)":"1px solid var(--border)",background:selected?.id===job.id?"rgba(108,99,255,.06)":"var(--card)",transition:"all .2s",position:"relative"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
         <div style={{flex:1}}>
-          <div style={{fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:700,marginBottom:1}}>{job.title}</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:700,marginBottom:1}}>
+            {job.title}
+            {/* Requisition ID badge — shown for jobs that carry a req ID in their source id */}
+            {(()=>{
+              const reqId = job.id.startsWith('wmt-') ? job.id.replace('wmt-','') : null;
+              if (!reqId) return null;
+              return (
+                <span style={{fontSize:10,fontWeight:600,color:'var(--muted)',background:'var(--surface2)',border:'1px solid var(--border)',borderRadius:6,padding:'1px 6px',marginLeft:7,verticalAlign:'middle',letterSpacing:'0.02em',fontFamily:"'DM Sans',sans-serif"}}>{reqId}</span>
+              );
+            })()}
+          </div>
           <div style={{fontSize:12,color:"var(--accent2)",fontWeight:500}}>{job.company}</div>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
