@@ -11,6 +11,7 @@ import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
   fetchAmazonJobs, fetchJPMJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs, fetchNetflixJobs,
+  fetchWalmartJobs,
   type ScrapedJob,
 } from "@/lib/playwrightScrapers";
 import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } from "@/lib/companyAtsRegistry";
@@ -521,12 +522,10 @@ const ADZUNA_TARGETED_COMPANIES = [
   "Accenture",          // 273 jobs — consulting giant, heavy coverage
   "Cognizant",          // 314 jobs
   "Capgemini",          //  94 jobs
-  // Third expansion — Meta scraper broken + Walmart/Target undercovered by Workday:
-  "Walmart",            // 400 jobs — Workday pipeline finds only 38; Adzuna indexes Walmart corporate SWE roles more thoroughly
-  // Meta removed 2026-04-17 — now sourced via direct sitemap+JSON-LD scrape
-  // (lib/scrapers/meta.ts). Adzuna's Meta data was 89% duplicates from feed
-  // fanout (124 rows collapsing to 13 unique fingerprints). Blocked at the
-  // per-row level too by isMetaDirect() in fetchAdzunaSource for safety.
+  // Third expansion — Meta scraper broken + Target undercovered by Workday:
+  // Walmart removed 2026-04-18 — now sourced via direct Workday CXS backend
+  // (fetchWalmartJobs in lib/playwrightScrapers.ts). Scoped to 4 Job Profile
+  // IDs, returns 265 jobs with real req IDs and careers.walmart.com apply links.
   "Target",             //   4 jobs — small add, but target company on the priority list
   // Fourth expansion (2026-04-16, partial workflow rollout):
   //   Banks / finance that live on Oracle HCM or proprietary sites with
@@ -759,6 +758,10 @@ const TIER_A_COMPANIES: Array<{ name: string; source: RefreshSource; fetcher: ()
   { name: "Goldman Sachs",  source: "playwright_google",    fetcher: fetchGoldmanSachsJobs }, // Oracle HCM
   { name: "OpenAI",         source: "playwright_microsoft", fetcher: fetchOpenAIJobs       }, // Ashby
   { name: "Netflix",        source: "playwright_apple",     fetcher: fetchNetflixJobs      }, // Lever
+  // Walmart: direct Workday CXS backend, scoped to 4 Job Profile IDs.
+  // Replaces Adzuna targeted fetch (2026-04-18) — direct source returns 265
+  // jobs with real req IDs and careers.walmart.com apply links.
+  { name: "Walmart",        source: "playwright_microsoft", fetcher: fetchWalmartJobs      },
 ];
 
 async function fetchPlaywrightTierA(): Promise<{

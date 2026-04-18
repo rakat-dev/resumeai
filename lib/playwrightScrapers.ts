@@ -892,3 +892,178 @@ export async function fetchNetflixJobs(): Promise<ScrapedJob[]> {
   console.log(`[playwright] Netflix: ${results.length} raw`);
   return results;
 }
+
+// ── Walmart (Workday CXS backend) ─────────────────────────────────────────
+// Direct POST to the Workday CXS backend endpoint — bypasses the UI entirely.
+// Scoped to exactly 4 Job Profile IDs (confirmed live via DevTools 2026-04-18):
+//
+//   facet key : Job_Profiles   (NOT Job_Profile_Specific_Attributes — that 400s)
+//   profiles  :
+//     (USA) Senior Software Engineer, Information Security → 1d1f3a5e8423010343a62f13c700a839 (  5)
+//     (USA) Senior, Software Engineer                      → 12a6482783d701de2ca3f755f12e45df (161)
+//     (USA) Software Engineer III                          → 12a6482783d7012a1ee3be9cf02eaddb ( 94)
+//     (USA) Software Engineer II                           → fba71304cea401287d93764c1f2df0c0 (  5)
+//   Total at time of probe: 265 jobs
+//
+// Date source: postedOn string from search response.
+// Parsing rules (Section 4 of spec, 2026-04-18):
+//   "Posted Today"           → 0 days old → KEEP
+//   "Posted X Days Ago"      → X days old → KEEP if X ≤ 30, DISCARD if X > 30
+//   "Posted 30+ Days Ago"    → >30 days   → DISCARD
+//   anything else / missing  → DISCARD (no fallback, no grouping)
+//
+// Apply link (Section 6 of spec, 2026-04-18):
+//   Primary  : https://careers.walmart.com/us/jobs/{REQ_ID}  — constructed from
+//              bulletFields[0], always trusted (no HEAD validation — careers.walmart.com
+//              is a Next.js frontend that blocks HEAD requests)
+//   Fallback : https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/job{externalPath}
+//
+// Dedup key: bulletFields[0] (the R-XXXXX requisition ID).
+// No positionRank — all kept jobs have a real age from postedOn.
+
+const WALMART_CXS_URL =
+  "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal/jobs";
+
+const WALMART_JOB_PROFILE_IDS = [
+  "1d1f3a5e8423010343a62f13c700a839", // (USA) Senior Software Engineer, Information Security
+  "12a6482783d701de2ca3f755f12e45df", // (USA) Senior, Software Engineer
+  "12a6482783d7012a1ee3be9cf02eaddb", // (USA) Software Engineer III
+  "fba71304cea401287d93764c1f2df0c0", // (USA) Software Engineer II
+];
+
+const WALMART_PAGE_SIZE = 20;
+const WALMART_MAX_PAGES = 20; // 20 × 20 = 400 capacity; current total is 265
+
+/**
+ * Parse the Workday postedOn string into age in days.
+ * Returns null if format is unrecognized — caller DISCARDS those jobs.
+ * Returns Infinity for "Posted 30+ Days Ago" — caller discards.
+ */
+function parseWalmartPostedOn(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (/^posted today$/i.test(s))           return 0;
+  const plural   = s.match(/^posted (\d+) days? ago$/i);
+  if (plural)                              return parseInt(plural[1], 10);
+  const singular = s.match(/^posted (\d+) day ago$/i);
+  if (singular)                            return parseInt(singular[1], 10);
+  if (/^posted 30\+ days? ago$/i.test(s)) return Infinity;
+  return null; // unrecognized → discard
+}
+
+export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
+  const kept: ScrapedJob[] = [];
+  const seenReqIds = new Set<string>();
+
+  let totalFetched    = 0;
+  let discardedAge    = 0;
+  let discardedNoDate = 0;
+  let discardedNoReqId = 0;
+  let discardedDupe   = 0;
+
+  for (let page = 0; page < WALMART_MAX_PAGES; page++) {
+    const offset = page * WALMART_PAGE_SIZE;
+    let data: Record<string, unknown>;
+
+    try {
+      const res = await fetch(WALMART_CXS_URL, {
+        method: "POST",
+        headers: {
+          "Accept":          "application/json",
+          "Content-Type":    "application/json",
+          "Accept-Language": "en-US",
+          "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        },
+        body: JSON.stringify({
+          appliedFacets: { Job_Profiles: WALMART_JOB_PROFILE_IDS },
+          limit:          WALMART_PAGE_SIZE,
+          offset,
+          searchText:     "software",
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!res.ok) {
+        console.warn(`[playwright:Walmart] HTTP ${res.status} at page ${page} — stopping`);
+        break;
+      }
+      data = (await res.json()) as Record<string, unknown>;
+    } catch (e) {
+      console.warn(`[playwright:Walmart] fetch error page ${page}: ${(e as Error).message}`);
+      break;
+    }
+
+    const postings = (data.jobPostings ?? []) as Record<string, unknown>[];
+    if (postings.length === 0) break;
+    totalFetched += postings.length;
+
+    for (const j of postings) {
+      // ── Requisition ID (dedup key, Section 7) ────────────────────────
+      const bullets = (j.bulletFields ?? []) as string[];
+      const reqId   = bullets[0] ?? "";
+      if (!reqId || !reqId.startsWith("R-")) {
+        discardedNoReqId++;
+        continue;
+      }
+
+      // ── Deduplication ─────────────────────────────────────────────────
+      if (seenReqIds.has(reqId)) { discardedDupe++; continue; }
+      seenReqIds.add(reqId);
+
+      // ── Posted date (Section 4) ───────────────────────────────────────
+      const ageDays = parseWalmartPostedOn((j.postedOn as string) ?? null);
+
+      // Section 5: strict freshness filter — no heuristics, no fallback
+      // null     → unrecognized format → DISCARD
+      // Infinity → "30+ Days Ago"      → DISCARD
+      // > 30     → too old             → DISCARD
+      if (ageDays === null || !isFinite(ageDays) || ageDays > 30) {
+        if (ageDays === null) discardedNoDate++;
+        else                  discardedAge++;
+        continue;
+      }
+
+      // ── Apply link (Section 6) ────────────────────────────────────────
+      // Primary: canonical careers.walmart.com URL — always trusted if reqId present.
+      // Fallback: direct Workday URL from externalPath.
+      const externalPath = (j.externalPath as string) ?? "";
+      const applyUrl = reqId
+        ? `https://careers.walmart.com/us/jobs/${reqId}`
+        : externalPath
+          ? `https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/job${externalPath}`
+          : null;
+
+      // Section 9: job must have a valid apply link
+      if (!applyUrl) continue;
+
+      // ── Build approximate ISO postedAt from ageDays ───────────────────
+      // postedOn string is the authoritative date source (Section 4).
+      // We convert ageDays → ISO so the downstream ingest pipeline's
+      // horizon filter and stale-job cleanup work correctly.
+      // This is NOT fabricating a date — it is converting the parsed
+      // postedOn string into the format the pipeline expects.
+      const postedAtIso = new Date(Date.now() - ageDays * 86_400_000).toISOString();
+
+      kept.push({
+        id:          `wmt-${reqId}`,
+        company:     "Walmart",
+        title:       (j.title as string) ?? "",
+        location:    (j.locationsText as string) ?? "United States",
+        description: "",
+        applyUrl,
+        postedAt:    postedAtIso,
+        type:        "Full-time",
+      });
+    }
+
+    // Stop early if fewer than a full page returned (no more results)
+    if (postings.length < WALMART_PAGE_SIZE) break;
+  }
+
+  console.log(
+    `[playwright:Walmart] fetched=${totalFetched} kept=${kept.length}` +
+    ` discarded_age=${discardedAge} discarded_no_date=${discardedNoDate}` +
+    ` discarded_no_req_id=${discardedNoReqId} discarded_dupe=${discardedDupe}`
+  );
+  return kept;
+}
