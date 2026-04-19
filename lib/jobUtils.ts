@@ -102,51 +102,86 @@ export function extractMissingSkills(description: string): string[] {
   }).slice(0, 6);
 }
 
+// ── Sponsorship detection — 3-state classifier (2026-04-18) ─────────────────
+// type SponsorshipStatus = "supported" | "not_supported" | "unknown"
+// Mapped to DB column sponsorship_status values:
+//   "supported"     → "mentioned"      (shows ✅ badge)
+//   "not_supported" → "not_mentioned"  (no badge, job shown)
+//   "unknown"       → "not_mentioned"  (no badge, job shown — safe default)
+//
+// RULE: negative checked first and always wins. Positive only on explicit
+// affirmation. Never infer from weak keywords (opt, cpt, h1b alone, visa alone).
+// "must be authorized to work" = boilerplate for NO sponsorship.
+
+function normalizeJD(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/[•‣◦⁃∙]/g, " ")
+    .replace(/[‐‑‒–—―]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchesAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some(re => re.test(text));
+}
+
+// Explicit no-sponsorship — any match = drop / not_supported
+export const NO_SPONSORSHIP_PATTERNS: RegExp[] = [
+  /immigration sponsorship (?:support )?(?:will )?not be available/i,
+  /visa sponsorship (?:is )?not available/i,
+  /no visa sponsorship/i,
+  /no sponsorship/i,
+  /not eligible for (?:employment|visa|immigration) sponsorship/i,
+  /this position is not eligible for (?:employment|visa|immigration) sponsorship/i,
+  /will not sponsor/i,
+  /we will not sponsor/i,
+  /does not provide sponsorship/i,
+  /cannot provide sponsorship/i,
+  /unable to sponsor/i,
+  /no h-1b sponsorship/i,
+  /not available for opt/i,
+  /not available for cpt/i,
+  /not considering candidates who require sponsorship/i,
+  /must be authorized to work in the (?:u\.?s\.?|united states) without (?:current or future )?sponsorship/i,
+  /must be legally authorized to work in the (?:u\.?s\.?|united states) without (?:current or future )?sponsorship/i,
+  /authorized to work in the (?:u\.?s\.?|united states) without (?:current or future )?sponsorship/i,
+  /without current or future sponsorship/i,
+  /without employer sponsorship/i,
+  /without visa sponsorship/i,
+];
+
+// Explicit yes-sponsorship — narrow, unambiguous phrases only
+const YES_SPONSORSHIP_PATTERNS: RegExp[] = [
+  /visa sponsorship available/i,
+  /sponsorship is available/i,
+  /we sponsor/i,
+  /we will sponsor/i,
+  /will sponsor qualified candidates/i,
+  /will provide sponsorship/i,
+  /can provide sponsorship/i,
+  /sponsorship provided/i,
+  /employment sponsorship available/i,
+];
+
+export function classifySponsorship(rawJD: string): "supported" | "not_supported" | "unknown" {
+  const jd = normalizeJD(rawJD);
+  if (matchesAny(jd, NO_SPONSORSHIP_PATTERNS)) return "not_supported";
+  if (matchesAny(jd, YES_SPONSORSHIP_PATTERNS)) return "supported";
+  return "unknown";
+}
+
+// detectSponsorship: adapter for existing DB column ("mentioned" | "not_mentioned").
+// "supported"     -> "mentioned"     (show badge)
+// "not_supported" -> "not_mentioned" (no badge)
+// "unknown"       -> "not_mentioned" (no badge — safe default; do NOT infer positive)
 export function detectSponsorship(description: string): "mentioned" | "not_mentioned" {
-  // Negative patterns checked FIRST — explicit no-sponsorship language always wins.
-  // Uses word-boundary-aware phrases to avoid false positives.
-  const neg = [
-    "no sponsorship",
-    "will not sponsor",
-    "cannot sponsor",
-    "unable to sponsor",
-    "not able to sponsor",
-    "sponsorship not available",
-    "sponsorship is not available",
-    "without sponsorship",
-    "without current or future sponsorship",
-    "does not provide sponsorship",
-    "cannot provide sponsorship",
-    "no h-1b",
-    "not eligible for sponsorship",
-    "not eligible for employment sponsorship",
-    "not considering candidates who require sponsorship",
-    "must be authorized to work",        // boilerplate that means NO sponsorship
-    "must be legally authorized to work",
-    "authorization to work in the u",     // catches "...in the US/USA" variants
-  ];
-  // Positive patterns: explicit affirmations of visa sponsorship.
-  // Intentionally narrow — only phrases that unambiguously mean the company WILL sponsor.
-  // Removed: "opt", "cpt", "work authorization" — these appear in boilerplate
-  // that means the opposite ("must have work authorization", "opt not available").
-  const pos = [
-    "visa sponsorship",
-    "h-1b sponsorship",
-    "h1b sponsorship",
-    "will sponsor",
-    "we will sponsor",
-    "employer will sponsor",
-    "open to sponsoring",
-    "open to visa sponsorship",
-    "sponsorship available",
-    "sponsorship is available",
-    "sponsorship provided",
-    "sponsorship for work visa",
-  ];
-  const dl = description.toLowerCase();
-  if (neg.some(k => dl.includes(k))) return "not_mentioned";
-  if (pos.some(k => dl.includes(k))) return "mentioned";
-  return "not_mentioned";
+  const status = classifySponsorship(description);
+  return status === "supported" ? "mentioned" : "not_mentioned";
 }
 
 export function extractExperience(description: string): string {
@@ -570,11 +605,11 @@ export function computeJobScore(params: {
   score += titleScore * 3;
 
   // ── Sponsorship signal ────────────────────────────────────────
-  const dl = description.toLowerCase();
-  const SPONSOR_POS = ["visa sponsorship","h-1b","h1b","will sponsor","opt","cpt"];
-  const SPONSOR_NEG = ["no sponsorship","will not sponsor","cannot sponsor","without sponsorship"];
-  if (SPONSOR_NEG.some(k => dl.includes(k)))      score -= 20;
-  else if (SPONSOR_POS.some(k => dl.includes(k))) score += 15;
+  // Uses the 3-state classifier — same logic as detectSponsorship/classifySponsorship.
+  // "not_supported" penalises heavily; "supported" boosts; "unknown" neutral.
+  const sponsorStatus = classifySponsorship(description);
+  if      (sponsorStatus === "not_supported") score -= 20;
+  else if (sponsorStatus === "supported")     score += 15;
 
   // ── Recency ───────────────────────────────────────────────
   if (postedTimestamp) {

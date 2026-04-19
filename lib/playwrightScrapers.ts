@@ -10,6 +10,7 @@ import {
   isUSLocation,
   isWithinEarlyHorizon,
   EARLY_HORIZON_DAYS_FULL,
+  NO_SPONSORSHIP_PATTERNS,
 } from "./jobUtils";
 
 // ── Full-workflow helper (workflow spec §§1-10) ───────────────────────────
@@ -949,20 +950,8 @@ function htmlToPlainText(html: string): string {
     .toLowerCase();
 }
 
-const NO_SPONSORSHIP_PATTERNS = [
-  /will not sponsor/i,
-  /no visa sponsorship/i,
-  /not eligible for sponsorship/i,
-  /immigration sponsorship.*not available/i,
-  /not eligible for employment sponsorship/i,
-  /must be authorized to work.*without sponsorship/i,
-  /without current or future sponsorship/i,
-  /cannot provide sponsorship/i,
-  /does not provide sponsorship/i,
-  /no h-1b sponsorship/i,
-  /not considering candidates who require sponsorship/i,
-];
-
+// NO_SPONSORSHIP_PATTERNS imported from jobUtils — single source of truth.
+// fetch-time drop logic here uses the same regex list as detectSponsorship().
 function hasNoSponsorshipLanguage(plainText: string): boolean {
   return NO_SPONSORSHIP_PATTERNS.some(rx => rx.test(plainText));
 }
