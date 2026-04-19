@@ -893,81 +893,124 @@ export async function fetchNetflixJobs(): Promise<ScrapedJob[]> {
   return results;
 }
 
-// ── Walmart (Workday CXS backend) ─────────────────────────────────────────
-// Direct POST to the Workday CXS backend endpoint — bypasses the UI entirely.
-// Scoped to exactly 4 Job Profile IDs (confirmed live via DevTools 2026-04-18):
+// -- Walmart (Workday CXS backend) -----------------------------------------
+// Direct POST to the Workday CXS backend endpoint, bypasses the UI entirely.
+// Scoped to exactly 4 Job Profile IDs (confirmed live via DevTools 2026-04-18).
 //
-//   facet key : Job_Profiles   (NOT Job_Profile_Specific_Attributes — that 400s)
-//   profiles  :
-//     (USA) Senior Software Engineer, Information Security → 1d1f3a5e8423010343a62f13c700a839 (  5)
-//     (USA) Senior, Software Engineer                      → 12a6482783d701de2ca3f755f12e45df (161)
-//     (USA) Software Engineer III                          → 12a6482783d7012a1ee3be9cf02eaddb ( 94)
-//     (USA) Software Engineer II                           → fba71304cea401287d93764c1f2df0c0 (  5)
-//   Total at time of probe: 265 jobs
+// Pipeline (2026-04-18 rev2):
+//   Phase 1: paginate search, collect candidates:
+//     - valid R-XXXXX req ID + dedupe
+//     - postedOn <= 7 days (PRE-FILTER before any detail calls)
+//   Phase 2: batch-15 detail fetches per candidate:
+//     - fetch jobPostingInfo.jobDescription (HTML ~13KB)
+//     - HTML -> plain text
+//     - sponsorship filter -> DROP if any NO_SPONSORSHIP_PATTERNS match
+//   Phase 3: store surviving jobs with full plain-text JD in description field
 //
-// Date source: postedOn string from search response.
-// Parsing rules (Section 4 of spec, 2026-04-18):
-//   "Posted Today"           → 0 days old → KEEP
-//   "Posted X Days Ago"      → X days old → KEEP if X ≤ 30, DISCARD if X > 30
-//   "Posted 30+ Days Ago"    → >30 days   → DISCARD
-//   anything else / missing  → DISCARD (no fallback, no grouping)
-//
-// Apply link (Section 6 of spec, 2026-04-18):
-//   Primary  : https://careers.walmart.com/us/jobs/{REQ_ID}  — constructed from
-//              bulletFields[0], always trusted (no HEAD validation — careers.walmart.com
-//              is a Next.js frontend that blocks HEAD requests)
-//   Fallback : https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/job{externalPath}
-//
-// Dedup key: bulletFields[0] (the R-XXXXX requisition ID).
-// No positionRank — all kept jobs have a real age from postedOn.
+// Detail URL: WALMART_CXS_BASE + externalPath
+// Apply URL:  /en-US/WalmartExternal/details/{slug}
 
-const WALMART_CXS_URL =
-  "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal/jobs";
+const WALMART_CXS_BASE = "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal";
 
 const WALMART_JOB_PROFILE_IDS = [
-  "1d1f3a5e8423010343a62f13c700a839", // (USA) Senior Software Engineer, Information Security
-  "12a6482783d701de2ca3f755f12e45df", // (USA) Senior, Software Engineer
-  "12a6482783d7012a1ee3be9cf02eaddb", // (USA) Software Engineer III
-  "fba71304cea401287d93764c1f2df0c0", // (USA) Software Engineer II
+  "1d1f3a5e8423010343a62f13c700a839",
+  "12a6482783d701de2ca3f755f12e45df",
+  "12a6482783d7012a1ee3be9cf02eaddb",
+  "fba71304cea401287d93764c1f2df0c0",
 ];
 
-const WALMART_PAGE_SIZE = 20;
-const WALMART_MAX_PAGES = 20; // 20 × 20 = 400 capacity; current total is 265
+const WALMART_PAGE_SIZE       = 20;
+const WALMART_MAX_PAGES       = 20;
+const WALMART_BATCH_SIZE      = 15;
+const WALMART_PRE_FILTER_DAYS = 7;
 
-/**
- * Parse the Workday postedOn string into age in days.
- * Returns null if format is unrecognized — caller DISCARDS those jobs.
- * Returns Infinity for "Posted 30+ Days Ago" — caller discards.
- */
 function parseWalmartPostedOn(raw: string | null | undefined): number | null {
   if (!raw) return null;
   const s = raw.trim();
   if (/^posted today$/i.test(s))           return 0;
-  if (/^posted yesterday$/i.test(s))       return 1;  // "Posted Yesterday" → 1 day old
-  const plural   = s.match(/^posted (\d+) days? ago$/i);
+  if (/^posted yesterday$/i.test(s))       return 1;
+  const plural = s.match(/^posted (\d+) days? ago$/i);
   if (plural)                              return parseInt(plural[1], 10);
   const singular = s.match(/^posted (\d+) day ago$/i);
   if (singular)                            return parseInt(singular[1], 10);
   if (/^posted 30\+ days? ago$/i.test(s)) return Infinity;
-  return null; // unrecognized → discard
+  return null;
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&#?\w+;/g, " ")
+    .replace(/[*\u2022\u00b7\u2013\u2014]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const NO_SPONSORSHIP_PATTERNS = [
+  /will not sponsor/i,
+  /no visa sponsorship/i,
+  /not eligible for sponsorship/i,
+  /immigration sponsorship.*not available/i,
+  /not eligible for employment sponsorship/i,
+  /must be authorized to work.*without sponsorship/i,
+  /without current or future sponsorship/i,
+  /cannot provide sponsorship/i,
+  /does not provide sponsorship/i,
+  /no h-1b sponsorship/i,
+  /not considering candidates who require sponsorship/i,
+];
+
+function hasNoSponsorshipLanguage(plainText: string): boolean {
+  return NO_SPONSORSHIP_PATTERNS.some(rx => rx.test(plainText));
+}
+
+async function fetchWalmartDetail(externalPath: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${WALMART_CXS_BASE}${externalPath}`, {
+      headers: {
+        "Accept":          "application/json",
+        "Accept-Language": "en-US",
+        "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as Record<string, unknown>;
+    const info = (data.jobPostingInfo ?? {}) as Record<string, unknown>;
+    return (info.jobDescription as string) ?? (info.externalDescription as string) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
-  const kept: ScrapedJob[] = [];
+  interface WalmartCandidate {
+    reqId:        string;
+    title:        string;
+    location:     string;
+    externalPath: string;
+    applyUrl:     string;
+    postedAtIso:  string;
+  }
+
+  const candidates: WalmartCandidate[] = [];
   const seenReqIds = new Set<string>();
 
-  let totalFetched    = 0;
-  let discardedAge    = 0;
-  let discardedNoDate = 0;
-  let discardedNoReqId = 0;
-  let discardedDupe   = 0;
+  let totalFetched         = 0;
+  let discardedAge         = 0;
+  let discardedNoDate      = 0;
+  let discardedNoReqId     = 0;
+  let discardedDupe        = 0;
+  let discardedSponsorship = 0;
+  let discardedNoDesc      = 0;
 
   for (let page = 0; page < WALMART_MAX_PAGES; page++) {
-    const offset = page * WALMART_PAGE_SIZE;
     let data: Record<string, unknown>;
-
     try {
-      const res = await fetch(WALMART_CXS_URL, {
+      const res = await fetch(`${WALMART_CXS_BASE}/jobs`, {
         method: "POST",
         headers: {
           "Accept":          "application/json",
@@ -977,20 +1020,19 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         },
         body: JSON.stringify({
           appliedFacets: { Job_Profiles: WALMART_JOB_PROFILE_IDS },
-          limit:          WALMART_PAGE_SIZE,
-          offset,
-          searchText:     "software",
+          limit:      WALMART_PAGE_SIZE,
+          offset:     page * WALMART_PAGE_SIZE,
+          searchText: "software",
         }),
         signal: AbortSignal.timeout(15_000),
       });
-
       if (!res.ok) {
-        console.warn(`[playwright:Walmart] HTTP ${res.status} at page ${page} — stopping`);
+        console.warn(`[playwright:Walmart] search HTTP ${res.status} page=${page}`);
         break;
       }
       data = (await res.json()) as Record<string, unknown>;
     } catch (e) {
-      console.warn(`[playwright:Walmart] fetch error page ${page}: ${(e as Error).message}`);
+      console.warn(`[playwright:Walmart] search error page=${page}: ${(e as Error).message}`);
       break;
     }
 
@@ -999,77 +1041,86 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
     totalFetched += postings.length;
 
     for (const j of postings) {
-      // ── Requisition ID (dedup key, Section 7) ────────────────────────
       const bullets = (j.bulletFields ?? []) as string[];
       const reqId   = bullets[0] ?? "";
-      if (!reqId || !reqId.startsWith("R-")) {
-        discardedNoReqId++;
-        continue;
-      }
-
-      // ── Deduplication ─────────────────────────────────────────────────
+      if (!reqId || !reqId.startsWith("R-")) { discardedNoReqId++; continue; }
       if (seenReqIds.has(reqId)) { discardedDupe++; continue; }
       seenReqIds.add(reqId);
 
-      // ── Posted date (Section 4) ───────────────────────────────────────
       const ageDays = parseWalmartPostedOn((j.postedOn as string) ?? null);
-
-      // Section 5: strict freshness filter — no heuristics, no fallback
-      // null     → unrecognized format → DISCARD
-      // Infinity → "30+ Days Ago"      → DISCARD
-      // > 30     → too old             → DISCARD
-      if (ageDays === null || !isFinite(ageDays) || ageDays > 30) {
+      if (ageDays === null || !isFinite(ageDays) || ageDays > WALMART_PRE_FILTER_DAYS) {
         if (ageDays === null) discardedNoDate++;
         else                  discardedAge++;
         continue;
       }
 
-      // ── Apply link (Section 6, updated 2026-04-18) ────────────────────────────
-      // Priority: Workday /details/ URL (PRIMARY) → canonical careers.walmart.com (fallback).
-      // externalPath shape from API: "/job/{location}/{slug}"
-      // Correct format:  /en-US/WalmartExternal/details/{slug}  (strip /job/{location}/ prefix)
-      // Confirmed live:  /details/Software-Engineer-III_R-2464506
-      //                  /details/Senior--Software-Engineer_R-2263009
       const externalPath = (j.externalPath as string) ?? "";
-      // Extract just the last path segment: "/job/Bentonville-AR/Slug_R-xxx" → "Slug_R-xxx"
-      const slug = externalPath.split("/").filter(Boolean).pop() ?? "";
-      const applyUrl = slug
+      const slug         = externalPath.split("/").filter(Boolean).pop() ?? "";
+      const applyUrl     = slug
         ? `https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/details/${slug}`
         : reqId
-          ? `https://careers.walmart.com/us/en/jobs/${reqId}` // fallback: no externalPath
+          ? `https://careers.walmart.com/us/en/jobs/${reqId}`
           : null;
-
-      // Section 9: job must have a valid apply link
       if (!applyUrl) continue;
 
-      // ── Build approximate ISO postedAt from ageDays ───────────────────
-      // postedOn string is the authoritative date source (Section 4).
-      // We convert ageDays → ISO so the downstream ingest pipeline's
-      // horizon filter and stale-job cleanup work correctly.
-      // This is NOT fabricating a date — it is converting the parsed
-      // postedOn string into the format the pipeline expects.
-      const postedAtIso = new Date(Date.now() - ageDays * 86_400_000).toISOString();
-
-      kept.push({
-        id:          `wmt-${reqId}`,
-        company:     "Walmart",
+      candidates.push({
+        reqId,
         title:       (j.title as string) ?? "",
         location:    (j.locationsText as string) ?? "United States",
-        description: "",
+        externalPath,
         applyUrl,
-        postedAt:    postedAtIso,
-        type:        "Full-time",
+        postedAtIso: new Date(Date.now() - ageDays * 86_400_000).toISOString(),
       });
     }
 
-    // Stop early if fewer than a full page returned (no more results)
     if (postings.length < WALMART_PAGE_SIZE) break;
   }
 
   console.log(
-    `[playwright:Walmart] fetched=${totalFetched} kept=${kept.length}` +
+    `[playwright:Walmart] phase1 totalFetched=${totalFetched} candidates=${candidates.length}` +
     ` discarded_age=${discardedAge} discarded_no_date=${discardedNoDate}` +
-    ` discarded_no_req_id=${discardedNoReqId} discarded_dupe=${discardedDupe}`
+    ` discarded_no_req=${discardedNoReqId} discarded_dupe=${discardedDupe}`
+  );
+
+  // Phase 2: batch-15 detail fetches + sponsorship filter
+  const kept: ScrapedJob[] = [];
+
+  for (let i = 0; i < candidates.length; i += WALMART_BATCH_SIZE) {
+    const batch   = candidates.slice(i, i + WALMART_BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (c): Promise<ScrapedJob | null> => {
+        const descHtml = await fetchWalmartDetail(c.externalPath);
+        if (!descHtml) { discardedNoDesc++; return null; }
+
+        const plainText = htmlToPlainText(descHtml);
+
+        if (hasNoSponsorshipLanguage(plainText)) {
+          discardedSponsorship++;
+          return null;
+        }
+
+        // Full plain-text JD in description — reused by Tailor & Apply and JD modal
+        return {
+          id:          `wmt-${c.reqId}`,
+          company:     "Walmart",
+          title:       c.title,
+          location:    c.location,
+          description: plainText,
+          applyUrl:    c.applyUrl,
+          postedAt:    c.postedAtIso,
+          type:        "Full-time",
+        };
+      })
+    );
+
+    for (const r of results) {
+      if (r) kept.push(r);
+    }
+  }
+
+  console.log(
+    `[playwright:Walmart] phase2 candidates=${candidates.length} kept=${kept.length}` +
+    ` discarded_sponsorship=${discardedSponsorship} discarded_no_desc=${discardedNoDesc}`
   );
   return kept;
 }

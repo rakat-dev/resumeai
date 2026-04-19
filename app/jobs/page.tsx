@@ -787,10 +787,23 @@ export default function JobsPage(){
 
   // ── Tailor ────────────────────────────────────────────────────────────────
   const handleTailor=async(job:Job)=>{
-    setSelected(job);setTailoring(true);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setTailorErr("");setImproveErr("");setJd(job.description);
+    // Use sessionStorage JD if it's from the same job (avoids re-fetch for Walmart/sources with full JD).
+    // JobCard writes activeTailorJD on click; this reads it back here.
+    let jdToUse = job.description || "";
+    try{
+      const storedId = sessionStorage.getItem("activeTailorJobId");
+      const storedJD = sessionStorage.getItem("activeTailorJD");
+      if(storedId===job.id && storedJD) jdToUse = storedJD;
+      // If switching to a different job, clear stale keys
+      if(storedId && storedId!==job.id){
+        sessionStorage.removeItem("activeTailorJobId");
+        sessionStorage.removeItem("activeTailorJD");
+      }
+    }catch{}
+    setSelected(job);setTailoring(true);setV1Resume("");setV2Resume("");setV1Ats(null);setV2Ats(null);setStep(0);setTailorErr("");setImproveErr("");setJd(jdToUse);
     try{
       const res=await fetch("/api/tailor",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({resume,jobDescription:job.description,jobTitle:job.title,company:job.company})});
+        body:JSON.stringify({resume,jobDescription:jdToUse,jobTitle:job.title,company:job.company})});
       const data=await res.json();
       if(!res.ok)throw new Error(data.error||"Tailoring failed");
       setV1Resume(data.tailored);setV1Ats(data.ats||null);setStep(1);
@@ -1157,6 +1170,51 @@ export default function JobsPage(){
   );
 }
 
+// ── JD Modal ──────────────────────────────────────────────────────────────────
+// Shows full job description fetched during pipeline (no network call).
+// sessionStorage keys: activeTailorJD, activeTailorJobId
+// Cleared only when user tailors a different job, or session ends.
+function JDModal({jobId,title,company,description,onClose}:{
+  jobId:string; title:string; company:string; description:string; onClose:()=>void;
+}){
+  const handleDownload=()=>{
+    const content=`${title}\n${company}\n${'='.repeat(60)}\n\n${description}`;
+    const blob=new Blob([content],{type:'text/plain'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=`${company}_${title.replace(/[^a-z0-9]/gi,'_').slice(0,40)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  return(
+    <div style={{position:'fixed',inset:0,zIndex:600,display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div onClick={onClose} style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.65)'}}/>
+      <div style={{position:'relative',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:20,width:'min(680px,95vw)',maxHeight:'85vh',display:'flex',flexDirection:'column',overflow:'hidden',zIndex:1}}>
+        <div style={{padding:'16px 20px 12px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+          <div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15}}>{title}</div>
+            <div style={{fontSize:12,color:'var(--accent2)',fontWeight:500}}>{company}</div>
+          </div>
+          <div style={{display:'flex',gap:6,flexShrink:0}}>
+            <button onClick={handleDownload}
+              style={{padding:'6px 12px',borderRadius:9,border:'1px solid var(--border)',background:'var(--surface2)',color:'var(--text)',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
+              Download .txt
+            </button>
+            <button onClick={onClose}
+              style={{padding:'6px 10px',borderRadius:9,border:'none',background:'none',color:'var(--muted)',cursor:'pointer',fontSize:16}}>
+              ✕
+            </button>
+          </div>
+        </div>
+        <div style={{overflowY:'auto',padding:'16px 20px',flex:1}}>
+          <pre style={{fontFamily:"'DM Sans',sans-serif",fontSize:12,color:'var(--text)',lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',margin:0}}>{description}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── JobCard extracted component ────────────────────────────────────────────
 function JobCard({job,selected,tailoring,onTailor,S}:{
   job:Job; selected:Job|null; tailoring:boolean;
@@ -1168,8 +1226,9 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const sourceType=(job as Job&{sourceType?:string}).sourceType;
   const bucket=(job as Job&{bucket?:string}).bucket;
   const [saved,setSaved]=useState(()=>isJobSaved(job.id));
-  const bucketBadge = bucket==="hot" ? {label:"🔥 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
-    : bucket==="strong" ? {label:"⭐ Strong",color:"#ff9500",bg:"rgba(255,149,0,0.1)"}
+  const [jdOpen,setJdOpen]=useState(false);
+  const bucketBadge = bucket==="hot" ? {label:"\ud83d\udd25 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
+    : bucket==="strong" ? {label:"\u2b50 Strong",color:"#ff9500",bg:"rgba(255,149,0,0.1)"}
     : null;
 
   const handleBookmark=(e:React.MouseEvent)=>{
@@ -1193,13 +1252,34 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
     }
   };
 
+  // Write JD + jobId to sessionStorage on Tailor & Apply click.
+  // Clears any stale previous-job JD first so stale data never leaks.
+  // Persists across tab switch and full page refresh; cleared only when
+  // user tailors a different job, or the browser session ends.
+  const handleTailorClick=()=>{
+    try{
+      sessionStorage.setItem("activeTailorJobId",job.id);
+      sessionStorage.setItem("activeTailorJD",job.description||"");
+    }catch{}
+    onTailor(job);
+  };
+
   return(
+    <>
+    {jdOpen&&job.description&&(
+      <JDModal
+        jobId={job.id}
+        title={job.title}
+        company={job.company}
+        description={job.description}
+        onClose={()=>setJdOpen(false)}
+      />
+    )}
     <div style={{...S.card,border:selected?.id===job.id?"1px solid var(--accent)":"1px solid var(--border)",background:selected?.id===job.id?"rgba(108,99,255,.06)":"var(--card)",transition:"all .2s",position:"relative"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
         <div style={{flex:1}}>
           <div style={{fontFamily:"'Syne',sans-serif",fontSize:15,fontWeight:700,marginBottom:1}}>
             {job.title}
-            {/* Requisition ID badge — shown for jobs that carry a req ID in their source id */}
             {(()=>{
               const reqId = job.id.startsWith('wmt-') ? job.id.replace('wmt-','') : null;
               if (!reqId) return null;
@@ -1216,34 +1296,38 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
             if (typeof rank === "number" && rank > 0) {
               return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,.1)",color:"var(--accent)",border:"1px solid rgba(108,99,255,.3)",whiteSpace:"nowrap",fontWeight:600}}>#{rank}</span>;
             }
-            return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>🕐 {job.postedDate}</span>;
+            return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>\ud83d\udd50 {job.postedDate}</span>;
           })()}
           {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
           <SourceBadge source={job.source} sourceType={sourceType}/>
         </div>
       </div>
       <div style={{display:"flex",gap:5,marginTop:8,flexWrap:"wrap"}}>
-        {job.location&&<span style={S.tag}>📍 {job.location}</span>}
-        {job.type&&<span style={S.tag}>💼 {job.type}</span>}
-        {job.salary&&<span style={S.tag}>💰 {job.salary}</span>}
-        {exp&&<span style={S.tag}>⏱ {exp}</span>}
-        {sponsorship==="mentioned"&&<span style={{...S.tag,color:"#00c864",borderColor:"rgba(0,200,100,0.3)",background:"rgba(0,200,100,0.08)"}}>✅ Visa mentioned</span>}
+        {job.location&&<span style={S.tag}>\ud83d\udccd {job.location}</span>}
+        {job.type&&<span style={S.tag}>\ud83d\udcbc {job.type}</span>}
+        {job.salary&&<span style={S.tag}>\ud83d\udcb0 {job.salary}</span>}
+        {exp&&<span style={S.tag}>\u23f1 {exp}</span>}
+        {sponsorship==="mentioned"&&<span style={{...S.tag,color:"#00c864",borderColor:"rgba(0,200,100,0.3)",background:"rgba(0,200,100,0.08)"}}>&#x2705; Visa mentioned</span>}
       </div>
-      {job.description&&<div style={{fontSize:11,color:"var(--muted)",marginTop:8,lineHeight:1.6}}>{job.description.slice(0,200)}…</div>}
+      {job.description&&<div style={{fontSize:11,color:"var(--muted)",marginTop:8,lineHeight:1.6}}>{job.description.slice(0,200)}\u2026</div>}
       <GapSkills skills={job.skills}/>
-      <div style={{display:"flex",gap:8,marginTop:10,alignItems:"center"}}>
-        <button onClick={()=>onTailor(job)} disabled={tailoring&&selected?.id===job.id}
+      <div style={{display:"flex",gap:8,marginTop:10,alignItems:"center",flexWrap:"wrap"}}>
+        <button onClick={handleTailorClick} disabled={tailoring&&selected?.id===job.id}
           style={{...S.btn("var(--accent)","#fff",true),opacity:tailoring&&selected?.id===job.id?0.5:1,cursor:tailoring&&selected?.id===job.id?"not-allowed":"pointer"}}>
-          {tailoring&&selected?.id===job.id?<><span className="spinner"/>Tailoring...</>:"✨ Tailor & Apply"}
+          {tailoring&&selected?.id===job.id?<><span className="spinner"/>Tailoring...</>:"\u2728 Tailor & Apply"}
         </button>
+        {job.description&&<button onClick={(e)=>{e.stopPropagation();setJdOpen(true);}}
+          style={{...S.btn("var(--surface2)","var(--accent)",true),border:"1px solid rgba(108,99,255,0.4)"}}>
+          \ud83d\udccb JD
+        </button>}
         {job.applyUrl&&job.applyUrl!=="#"&&<a href={job.applyUrl} target="_blank" rel="noopener noreferrer"
-          style={{...S.btn("var(--surface2)","var(--text)",true),border:"1px solid var(--border)",textDecoration:"none"}}>🔗 View</a>}
-        {/* Bookmark button */}
+          style={{...S.btn("var(--surface2)","var(--text)",true),border:"1px solid var(--border)",textDecoration:"none"}}>\ud83d\udd17 View</a>}
         <button onClick={handleBookmark}
           style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"7px 12px",borderRadius:10,border:saved?"1px solid rgba(0,229,176,0.4)":"1px solid var(--border)",background:saved?"rgba(0,229,176,0.1)":"var(--surface2)",color:saved?"var(--accent2)":"var(--muted)",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all .2s",fontFamily:"'DM Sans',sans-serif",whiteSpace:"nowrap"}}>
-          {saved?"✅ Saved":"🔖 Save"}
+          {saved?"\u2705 Saved":"\ud83d\udd16 Save"}
         </button>
       </div>
     </div>
+    </>
   );
 }
