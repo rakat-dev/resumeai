@@ -103,8 +103,46 @@ export function extractMissingSkills(description: string): string[] {
 }
 
 export function detectSponsorship(description: string): "mentioned" | "not_mentioned" {
-  const pos = ["visa sponsorship", "h-1b", "h1b", "work authorization", "will sponsor", "opt", "cpt"];
-  const neg = ["no sponsorship", "will not sponsor", "cannot sponsor", "sponsorship not available", "without sponsorship"];
+  // Negative patterns checked FIRST — explicit no-sponsorship language always wins.
+  // Uses word-boundary-aware phrases to avoid false positives.
+  const neg = [
+    "no sponsorship",
+    "will not sponsor",
+    "cannot sponsor",
+    "unable to sponsor",
+    "not able to sponsor",
+    "sponsorship not available",
+    "sponsorship is not available",
+    "without sponsorship",
+    "without current or future sponsorship",
+    "does not provide sponsorship",
+    "cannot provide sponsorship",
+    "no h-1b",
+    "not eligible for sponsorship",
+    "not eligible for employment sponsorship",
+    "not considering candidates who require sponsorship",
+    "must be authorized to work",        // boilerplate that means NO sponsorship
+    "must be legally authorized to work",
+    "authorization to work in the u",     // catches "...in the US/USA" variants
+  ];
+  // Positive patterns: explicit affirmations of visa sponsorship.
+  // Intentionally narrow — only phrases that unambiguously mean the company WILL sponsor.
+  // Removed: "opt", "cpt", "work authorization" — these appear in boilerplate
+  // that means the opposite ("must have work authorization", "opt not available").
+  const pos = [
+    "visa sponsorship",
+    "h-1b sponsorship",
+    "h1b sponsorship",
+    "will sponsor",
+    "we will sponsor",
+    "employer will sponsor",
+    "open to sponsoring",
+    "open to visa sponsorship",
+    "sponsorship available",
+    "sponsorship is available",
+    "sponsorship provided",
+    "sponsorship for work visa",
+  ];
   const dl = description.toLowerCase();
   if (neg.some(k => dl.includes(k))) return "not_mentioned";
   if (pos.some(k => dl.includes(k))) return "mentioned";
