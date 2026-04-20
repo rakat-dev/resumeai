@@ -309,8 +309,11 @@ export function isUSLocation(location: string): boolean {
   const trimmed = location.trim();
   const lc = trimmed.toLowerCase();
 
-  // 1. Pure remote / worldwide → allow
+  // 1. Pure remote / worldwide / multi-location → allow
+  // "2 Locations", "3 Locations" etc. is what Workday returns for multi-office jobs
+  // where the posting doesn't have a single city. Treat as US (Walmart uses this).
   if (lc === "remote" || lc === "anywhere" || lc === "worldwide" || lc === "multiple locations") return true;
+  if (/^\d+\s+locations?$/i.test(trimmed)) return true;
 
   // 2. Explicit US markers → allow
   if (/\bunited states\b/.test(lc)) return true;
