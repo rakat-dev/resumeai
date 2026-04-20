@@ -815,7 +815,7 @@ const TIER_A_COMPANIES: Array<{ name: string; source: RefreshSource; fetcher: ()
   // Walmart: direct Workday CXS backend, scoped to 4 Job Profile IDs.
   // Replaces Adzuna targeted fetch (2026-04-18) — direct source returns 265
   // jobs with real req IDs and careers.walmart.com apply links.
-  { name: "Walmart",        source: "playwright_microsoft", fetcher: fetchWalmartJobs      },
+  { name: "Walmart",        source: "walmart_cxs",          fetcher: fetchWalmartJobs      },
 ];
 
 async function fetchPlaywrightTierA(): Promise<{
@@ -909,16 +909,13 @@ export async function POST(req: NextRequest) {
         const capped              = applySourceCap(deduped, "playwright");
         const { stored, error: storeErr } = await storeJobs(capped);
         // Reconcile: deactivate old playwright rows not present in this run.
-        // Source tags for playwright jobs vary (playwright_microsoft etc.) but
-        // the Walmart scraper uses source="playwright_microsoft". To cleanly
-        // reconcile Walmart rows specifically, we deactivate by company name
-        // for Walmart since its IDs start with "wmt-" and source tag is shared.
         const livePlaywrightIds = capped.map(j => j.id);
-        await deactivateMissingJobsForSource("playwright_microsoft", livePlaywrightIds.filter(id => id.startsWith("wmt-") || id.startsWith("msft-") || id.startsWith("openai-")));
+        await deactivateMissingJobsForSource("playwright_microsoft", livePlaywrightIds.filter(id => id.startsWith("msft-") || id.startsWith("openai-")));
         await deactivateMissingJobsForSource("playwright_google",    livePlaywrightIds.filter(id => id.startsWith("goog-") || id.startsWith("gs-")));
         await deactivateMissingJobsForSource("playwright_apple",     livePlaywrightIds.filter(id => id.startsWith("aapl-") || id.startsWith("netflix-")));
         await deactivateMissingJobsForSource("playwright_amazon",    livePlaywrightIds.filter(id => id.startsWith("amzn-")));
         await deactivateMissingJobsForSource("playwright_jpmorgan",  livePlaywrightIds.filter(id => id.startsWith("jpm-")));
+        await deactivateMissingJobsForSource("walmart_cxs",          livePlaywrightIds.filter(id => id.startsWith("wmt-")));
         markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeErr);
         console.log(`[refresh:playwright] raw=${fetched} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} filtered=${filtered.length} deduped=${deduped.length} stored=${stored}`);
         results.playwright = { raw: fetched, kept: capped.length, stored, error: storeErr, companies: companyResults };

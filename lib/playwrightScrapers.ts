@@ -920,6 +920,10 @@ const WALMART_JOB_PROFILE_IDS = [
   "fba71304cea401287d93764c1f2df0c0",
 ];
 
+function buildWalmartCanonicalUrl(reqId: string): string {
+  return `https://careers.walmart.com/us/en/jobs/${reqId}`;
+}
+
 const WALMART_PAGE_SIZE       = 20;
 const WALMART_MAX_PAGES       = 20;
 const WALMART_BATCH_SIZE      = 15;
@@ -1066,13 +1070,7 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
       }
 
       const externalPath = (j.externalPath as string) ?? "";
-      const slug         = externalPath.split("/").filter(Boolean).pop() ?? "";
-      const applyUrl     = slug
-        ? `https://walmart.wd5.myworkdayjobs.com/en-US/WalmartExternal/details/${slug}`
-        : reqId
-          ? `https://careers.walmart.com/us/en/jobs/${reqId}`
-          : null;
-      if (!applyUrl) continue;
+      const applyUrl     = buildWalmartCanonicalUrl(reqId);
 
       candidates.push({
         reqId,

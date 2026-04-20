@@ -26,7 +26,8 @@ export type RefreshSource =
   | "playwright_apple"
   | "playwright_meta"
   | "playwright_amazon"
-  | "playwright_jpmorgan";
+  | "playwright_jpmorgan"
+  | "walmart_cxs";
 
 export interface RefreshState {
   company:         string;
