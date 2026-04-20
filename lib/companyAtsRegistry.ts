@@ -203,7 +203,7 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Apple",          ats: "custom", careersUrl: "https://jobs.apple.com/api/role/search",                adapter: "playwright_apple",     enabled: true },
   { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: false,
     note: "Disabled 2026-04-17 — Meta added per-request anti-replay tokens to its GraphQL endpoint, breaking server-side replay (returns HTTP 400 / noncoercible_variable_value). Replaced by the meta sitemap+JSON-LD adapter (above, adapter:'meta')." },
-  { company: "Amazon",         ats: "custom", careersUrl: "https://www.amazon.jobs/en/search.json",               adapter: "playwright_amazon",    enabled: true },
+  { company: "Amazon",         ats: "custom", careersUrl: "https://www.amazon.jobs/en/search.json",               adapter: "amazon_jobs",    enabled: true },
 ];
 
 // ── Lookup helpers ─────────────────────────────────────────────────────────
