@@ -51,6 +51,7 @@ interface NormalizedJob {
   fetched_at:          string;
   is_active:           boolean;
   position_rank:       number | null;   // 1..120 for no-date Tier A scrapers; NULL otherwise
+  full_description:    string | null;   // full cleaned JD (no truncation)
 }
 
 // ── Title filter ──────────────────────────────────────────────────────────
@@ -117,7 +118,10 @@ function normalizeJobs(raw: RawJob[]): NormalizedJob[] {
       country:             "US",
       employment_type:     r.type || "Full-time",
       posted_at:           parsePostedAt(r.postedAt),
-      description:         cleanJD.slice(0, 1200),
+      // description = short preview for card display only (220 chars)
+      // full_description = complete JD used by Tailor & Apply + JD modal
+      description:         cleanJD.slice(0, 220),
+      full_description:    cleanJD,
       apply_url:           r.applyUrl,
       title_family:        null,
       sponsorship_status:  sponsorStatus === "supported" ? "mentioned" : "not_mentioned",

@@ -938,6 +938,28 @@ function parseWalmartPostedOn(raw: string | null | undefined): number | null {
   return null;
 }
 
+/** Remove the "Similar Jobs" / "Related Jobs" section and everything after it.
+ *  Walmart/Workday detail pages append recommended jobs at the bottom;
+ *  stripping them keeps the stored JD clean and focused on the actual position.
+ */
+function trimAtSimilarJobs(text: string): string {
+  const markers = [
+    "similar jobs",
+    "similar job",
+    "related jobs",
+    "jobs you may like",
+    "recommended jobs",
+    "you might also like",
+  ];
+  const lower = text.toLowerCase();
+  let cut = lower.length;
+  for (const marker of markers) {
+    const idx = lower.indexOf(marker);
+    if (idx !== -1 && idx < cut) cut = idx;
+  }
+  return text.slice(0, cut).trim();
+}
+
 function htmlToPlainText(html: string): string {
   return html
     .replace(/<[^>]+>/g, " ")
@@ -1081,14 +1103,18 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         const descHtml = await fetchWalmartDetail(c.externalPath);
         if (!descHtml) { discardedNoDesc++; return null; }
 
-        const plainText = htmlToPlainText(descHtml);
+        // Convert HTML -> plain text, then strip "Similar Jobs" section at end
+        const plainText = trimAtSimilarJobs(htmlToPlainText(descHtml));
 
         if (hasNoSponsorshipLanguage(plainText)) {
           discardedSponsorship++;
           return null;
         }
 
-        // Full plain-text JD in description — reused by Tailor & Apply and JD modal
+        // Store the full trimmed JD in description.
+        // normalizeJobs() in refresh/route.ts will:
+        //   set description      = plainText.slice(0, 220)  [card preview]
+        //   set full_description = plainText                [JD modal + Tailor]
         return {
           id:          `wmt-${c.reqId}`,
           company:     "Walmart",

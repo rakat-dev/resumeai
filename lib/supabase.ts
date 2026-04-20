@@ -36,4 +36,5 @@ export interface JobRow {
   fetched_at:          string;
   is_active:           boolean;
   position_rank:       number | null;   // 1..120 for no-date Tier A scrapers (Google etc.); NULL otherwise
+  full_description:    string | null;   // full cleaned JD body (no truncation); NULL for sources without JD
 }

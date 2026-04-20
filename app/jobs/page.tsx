@@ -789,7 +789,8 @@ export default function JobsPage(){
   const handleTailor=async(job:Job)=>{
     // Use sessionStorage JD if it's from the same job (avoids re-fetch for Walmart/sources with full JD).
     // JobCard writes activeTailorJD on click; this reads it back here.
-    let jdToUse = job.description || "";
+    // Prefer fullDescription (full JD body) over description (220-char preview)
+    let jdToUse = (job as Job & {fullDescription?: string}).fullDescription || job.description || "";
     try{
       const storedId = sessionStorage.getItem("activeTailorJobId");
       const storedJD = sessionStorage.getItem("activeTailorJD");
@@ -1259,19 +1260,21 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const handleTailorClick=()=>{
     try{
       sessionStorage.setItem("activeTailorJobId",job.id);
-      sessionStorage.setItem("activeTailorJD",job.description||"");
+      // Write fullDescription (full JD body) to sessionStorage — falls back to description preview
+      const fullJD=(job as Job & {fullDescription?: string}).fullDescription || job.description || "";
+      sessionStorage.setItem("activeTailorJD",fullJD);
     }catch{}
     onTailor(job);
   };
 
   return(
     <>
-    {jdOpen&&job.description&&(
+    {jdOpen&&(
       <JDModal
         jobId={job.id}
         title={job.title}
         company={job.company}
-        description={job.description}
+        description={(job as Job & {fullDescription?: string}).fullDescription || job.description || ""}
         onClose={()=>setJdOpen(false)}
       />
     )}
@@ -1316,7 +1319,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           style={{...S.btn("var(--accent)","#fff",true),opacity:tailoring&&selected?.id===job.id?0.5:1,cursor:tailoring&&selected?.id===job.id?"not-allowed":"pointer"}}>
           {tailoring&&selected?.id===job.id?<><span className="spinner"/>Tailoring...</>:"\u2728 Tailor & Apply"}
         </button>
-        {job.description&&<button onClick={(e)=>{e.stopPropagation();setJdOpen(true);}}
+        {((job as Job & {fullDescription?: string}).fullDescription || job.description)&&<button onClick={(e)=>{e.stopPropagation();setJdOpen(true);}}
           style={{...S.btn("var(--surface2)","var(--accent)",true),border:"1px solid rgba(108,99,255,0.4)"}}>
           \ud83d\udccb JD
         </button>}

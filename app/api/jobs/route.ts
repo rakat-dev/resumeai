@@ -37,6 +37,7 @@ export interface Job {
   relevanceScore?: number;
   bucket?: QualityBucket;
   positionRank?: number;   // 1..120 for jobs from no-date Tier A scrapers (Google etc.)
+  fullDescription?: string; // full JD body — populated when available (Walmart etc.)
 }
 
 export interface SourceStatus {
@@ -82,6 +83,7 @@ function rowToJob(row: JobRow): Job {
     priorityTier:    getPriorityTier(row.company),
     fortuneRank:     getFortuneTier(row.company),
     positionRank:    row.position_rank ?? undefined,
+    fullDescription: row.full_description ?? undefined,
   };
 }
 
