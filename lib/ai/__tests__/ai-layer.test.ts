@@ -118,6 +118,7 @@ describe("AI layer", () => {
 
   // 8. enrichBatch with 5 jobs and maxJobs=2 skips 3 due to budget cap
   it("8. enrichBatch with 5 jobs and maxJobs=2 — stats.skipped === 3", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test-key-for-budget-cap-test");
     vi.stubEnv("AI_ENABLED", "true");
     vi.stubEnv("AI_ENRICHMENT_ENABLED", "true");
     const jobs = Array.from({ length: 5 }, (_, i) => ({

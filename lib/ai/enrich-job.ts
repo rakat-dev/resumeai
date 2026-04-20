@@ -6,7 +6,11 @@ import { scoreJobFit } from "./score-job";
 import type { EnrichedJob, AiEnrichment, AiMeta, JobNormalization } from "./types";
 
 export function isAiEnabled(): boolean {
-  return process.env.AI_ENABLED !== "false" && process.env.AI_ENRICHMENT_ENABLED !== "false";
+  return (
+    !!process.env.OPENAI_API_KEY &&
+    process.env.AI_ENABLED !== "false" &&
+    process.env.AI_ENRICHMENT_ENABLED !== "false"
+  );
 }
 
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
