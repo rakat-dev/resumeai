@@ -60,7 +60,7 @@ export interface SourceDiagnostic {
 function rowToJob(row: JobRow): Job {
   const ts = row.posted_at ? Math.floor(new Date(row.posted_at).getTime() / 1000) : 0;
   const rawSource = row.source as string;
-  const sourceType: Job["sourceType"] = rawSource.startsWith("playwright")
+  const sourceType: Job["sourceType"] = rawSource.startsWith("playwright") || rawSource === "walmart_cxs"
     ? "playwright"
     : (rawSource as Job["sourceType"]) ?? "other";
 
