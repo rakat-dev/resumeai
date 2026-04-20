@@ -652,6 +652,17 @@ function buildAmazonCanonicalUrl(jobId: string): string {
   return `https://www.amazon.jobs/en/jobs/${jobId}`;
 }
 
+function cleanAmazonJD(rawText: string): string {
+  const text = rawText
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&#?\w+;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return trimAtSimilarJobs(text);
+}
+
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
@@ -845,7 +856,8 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     await new Promise(r => setTimeout(r, 150));
     const jd = await fetchAmazonDetail(c.raw.id_icims!);
     if (!jd) { noDescDrop++; continue; }
-    out.push(toScrapedJob(c.raw, c.postedAtISO, jd));
+    const fullDesc = cleanAmazonJD(jd);
+    out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
   }
 
   console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} candidates=${candidates.length} no_desc=${noDescDrop} kept=${out.length} stop=${stopReason}`);
