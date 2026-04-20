@@ -663,6 +663,28 @@ function cleanAmazonJD(rawText: string): string {
   return trimAtSimilarJobs(text);
 }
 
+function classifyAmazonSponsorship(cleanedJD: string): "not_supported" | "supported" | "unknown" {
+  const text = cleanedJD.toLowerCase();
+  const noSponsorPhrases = [
+    "will not sponsor", "unable to sponsor", "cannot sponsor", "does not sponsor",
+    "not able to sponsor", "sponsorship is not available", "sponsorship not available",
+    "no sponsorship", "not provide sponsorship", "not offer sponsorship",
+    "not support visa", "will not provide immigration", "not provide immigration",
+  ];
+  for (const phrase of noSponsorPhrases) {
+    if (text.includes(phrase)) return "not_supported";
+  }
+  const yesSponsorPhrases = [
+    "will sponsor", "able to sponsor", "visa sponsorship available",
+    "sponsorship available", "sponsorship provided", "we sponsor",
+    "offers sponsorship", "provide sponsorship", "immigration assistance",
+  ];
+  for (const phrase of yesSponsorPhrases) {
+    if (text.includes(phrase)) return "supported";
+  }
+  return "unknown";
+}
+
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
@@ -849,18 +871,19 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     }
   }
 
-  // Phase 2: fetch full JD for each candidate; reject if no valid JD (>=500 chars)
+  // Phase 2: fetch full JD, clean, sponsorship-filter; reject if no valid JD (>=500 chars)
   const out: ScrapedJob[] = [];
-  let noDescDrop = 0;
+  let noDescDrop = 0, sponsorDrop = 0;
   for (const c of candidates) {
     await new Promise(r => setTimeout(r, 150));
     const jd = await fetchAmazonDetail(c.raw.id_icims!);
     if (!jd) { noDescDrop++; continue; }
     const fullDesc = cleanAmazonJD(jd);
+    if (classifyAmazonSponsorship(fullDesc) === "not_supported") { sponsorDrop++; continue; }
     out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
   }
 
-  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} candidates=${candidates.length} no_desc=${noDescDrop} kept=${out.length} stop=${stopReason}`);
+  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} candidates=${candidates.length} no_desc=${noDescDrop} no_sponsor=${sponsorDrop} kept=${out.length} stop=${stopReason}`);
   return out;
 }
 
