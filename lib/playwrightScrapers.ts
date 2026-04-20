@@ -655,6 +655,9 @@ function buildAmazonCanonicalUrl(jobId: string): string {
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
+  const AMAZON_MAX_AGE_DAYS = 10;
+  const MAX_CANDIDATES = 500;
+  const now = Date.now();
 
   type AmznJob = {
     id_icims?:            string;
@@ -694,7 +697,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     return (data.jobs ?? []) as AmznJob[];
   };
 
-  const toScrapedJob = (j: AmznJob): ScrapedJob => {
+  const toScrapedJob = (j: AmznJob, postedAtISO: string): ScrapedJob => {
     const jobId = j.id_icims ?? String(Math.random());
     return {
       id:          `amzn-${jobId}`,
@@ -703,7 +706,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       location:    j.normalized_location ?? j.city ?? "United States",
       description: j.description ?? j.description_short ?? "",
       applyUrl:    buildAmazonCanonicalUrl(jobId),
-      postedAt:    j.posted_date ?? null,
+      postedAt:    postedAtISO,
       type:        "Full-time",
     };
   };
@@ -722,33 +725,17 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     "cloud engineer",
     "application engineer",
   ];
-  const seen    = new Set<string>();
+  const seen = new Set<string>();
   const out: ScrapedJob[] = [];
-  const keptTimestamps: Array<number | null> = [];
-
-  let currentCap     = FULL_WORKFLOW_MAX_JOBS_PER_COMPANY;
-  let currentHorizon = EARLY_HORIZON_DAYS_FULL;
-  let extensionMode  = false;
-
-  function shouldEnterExtension(): boolean {
-    if (extensionMode || out.length < FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) return false;
-    let oldest: number | null = null;
-    for (const t of keptTimestamps) {
-      if (t === null) continue;
-      if (oldest === null || t < oldest) oldest = t;
-    }
-    if (oldest === null) return false;
-    return (Date.now() - oldest) / 86_400_000 < FULL_WORKFLOW_EXTENSION_FRESHNESS_DAYS;
-  }
 
   let pagesFetched = 0, rawJobs = 0;
-  let invalidIdDrop = 0, titleDrop = 0, locDrop = 0, dateDrop = 0, dedupeDrop = 0, fullTimeDrop = 0;
+  let invalidIdDrop = 0, titleDrop = 0, locDrop = 0, noDateDrop = 0, oldDateDrop = 0, dedupeDrop = 0, fullTimeDrop = 0;
   let stopReason = "page_limit";
 
   queryLoop: for (const query of AMAZON_QUERIES) {
     for (let page = 0; page < MAX_PAGES; page++) {
-      if (out.length >= currentCap) {
-        stopReason = extensionMode ? "ext_cap_reached" : "cap_reached";
+      if (out.length >= MAX_CANDIDATES) {
+        stopReason = "cap_reached";
         break queryLoop;
       }
       let rawPage: AmznJob[];
@@ -761,49 +748,35 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       pagesFetched++;
       rawJobs += rawPage.length;
 
-      let oldestOnPageTs: number | null = null;
       for (const raw of rawPage) {
-        if (out.length >= currentCap) break;
+        if (out.length >= MAX_CANDIDATES) break;
         // Filter 1: valid job ID
         if (!raw.id_icims) { invalidIdDrop++; continue; }
         // Filter 2: dedupe
         if (seen.has(raw.id_icims)) { dedupeDrop++; continue; }
         seen.add(raw.id_icims);
-        const j = toScrapedJob(raw);
         // Filter 3: title
-        if (!shouldIncludeTitle(j.title)) { titleDrop++; continue; }
+        if (!shouldIncludeTitle(raw.title ?? "")) { titleDrop++; continue; }
         // Filter 4: US location
-        if (!isUSLocation(j.location))    { locDrop++;   continue; }
+        const loc = raw.normalized_location ?? raw.city ?? "United States";
+        if (!isUSLocation(loc)) { locDrop++; continue; }
         // Filter 5: full time
         const empType = (raw.job_schedule_type ?? raw.employment_type ?? "").toLowerCase();
         if (empType && !empType.includes("full")) { fullTimeDrop++; continue; }
-        if (!isWithinEarlyHorizon(j.postedAt, currentHorizon)) {
-          dateDrop++;
-          const t = j.postedAt ? new Date(j.postedAt).getTime() : 0;
-          if (t && (oldestOnPageTs === null || t < oldestOnPageTs)) oldestOnPageTs = t;
-          if (extensionMode) { stopReason = "ext_date_threshold"; break queryLoop; }
-          continue;
-        }
-        out.push(j);
-        keptTimestamps.push(j.postedAt ? new Date(j.postedAt).getTime() : null);
-        if (!extensionMode && shouldEnterExtension()) {
-          extensionMode  = true;
-          currentCap     = FULL_WORKFLOW_EXTENSION_CAP;
-          currentHorizon = FULL_WORKFLOW_EXTENSION_HORIZON_DAYS;
-        }
-      }
+        // Filter 6: date — reject missing/invalid or older than AMAZON_MAX_AGE_DAYS
+        const postedDateRaw = raw.posted_date ?? "";
+        const postedDate = postedDateRaw ? new Date(postedDateRaw) : null;
+        if (!postedDate || isNaN(postedDate.getTime())) { noDateDrop++; continue; }
+        const ageDays = Math.floor((now - postedDate.getTime()) / 86400000);
+        if (ageDays > AMAZON_MAX_AGE_DAYS) { oldDateDrop++; continue; }
 
-      if (!extensionMode && oldestOnPageTs !== null) {
-        const ageDays = (Date.now() - oldestOnPageTs) / 86_400_000;
-        if (ageDays > currentHorizon && dateDrop >= rawPage.length / 2) {
-          stopReason = "date_threshold"; break;
-        }
+        out.push(toScrapedJob(raw, postedDate.toISOString()));
       }
       if (rawPage.length < PAGE_SIZE) { stopReason = "no_results"; break; }
     }
   }
 
-  console.log(`[amazon_jobs] queries=${AMAZON_QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} invalid_id_drop=${invalidIdDrop} dup_drop=${dedupeDrop} title_drop=${titleDrop} loc_drop=${locDrop} full_time_drop=${fullTimeDrop} date_drop=${dateDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
+  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} kept=${out.length} stop=${stopReason}`);
   return out;
 }
 
