@@ -483,6 +483,13 @@ export const EXCLUDE_SUBSTRINGS = [
   "sales representative", "account executive", "account manager",
   "data center technician", "field technician", "field service",
   "customer service", "customer support",
+  // AI / ML specializations (not target roles for Rahul)
+  "ai engineer", "artificial intelligence engineer",
+  "ai developer", "artificial intelligence developer",
+  "generative ai", "genai", "llm", "large language model",
+  "prompt engineer", "ai scientist", "applied scientist",
+  "deep learning", "foundation model", "language model",
+  "computer vision", "nlp engineer", "nlp scientist",
 ];
 
 // Whole-word excludes (regex \b...\b)

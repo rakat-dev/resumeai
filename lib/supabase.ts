@@ -4,9 +4,12 @@ import { createClient } from "@supabase/supabase-js";
 // anon client  — safe for read queries from API routes
 // service client — used for writes (refresh/ingestion only, server-side)
 
-const url    = process.env.SUPABASE_URL ?? "";
-const anon   = process.env.SUPABASE_ANON_KEY ?? "";
-const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? anon;
+// Fallback URLs prevent createClient from throwing during Next.js build-time
+// module evaluation (e.g. Vercel preview deployments without env vars set).
+// Actual requests will fail at runtime if env vars are genuinely missing.
+const url    = process.env.SUPABASE_URL    || "https://placeholder.supabase.co";
+const anon   = process.env.SUPABASE_ANON_KEY || "placeholder-anon-key";
+const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY || anon;
 
 // Read client (used in /api/jobs GET)
 export const supabase = createClient(url, anon, {
