@@ -643,7 +643,7 @@ export async function fetchMetaJobs(): Promise<ScrapedJob[]> {
 
 // ── Amazon v2 ─────────────────────────────────────────────────────────────
 // Standalone pipeline — does NOT use runFullWorkflow.
-// Queries: "software engineer" + "full stack developer"
+// Queries: 12 broad candidate queries (see AMAZON_QUERIES below)
 // Native filters: loc_query=United States, sort=recent
 // Pagination: up to 15 pages × 10 results per page
 // Early filters + 25-day horizon applied in-loop (same logic as runFullWorkflow).
@@ -702,7 +702,20 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     };
   };
 
-  const QUERIES = ["software engineer", "full stack developer"];
+  const AMAZON_QUERIES = [
+    "software engineer",
+    "software development engineer",
+    "software developer",
+    "backend engineer",
+    "frontend engineer",
+    "full stack engineer",
+    "full stack developer",
+    "platform engineer",
+    "devops engineer",
+    "site reliability engineer",
+    "cloud engineer",
+    "application engineer",
+  ];
   const seen    = new Set<string>();
   const out: ScrapedJob[] = [];
   const keptTimestamps: Array<number | null> = [];
@@ -726,7 +739,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   let titleDrop = 0, locDrop = 0, dateDrop = 0, dedupeDrop = 0;
   let stopReason = "page_limit";
 
-  queryLoop: for (const query of QUERIES) {
+  queryLoop: for (const query of AMAZON_QUERIES) {
     for (let page = 0; page < MAX_PAGES; page++) {
       if (out.length >= currentCap) {
         stopReason = extensionMode ? "ext_cap_reached" : "cap_reached";
@@ -776,7 +789,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     }
   }
 
-  console.log(`[amazon_jobs] queries=${QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} title_drop=${titleDrop} loc_drop=${locDrop} date_drop=${dateDrop} dup_drop=${dedupeDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
+  console.log(`[amazon_jobs] queries=${AMAZON_QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} title_drop=${titleDrop} loc_drop=${locDrop} date_drop=${dateDrop} dup_drop=${dedupeDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
   return out;
 }
 
