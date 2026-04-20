@@ -648,6 +648,10 @@ export async function fetchMetaJobs(): Promise<ScrapedJob[]> {
 // Pagination: up to 15 pages × 10 results per page
 // Early filters + 25-day horizon applied in-loop (same logic as runFullWorkflow).
 // Extension mode: if 80-job cap hit with oldest < 14 days, extends to 120 / 20d.
+function buildAmazonCanonicalUrl(jobId: string): string {
+  return `https://www.amazon.jobs/en/jobs/${jobId}`;
+}
+
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
@@ -698,7 +702,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       title:       j.title ?? "",
       location:    j.normalized_location ?? j.city ?? "United States",
       description: j.description ?? j.description_short ?? "",
-      applyUrl:    `https://www.amazon.jobs/en/jobs/${jobId}`,
+      applyUrl:    buildAmazonCanonicalUrl(jobId),
       postedAt:    j.posted_date ?? null,
       type:        "Full-time",
     };
