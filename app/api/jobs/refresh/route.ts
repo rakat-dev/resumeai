@@ -276,6 +276,10 @@ async function ingestSource(
     }
     const capped              = applySourceCap(deduped, source);
     const { stored, error: storeErr } = await storeJobs(capped);
+    // Deactivate previously active rows for this source not in the current live set.
+    // Runs after storeJobs so upserted survivors are already marked is_active=true.
+    const liveIds = capped.map(j => j.id);
+    await deactivateMissingJobsForSource(source, liveIds);
     markDone(label, source, startedAt, fetched, capped.length, storeErr);
     console.log(`[refresh:${label}] horizonDays=${horizonDays} raw=${fetched} norm=${normalized.length} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} type_drop=${stats.type_removed} clearance_drop=${stats.clearance_removed} horizon_drop=${stats.horizon_removed} filtered=${filtered.length} deduped=${deduped.length} capped=${capped.length} stored=${stored}`);
     return { raw: fetched, kept: capped.length, stored, error: storeErr, filterStats: stats };
@@ -293,6 +297,41 @@ async function deactivateStaleJobs(): Promise<void> {
     .update({ is_active: false })
     .lt("posted_at", cutoff).eq("is_active", true);
   if (error) console.error("[refresh] deactivateStale:", error.message);
+}
+
+// ── Source reconciliation ──────────────────────────────────────────────────
+// After storing survivors for a source, deactivate any previously active rows
+// from that source that are NOT in the current live set.
+// This ensures jobs filtered out by sponsorship logic (or any other reason)
+// in this run are immediately hidden — not kept alive until age cutoff.
+// Edge case: if liveIds is empty (all filtered), deactivate ALL rows for source.
+async function deactivateMissingJobsForSource(source: string, liveIds: string[]): Promise<void> {
+  try {
+    if (liveIds.length === 0) {
+      // Everything was filtered — deactivate all active rows for this source
+      const { error } = await supabaseAdmin
+        .from("jobs")
+        .update({ is_active: false })
+        .eq("source", source)
+        .eq("is_active", true);
+      if (error) console.error(`[deactivateMissing:${source}] all-deactivate failed:`, error.message);
+      else console.log(`[deactivateMissing:${source}] all rows deactivated (empty live set)`);
+      return;
+    }
+    // Deactivate active rows for this source whose ID is NOT in the live set.
+    // Supabase .not("id", "in", ...) requires a Postgres array literal string.
+    const idList = liveIds.map(id => `"${id}"`).join(",");
+    const { error } = await supabaseAdmin
+      .from("jobs")
+      .update({ is_active: false })
+      .eq("source", source)
+      .eq("is_active", true)
+      .not("id", "in", `(${idList})`);
+    if (error) console.error(`[deactivateMissing:${source}] failed:`, error.message);
+    else console.log(`[deactivateMissing:${source}] reconciliation complete, live=${liveIds.length}`);
+  } catch (e: unknown) {
+    console.error(`[deactivateMissing:${source}] exception:`, e instanceof Error ? e.message : String(e));
+  }
 }
 
 // ── 1a. Greenhouse ─────────────────────────────────────────────────────────
@@ -865,6 +904,17 @@ export async function POST(req: NextRequest) {
         const deduped             = dedupeJobs(filtered);
         const capped              = applySourceCap(deduped, "playwright");
         const { stored, error: storeErr } = await storeJobs(capped);
+        // Reconcile: deactivate old playwright rows not present in this run.
+        // Source tags for playwright jobs vary (playwright_microsoft etc.) but
+        // the Walmart scraper uses source="playwright_microsoft". To cleanly
+        // reconcile Walmart rows specifically, we deactivate by company name
+        // for Walmart since its IDs start with "wmt-" and source tag is shared.
+        const livePlaywrightIds = capped.map(j => j.id);
+        await deactivateMissingJobsForSource("playwright_microsoft", livePlaywrightIds.filter(id => id.startsWith("wmt-") || id.startsWith("msft-") || id.startsWith("openai-")));
+        await deactivateMissingJobsForSource("playwright_google",    livePlaywrightIds.filter(id => id.startsWith("goog-") || id.startsWith("gs-")));
+        await deactivateMissingJobsForSource("playwright_apple",     livePlaywrightIds.filter(id => id.startsWith("aapl-") || id.startsWith("netflix-")));
+        await deactivateMissingJobsForSource("playwright_amazon",    livePlaywrightIds.filter(id => id.startsWith("amzn-")));
+        await deactivateMissingJobsForSource("playwright_jpmorgan",  livePlaywrightIds.filter(id => id.startsWith("jpm-")));
         markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeErr);
         console.log(`[refresh:playwright] raw=${fetched} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} filtered=${filtered.length} deduped=${deduped.length} stored=${stored}`);
         results.playwright = { raw: fetched, kept: capped.length, stored, error: storeErr, companies: companyResults };

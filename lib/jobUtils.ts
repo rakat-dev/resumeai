@@ -131,13 +131,27 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
 }
 
 // Explicit no-sponsorship — any match = drop / not_supported
+// Extended 2026-04-19: added Walmart/Workday wording variants
 export const NO_SPONSORSHIP_PATTERNS: RegExp[] = [
   /\bimmigration sponsorship (?:support )?(?:will )?not be available\b/i,
+  /\bimmigration sponsorship (?:support )?is not available\b/i,
+  /\bimmigration sponsorship (?:support )?is not provided\b/i,
+  /\bimmigration sponsorship (?:support )?will not be provided\b/i,
+  /\bno immigration sponsorship support\b/i,
+  /\bimmigration support is not provided\b/i,
   /\bvisa sponsorship (?:is )?not available\b/i,
+  /\bvisa sponsorship (?:support )?is not provided\b/i,
+  /\bvisa sponsorship (?:support )?will not be provided\b/i,
+  /\bemployment-based visa sponsorship is not available\b/i,
+  /\bemployment-based visa sponsorship will not be provided\b/i,
   /\bno visa sponsorship\b/i,
   /\bno sponsorship\b/i,
   /\bnot eligible for (?:employment|visa|immigration) sponsorship\b/i,
   /\bthis position is not eligible for (?:employment|visa|immigration) sponsorship\b/i,
+  /\bthis (?:role|position) does not offer sponsorship\b/i,
+  /\bthis (?:role|position) does not support sponsorship\b/i,
+  /\bthis (?:role|position) will not provide sponsorship\b/i,
+  /\bthis (?:role|position) is ineligible for sponsorship\b/i,
   /\bwill not sponsor\b/i,
   /\bwe will not sponsor\b/i,
   /\bdoes not provide sponsorship\b/i,
