@@ -1119,13 +1119,36 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
   const candidates: WalmartCandidate[] = [];
   const seenReqIds = new Set<string>();
 
-  let totalFetched         = 0;
-  let discardedAge         = 0;
-  let discardedNoDate      = 0;
-  let discardedNoReqId     = 0;
-  let discardedDupe        = 0;
-  let discardedSponsorship = 0;
-  let discardedNoDesc      = 0;
+  const walmartDiag = {
+    totalFetched:         0,
+    discarded_no_reqid:   0,
+    discarded_duplicate:  0,
+    discarded_title:      0,
+    discarded_non_us:     0,
+    discarded_no_date:    0,
+    discarded_old_date:   0,
+    discarded_no_desc:    0,
+    discarded_sponsorship: 0,
+    discarded_clearance:  0,
+    kept:                 0,
+  };
+
+  const walmartRejectedSamples: Array<{
+    reqId:        string;
+    title:        string;
+    location:     string;
+    postedOnRaw:  string;
+    externalPath: string;
+    reason:       string;
+  }> = [];
+
+  function addRejectedSample(
+    sample: typeof walmartRejectedSamples[0]
+  ) {
+    if (walmartRejectedSamples.length < 50) {
+      walmartRejectedSamples.push(sample);
+    }
+  }
 
   for (let page = 0; page < WALMART_MAX_PAGES; page++) {
     let data: Record<string, unknown>;
@@ -1158,22 +1181,32 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
 
     const postings = (data.jobPostings ?? []) as Record<string, unknown>[];
     if (postings.length === 0) break;
-    totalFetched += postings.length;
+    walmartDiag.totalFetched += postings.length;
 
     for (const j of postings) {
       const bullets = (j.bulletFields ?? []) as string[];
       const reqId   = bullets[0] ?? "";
-      if (!reqId || !reqId.startsWith("R-")) { discardedNoReqId++; continue; }
-      if (seenReqIds.has(reqId)) { discardedDupe++; continue; }
+      if (!reqId || !reqId.startsWith("R-")) {
+        walmartDiag.discarded_no_reqid++;
+        addRejectedSample({ reqId, title: (j.title as string) ?? "", location: (j.locationsText as string) ?? "", postedOnRaw: (j.postedOn as string) ?? "", externalPath: (j.externalPath as string) ?? "", reason: "invalid_reqid" });
+        continue;
+      }
+      if (seenReqIds.has(reqId)) {
+        walmartDiag.discarded_duplicate++;
+        addRejectedSample({ reqId, title: (j.title as string) ?? "", location: (j.locationsText as string) ?? "", postedOnRaw: (j.postedOn as string) ?? "", externalPath: (j.externalPath as string) ?? "", reason: "duplicate" });
+        continue;
+      }
       seenReqIds.add(reqId);
 
       const dateResult = resolveWalmartPostedDate(j);
       if (dateResult.postedAtIso === null || dateResult.ageDays === null) {
-        discardedNoDate++;
+        walmartDiag.discarded_no_date++;
+        addRejectedSample({ reqId, title: (j.title as string) ?? "", location: (j.locationsText as string) ?? "", postedOnRaw: (j.postedOn as string) ?? "", externalPath: (j.externalPath as string) ?? "", reason: "date_missing" });
         continue;
       }
       if (dateResult.ageDays > WALMART_MAX_AGE_DAYS) {
-        discardedAge++;
+        walmartDiag.discarded_old_date++;
+        addRejectedSample({ reqId, title: (j.title as string) ?? "", location: (j.locationsText as string) ?? "", postedOnRaw: (j.postedOn as string) ?? "", externalPath: (j.externalPath as string) ?? "", reason: "date_older_than_10_days" });
         continue;
       }
 
@@ -1194,9 +1227,9 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
   }
 
   console.log(
-    `[playwright:Walmart] phase1 totalFetched=${totalFetched} candidates=${candidates.length}` +
-    ` discarded_age=${discardedAge} discarded_no_date=${discardedNoDate}` +
-    ` discarded_no_req=${discardedNoReqId} discarded_dupe=${discardedDupe}`
+    `[playwright:Walmart] phase1 totalFetched=${walmartDiag.totalFetched} candidates=${candidates.length}` +
+    ` discarded_age=${walmartDiag.discarded_old_date} discarded_no_date=${walmartDiag.discarded_no_date}` +
+    ` discarded_no_req=${walmartDiag.discarded_no_reqid} discarded_dupe=${walmartDiag.discarded_duplicate}`
   );
 
   // Phase 2: batch-15 detail fetches + sponsorship filter
@@ -1207,13 +1240,18 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
     const results = await Promise.all(
       batch.map(async (c): Promise<ScrapedJob | null> => {
         const descHtml = await fetchWalmartDetail(c.externalPath);
-        if (!descHtml) { discardedNoDesc++; return null; }
+        if (!descHtml) {
+          walmartDiag.discarded_no_desc++;
+          addRejectedSample({ reqId: c.reqId, title: c.title, location: c.location, postedOnRaw: c.postedAtIso, externalPath: c.externalPath, reason: "no_description" });
+          return null;
+        }
 
         const cleanedJD = cleanWalmartJD(descHtml);
 
         const sponsorStatus = classifyWalmartSponsorship(cleanedJD);
         if (sponsorStatus === "not_supported") {
-          discardedSponsorship++;
+          walmartDiag.discarded_sponsorship++;
+          addRejectedSample({ reqId: c.reqId, title: c.title, location: c.location, postedOnRaw: c.postedAtIso, externalPath: c.externalPath, reason: "explicit_no_sponsorship" });
           return null;
         }
 
@@ -1231,13 +1269,18 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
     );
 
     for (const r of results) {
-      if (r) kept.push(r);
+      if (r) { kept.push(r); walmartDiag.kept++; }
     }
   }
 
   console.log(
     `[playwright:Walmart] phase2 candidates=${candidates.length} kept=${kept.length}` +
-    ` discarded_sponsorship=${discardedSponsorship} discarded_no_desc=${discardedNoDesc}`
+    ` discarded_sponsorship=${walmartDiag.discarded_sponsorship} discarded_no_desc=${walmartDiag.discarded_no_desc}`
   );
+  console.log("[Walmart v2 diagnostics]", JSON.stringify({
+    ...walmartDiag,
+    rejectedSampleCount: walmartRejectedSamples.length,
+    rejectedSamples:     walmartRejectedSamples,
+  }, null, 2));
   return kept;
 }
