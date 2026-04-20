@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { callOpenAI } from "./openai-client";
 import { JobNormalizationSchema, RelevanceSchema } from "./schemas";
 import { SYSTEM_PROMPT_BASE, NORMALIZATION_PROMPT, RELEVANCE_PROMPT, PROMPT_VERSION } from "./prompts";
+import { scoreJobFit } from "./score-job";
 import type { EnrichedJob, AiEnrichment, AiMeta, JobNormalization } from "./types";
 
 export function isAiEnabled(): boolean {
@@ -109,6 +110,16 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     }
     const relData = relParsed.data;
 
+    // Step 3: Fit score
+    const fitResult = await scoreJobFit(
+      { company: job.company, title: job.title, location: job.location, description: job.description },
+      normData
+    );
+    if (fitResult) {
+      totalInput  += 0; // token usage not tracked through scoreJobFit (separate call)
+      totalOutput += 0;
+    }
+
     const aiEnrichment: AiEnrichment = {
       version:             PROMPT_VERSION,
       normalizedTitle:     normData.normalizedTitle,
@@ -119,10 +130,10 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
       sponsorshipSignal:   normData.sponsorshipSignal,
       remoteType:          normData.remoteType,
       relevanceScore:      relData.relevanceScore,
-      fitScore:            0,
+      fitScore:            fitResult?.fitScore ?? 0,
       confidence:          normData.confidence,
       summary:             "",
-      reasons:             relData.reasons,
+      reasons:             [...relData.reasons, ...(fitResult?.reasons ?? [])],
       warnings:            [...normData.warnings, ...relData.warnings],
       enrichedAt:          new Date().toISOString(),
       sourceModel:         model,
