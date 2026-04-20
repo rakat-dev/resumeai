@@ -924,6 +924,32 @@ export async function POST(req: NextRequest) {
         await deactivateMissingJobsForSource("walmart_cxs",          livePlaywrightIds.filter(id => id.startsWith("wmt-")));
         markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeErr);
         console.log(`[refresh:playwright] raw=${fetched} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} filtered=${filtered.length} deduped=${deduped.length} stored=${stored}`);
+
+        // Optional AI enrichment — additive only, never breaks pipeline
+        if (process.env.AI_ENABLED !== "false" && process.env.AI_ENRICHMENT_ENABLED !== "false") {
+          try {
+            const { enrichBatch } = await import("@/lib/ai/enrich-batch");
+            const aiCandidates = capped
+              .filter(j => j.source === "walmart_cxs" || j.source === "amazon_jobs")
+              .slice(0, Number(process.env.AI_MAX_JOBS_PER_REFRESH ?? 100))
+              .map(j => ({
+                company:        j.company ?? "",
+                id:             j.id ?? "",
+                url:            j.apply_url ?? "",
+                title:          j.title ?? "",
+                location:       j.location ?? "",
+                description:    j.full_description ?? j.description ?? "",
+                employmentType: j.employment_type ?? "",
+              }));
+            if (aiCandidates.length > 0) {
+              const { stats: aiStats } = await enrichBatch(aiCandidates);
+              console.log("[AI] Post-fetch enrichment:", aiStats);
+            }
+          } catch (aiErr) {
+            console.error("[AI] enrichBatch error (non-fatal):", aiErr);
+          }
+        }
+
         results.playwright = { raw: fetched, kept: capped.length, stored, error: storeErr, companies: companyResults };
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
