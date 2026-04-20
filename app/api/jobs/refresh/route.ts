@@ -223,6 +223,7 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   adzuna: 1000, jooble: 1000, playwright: 1500,
   phenom: 800,  // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
   meta: 1000,   // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
+  walmart_cxs: 400,
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -906,7 +907,11 @@ export async function POST(req: NextRequest) {
         });
         const stats = { title_removed: pw_title, type_removed: pw_type, location_removed: pw_loc, clearance_removed: pw_clear, horizon_removed: pw_hor, input: normalized.length, output: filtered.length };
         const deduped             = dedupeJobs(filtered);
-        const capped              = applySourceCap(deduped, "playwright");
+        const walmartDeduped      = deduped.filter(j => j.id.startsWith("wmt-"));
+        const nonWalmartDeduped   = deduped.filter(j => !j.id.startsWith("wmt-"));
+        const cappedPlaywright    = applySourceCap(nonWalmartDeduped, "playwright");
+        const cappedWalmart       = applySourceCap(walmartDeduped, "walmart_cxs");
+        const capped              = [...cappedPlaywright, ...cappedWalmart];
         const { stored, error: storeErr } = await storeJobs(capped);
         // Reconcile: deactivate old playwright rows not present in this run.
         const livePlaywrightIds = capped.map(j => j.id);
