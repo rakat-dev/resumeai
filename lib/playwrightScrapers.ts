@@ -697,18 +697,79 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     return (data.jobs ?? []) as AmznJob[];
   };
 
-  const toScrapedJob = (j: AmznJob, postedAtISO: string): ScrapedJob => {
+  const toScrapedJob = (j: AmznJob, postedAtISO: string, jd: string): ScrapedJob => {
     const jobId = j.id_icims ?? String(Math.random());
     return {
       id:          `amzn-${jobId}`,
       company:     "Amazon",
       title:       j.title ?? "",
       location:    j.normalized_location ?? j.city ?? "United States",
-      description: j.description ?? j.description_short ?? "",
+      description: jd,
       applyUrl:    buildAmazonCanonicalUrl(jobId),
       postedAt:    postedAtISO,
       type:        "Full-time",
     };
+  };
+
+  const fetchAmazonDetail = async (jobId: string): Promise<string | null> => {
+    const url = buildAmazonCanonicalUrl(jobId);
+    let html: string;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "Accept":     "text/html,application/xhtml+xml",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      html = await res.text();
+    } catch {
+      return null;
+    }
+
+    // Priority 1: JSON-LD structured data
+    const ldRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    let ldMatch: RegExpExecArray | null;
+    while ((ldMatch = ldRe.exec(html)) !== null) {
+      try {
+        const data = JSON.parse(ldMatch[1]) as Record<string, unknown>;
+        const raw = (data.description ?? "") as string;
+        const stripped = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        if (stripped.length >= 500) return stripped;
+      } catch { /* continue */ }
+    }
+
+    // Priority 2: Semantic section extraction
+    const sectionNames = [
+      "Description",
+      "Key job responsibilities",
+      "Basic Qualifications",
+      "Preferred Qualifications",
+      "About the team",
+      "Job details",
+    ];
+    const htmlLower = html.toLowerCase();
+    const parts: string[] = [];
+    for (const name of sectionNames) {
+      const idx = htmlLower.indexOf(name.toLowerCase());
+      if (idx === -1) continue;
+      const tagEnd = html.indexOf(">", idx);
+      if (tagEnd === -1) continue;
+      let nextIdx = html.length;
+      for (const other of sectionNames) {
+        if (other === name) continue;
+        const oi = htmlLower.indexOf(other.toLowerCase(), idx + name.length);
+        if (oi !== -1 && oi < nextIdx) nextIdx = oi;
+      }
+      const sectionText = html.slice(tagEnd + 1, nextIdx)
+        .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (sectionText.length > 50) parts.push(sectionText);
+    }
+    const combined = parts.join(" ").trim();
+    if (combined.length >= 500) return combined;
+
+    return null;
   };
 
   const AMAZON_QUERIES = [
@@ -726,15 +787,16 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     "application engineer",
   ];
   const seen = new Set<string>();
-  const out: ScrapedJob[] = [];
+  const candidates: Array<{ raw: AmznJob; postedAtISO: string }> = [];
 
   let pagesFetched = 0, rawJobs = 0;
   let invalidIdDrop = 0, titleDrop = 0, locDrop = 0, noDateDrop = 0, oldDateDrop = 0, dedupeDrop = 0, fullTimeDrop = 0;
   let stopReason = "page_limit";
 
+  // Phase 1: collect candidates passing early + date filters
   queryLoop: for (const query of AMAZON_QUERIES) {
     for (let page = 0; page < MAX_PAGES; page++) {
-      if (out.length >= MAX_CANDIDATES) {
+      if (candidates.length >= MAX_CANDIDATES) {
         stopReason = "cap_reached";
         break queryLoop;
       }
@@ -749,7 +811,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       rawJobs += rawPage.length;
 
       for (const raw of rawPage) {
-        if (out.length >= MAX_CANDIDATES) break;
+        if (candidates.length >= MAX_CANDIDATES) break;
         // Filter 1: valid job ID
         if (!raw.id_icims) { invalidIdDrop++; continue; }
         // Filter 2: dedupe
@@ -770,13 +832,23 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
         const ageDays = Math.floor((now - postedDate.getTime()) / 86400000);
         if (ageDays > AMAZON_MAX_AGE_DAYS) { oldDateDrop++; continue; }
 
-        out.push(toScrapedJob(raw, postedDate.toISOString()));
+        candidates.push({ raw, postedAtISO: postedDate.toISOString() });
       }
       if (rawPage.length < PAGE_SIZE) { stopReason = "no_results"; break; }
     }
   }
 
-  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} kept=${out.length} stop=${stopReason}`);
+  // Phase 2: fetch full JD for each candidate; reject if no valid JD (>=500 chars)
+  const out: ScrapedJob[] = [];
+  let noDescDrop = 0;
+  for (const c of candidates) {
+    await new Promise(r => setTimeout(r, 150));
+    const jd = await fetchAmazonDetail(c.raw.id_icims!);
+    if (!jd) { noDescDrop++; continue; }
+    out.push(toScrapedJob(c.raw, c.postedAtISO, jd));
+  }
+
+  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} candidates=${candidates.length} no_desc=${noDescDrop} kept=${out.length} stop=${stopReason}`);
   return out;
 }
 
