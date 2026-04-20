@@ -3,7 +3,7 @@ import { persistState, persistRun } from "@/app/api/jobs/refresh-store";
 import type { RefreshState, RefreshSource } from "@/app/api/jobs/types";
 import { supabaseAdmin } from "@/lib/supabase";
 import {
-  cleanDescription, detectSponsorship, isUSLocation,
+  cleanDescription, classifySponsorship, isUSLocation,
   isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
@@ -99,24 +99,35 @@ function isWithinIngestHorizon(iso: string | null): boolean {
 // ── Normalize ──────────────────────────────────────────────────────────────
 function normalizeJobs(raw: RawJob[]): NormalizedJob[] {
   const now = new Date().toISOString();
-  return raw.map(r => ({
-    id:                  r.id,
-    source:              r.source,
-    company:             normalizeCompany(r.company),
-    title:               r.title.trim(),
-    location:            r.location || "United States",
-    country:             "US",
-    employment_type:     r.type || "Full-time",
-    posted_at:           parsePostedAt(r.postedAt),
-    description:         cleanDescription(r.description).slice(0, 1200),
-    apply_url:           r.applyUrl,
-    title_family:        null,
-    sponsorship_status:  detectSponsorship(r.description),
-    sponsorship_signals: null,
-    fetched_at:          now,
-    is_active:           true,
-    position_rank:       r.positionRank ?? null,
-  }));
+  const results: NormalizedJob[] = [];
+  for (const r of raw) {
+    // Clean HTML/entities BEFORE sponsorship check — raw description may be HTML
+    const cleanJD = cleanDescription(r.description);
+    const sponsorStatus = classifySponsorship(cleanJD);
+
+    // DROP jobs that explicitly say no sponsorship — never store or show them
+    if (sponsorStatus === "not_supported") continue;
+
+    results.push({
+      id:                  r.id,
+      source:              r.source,
+      company:             normalizeCompany(r.company),
+      title:               r.title.trim(),
+      location:            r.location || "United States",
+      country:             "US",
+      employment_type:     r.type || "Full-time",
+      posted_at:           parsePostedAt(r.postedAt),
+      description:         cleanJD.slice(0, 1200),
+      apply_url:           r.applyUrl,
+      title_family:        null,
+      sponsorship_status:  sponsorStatus === "supported" ? "mentioned" : "not_mentioned",
+      sponsorship_signals: null,
+      fetched_at:          now,
+      is_active:           true,
+      position_rank:       r.positionRank ?? null,
+    });
+  }
+  return results;
 }
 
 // ── Filter with per-filter counts ──────────────────────────────────────────
