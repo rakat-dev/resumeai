@@ -927,19 +927,83 @@ function buildWalmartCanonicalUrl(reqId: string): string {
 const WALMART_PAGE_SIZE       = 20;
 const WALMART_MAX_PAGES       = 20;
 const WALMART_BATCH_SIZE      = 15;
-const WALMART_PRE_FILTER_DAYS = 7;
+const WALMART_MAX_AGE_DAYS = 10;
 
-function parseWalmartPostedOn(raw: string | null | undefined): number | null {
-  if (!raw) return null;
-  const s = raw.trim();
-  if (/^posted today$/i.test(s))           return 0;
-  if (/^posted yesterday$/i.test(s))       return 1;
-  const plural = s.match(/^posted (\d+) days? ago$/i);
-  if (plural)                              return parseInt(plural[1], 10);
-  const singular = s.match(/^posted (\d+) day ago$/i);
-  if (singular)                            return parseInt(singular[1], 10);
-  if (/^posted 30\+ days? ago$/i.test(s)) return Infinity;
-  return null;
+interface WalmartDateResult {
+  postedAtIso: string | null;
+  ageDays: number | null;
+  sourceUsed: string;
+}
+
+function resolveWalmartPostedDate(
+  searchItem: Record<string, unknown>,
+  detailPayload?: Record<string, unknown>
+): WalmartDateResult {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // Method 1: parse postedOn from search payload
+  const postedOn = (searchItem.postedOn as string) ?? "";
+  if (postedOn) {
+    const lower = postedOn.toLowerCase().trim();
+    if (lower === "posted today" || lower === "today") {
+      return { postedAtIso: today.toISOString(), ageDays: 0, sourceUsed: "search_postedOn_today" };
+    }
+    if (lower === "posted yesterday" || lower === "yesterday") {
+      const d = new Date(today); d.setDate(d.getDate() - 1);
+      return { postedAtIso: d.toISOString(), ageDays: 1, sourceUsed: "search_postedOn_yesterday" };
+    }
+    const daysMatch = lower.match(/posted\s+(\d+)\s+days?\s+ago/) ?? lower.match(/(\d+)\s+days?\s+ago/);
+    if (daysMatch) {
+      const n = parseInt(daysMatch[1], 10);
+      const d = new Date(today); d.setDate(d.getDate() - n);
+      return { postedAtIso: d.toISOString(), ageDays: n, sourceUsed: "search_postedOn_days_ago" };
+    }
+  }
+
+  // Method 2: inspect alternate search payload date fields
+  const altFields = ["postedDate", "startDate", "dateUpdated", "postedAt", "publicationDate"];
+  for (const field of altFields) {
+    const val = searchItem[field] as string | undefined;
+    if (val) {
+      const parsed = new Date(val);
+      if (!isNaN(parsed.getTime())) {
+        const ageDays = Math.floor((today.getTime() - parsed.getTime()) / 86400000);
+        return { postedAtIso: parsed.toISOString(), ageDays, sourceUsed: `search_${field}` };
+      }
+    }
+  }
+
+  // Method 3: inspect detail payload metadata date fields
+  if (detailPayload) {
+    for (const field of altFields) {
+      const val = detailPayload[field] as string | undefined;
+      if (val) {
+        const parsed = new Date(val);
+        if (!isNaN(parsed.getTime())) {
+          const ageDays = Math.floor((today.getTime() - parsed.getTime()) / 86400000);
+          return { postedAtIso: parsed.toISOString(), ageDays, sourceUsed: `detail_${field}` };
+        }
+      }
+    }
+
+    // Method 4: inspect detail text for clearly parseable relative date phrase
+    const detailText = JSON.stringify(detailPayload);
+    const textMatch = detailText.match(/posted\s+(\d+)\s+days?\s+ago/i) ??
+                      detailText.match(/(\d+)\s+days?\s+ago/i);
+    if (textMatch) {
+      const n = parseInt(textMatch[1], 10);
+      const d = new Date(today); d.setDate(d.getDate() - n);
+      return { postedAtIso: d.toISOString(), ageDays: n, sourceUsed: "detail_text_days_ago" };
+    }
+    const todayMatch = detailText.match(/posted\s+today/i);
+    if (todayMatch) {
+      return { postedAtIso: today.toISOString(), ageDays: 0, sourceUsed: "detail_text_today" };
+    }
+  }
+
+  // Method 5: unresolved — reject
+  return { postedAtIso: null, ageDays: null, sourceUsed: "unresolved" };
 }
 
 /** Remove the "Similar Jobs" / "Related Jobs" section and everything after it.
@@ -1062,10 +1126,13 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
       if (seenReqIds.has(reqId)) { discardedDupe++; continue; }
       seenReqIds.add(reqId);
 
-      const ageDays = parseWalmartPostedOn((j.postedOn as string) ?? null);
-      if (ageDays === null || !isFinite(ageDays) || ageDays > WALMART_PRE_FILTER_DAYS) {
-        if (ageDays === null) discardedNoDate++;
-        else                  discardedAge++;
+      const dateResult = resolveWalmartPostedDate(j);
+      if (dateResult.postedAtIso === null || dateResult.ageDays === null) {
+        discardedNoDate++;
+        continue;
+      }
+      if (dateResult.ageDays > WALMART_MAX_AGE_DAYS) {
+        discardedAge++;
         continue;
       }
 
@@ -1078,7 +1145,7 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         location:    (j.locationsText as string) ?? "United States",
         externalPath,
         applyUrl,
-        postedAtIso: new Date(Date.now() - ageDays * 86_400_000).toISOString(),
+        postedAtIso: dateResult.postedAtIso,
       });
     }
 
