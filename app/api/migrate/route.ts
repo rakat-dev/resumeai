@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 
+export const dynamic = "force-dynamic";
+
 // One-shot migration: adds full_description column if it doesn't exist.
 // Call GET /api/migrate once after deploying this code.
 // Safe to call multiple times — uses IF NOT EXISTS.
