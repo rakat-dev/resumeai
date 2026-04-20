@@ -10,7 +10,6 @@ import {
   isUSLocation,
   isWithinEarlyHorizon,
   EARLY_HORIZON_DAYS_FULL,
-  NO_SPONSORSHIP_PATTERNS,
 } from "./jobUtils";
 
 // ── Full-workflow helper (workflow spec §§1-10) ───────────────────────────
@@ -898,15 +897,21 @@ export async function fetchNetflixJobs(): Promise<ScrapedJob[]> {
 // Direct POST to the Workday CXS backend endpoint, bypasses the UI entirely.
 // Scoped to exactly 4 Job Profile IDs (confirmed live via DevTools 2026-04-18).
 //
-// Pipeline (2026-04-18 rev2):
+// Pipeline (2026-04-20 rev3):
 //   Phase 1: paginate search, collect candidates:
 //     - valid R-XXXXX req ID + dedupe
-//     - postedOn <= 7 days (PRE-FILTER before any detail calls)
+//     - postedOn <= 10 days (PRE-FILTER before any detail calls)
 //   Phase 2: batch-15 detail fetches per candidate:
 //     - fetch jobPostingInfo.jobDescription (HTML ~13KB)
-//     - HTML -> plain text
-//     - sponsorship filter -> DROP if any NO_SPONSORSHIP_PATTERNS match
-//   Phase 3: store surviving jobs with full plain-text JD in description field
+//     - reject if no JD returned
+//     - cleanWalmartJD(): strip HTML, decode entities, normalize whitespace,
+//       trim at "Similar Jobs", preserve readable casing
+//     - classifyWalmartSponsorship(): reject only explicit no-sponsor language;
+//       unknown kept
+//   Phase 3: store surviving jobs — full cleaned JD in description field;
+//     normalizeJobs() in refresh/route.ts derives:
+//       description      = cleanedJD.slice(0, 220)  [card preview]
+//       full_description = cleanedJD                 [JD modal + Tailor]
 //
 // Detail URL: WALMART_CXS_BASE + externalPath
 // Apply URL:  /en-US/WalmartExternal/details/{slug}
@@ -1028,22 +1033,58 @@ function trimAtSimilarJobs(text: string): string {
   return text.slice(0, cut).trim();
 }
 
-function htmlToPlainText(html: string): string {
-  return html
+function cleanWalmartJD(rawHtml: string): string {
+  const text = rawHtml
     .replace(/<[^>]+>/g, " ")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
     .replace(/&#?\w+;/g, " ")
     .replace(/[*\u2022\u00b7\u2013\u2014]/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+    .trim();
+  return trimAtSimilarJobs(text);
 }
 
-// NO_SPONSORSHIP_PATTERNS imported from jobUtils — single source of truth.
-// fetch-time drop logic here uses the same regex list as detectSponsorship().
-function hasNoSponsorshipLanguage(plainText: string): boolean {
-  return NO_SPONSORSHIP_PATTERNS.some(rx => rx.test(plainText));
+type SponsorshipStatus = "not_supported" | "supported" | "unknown";
+
+function classifyWalmartSponsorship(cleanedJD: string): SponsorshipStatus {
+  const text = cleanedJD.toLowerCase();
+
+  const noSponsorPhrases = [
+    "will not sponsor",
+    "unable to sponsor",
+    "cannot sponsor",
+    "does not sponsor",
+    "not able to sponsor",
+    "sponsorship is not available",
+    "sponsorship not available",
+    "no sponsorship",
+    "not provide sponsorship",
+    "not offer sponsorship",
+    "not support visa",
+    "will not provide immigration",
+    "not provide immigration",
+  ];
+  for (const phrase of noSponsorPhrases) {
+    if (text.includes(phrase)) return "not_supported";
+  }
+
+  const yesSponsorPhrases = [
+    "will sponsor",
+    "able to sponsor",
+    "visa sponsorship available",
+    "sponsorship available",
+    "sponsorship provided",
+    "we sponsor",
+    "offers sponsorship",
+    "provide sponsorship",
+    "immigration assistance",
+  ];
+  for (const phrase of yesSponsorPhrases) {
+    if (text.includes(phrase)) return "supported";
+  }
+
+  return "unknown";
 }
 
 async function fetchWalmartDetail(externalPath: string): Promise<string | null> {
@@ -1168,24 +1209,20 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         const descHtml = await fetchWalmartDetail(c.externalPath);
         if (!descHtml) { discardedNoDesc++; return null; }
 
-        // Convert HTML -> plain text, then strip "Similar Jobs" section at end
-        const plainText = trimAtSimilarJobs(htmlToPlainText(descHtml));
+        const cleanedJD = cleanWalmartJD(descHtml);
 
-        if (hasNoSponsorshipLanguage(plainText)) {
+        const sponsorStatus = classifyWalmartSponsorship(cleanedJD);
+        if (sponsorStatus === "not_supported") {
           discardedSponsorship++;
           return null;
         }
 
-        // Store the full trimmed JD in description.
-        // normalizeJobs() in refresh/route.ts will:
-        //   set description      = plainText.slice(0, 220)  [card preview]
-        //   set full_description = plainText                [JD modal + Tailor]
         return {
           id:          `wmt-${c.reqId}`,
           company:     "Walmart",
           title:       c.title,
           location:    c.location,
-          description: plainText,
+          description: cleanedJD,
           applyUrl:    c.applyUrl,
           postedAt:    c.postedAtIso,
           type:        "Full-time",
