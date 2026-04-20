@@ -143,13 +143,16 @@ function applyDiversityCaps(jobs: Job[]): Job[] {
   const companyCounts = new Map<string, number>();
   const MAX_PER_SOURCE  = 1000; // raised from 500: priority-company fixes pushed greenhouse+workday past 500 each
   const MAX_PER_COMPANY = 120; // raised from 100 to match FULL_WORKFLOW_EXTENSION_CAP — Tier A scrapers in extension mode produce up to 120 fresh IC SWE rows when there's a backlog; cap at 100 was hiding ~20 jobs/company
+  const COMPANY_CAP_OVERRIDES: Record<string, number> = { walmart: 200 };
   return jobs.filter(j => {
     const sk = j.sourceType.startsWith("playwright") ? "playwright" : j.sourceType;
     const sc = sourceCounts.get(sk) ?? 0;
-    const cc = companyCounts.get(j.company.toLowerCase()) ?? 0;
-    if (sc >= MAX_PER_SOURCE || cc >= MAX_PER_COMPANY) return false;
+    const ck = j.company.toLowerCase();
+    const cc = companyCounts.get(ck) ?? 0;
+    const companyCapLimit = COMPANY_CAP_OVERRIDES[ck] ?? MAX_PER_COMPANY;
+    if (sc >= MAX_PER_SOURCE || cc >= companyCapLimit) return false;
     sourceCounts.set(sk, sc + 1);
-    companyCounts.set(j.company.toLowerCase(), cc + 1);
+    companyCounts.set(ck, cc + 1);
     return true;
   });
 }
