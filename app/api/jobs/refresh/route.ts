@@ -221,9 +221,10 @@ function markDone(company: string, source: RefreshSource,
 const SOURCE_STORE_CAPS: Record<string, number> = {
   greenhouse: 3000, workday: 1500, jsearch: 500,
   adzuna: 1000, jooble: 1000, playwright: 1500,
-  phenom: 800,  // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
-  meta: 1000,   // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
+  phenom: 800,       // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
+  meta: 1000,        // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
   walmart_cxs: 400,
+  amazon_jobs: 400,  // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
