@@ -9,7 +9,7 @@ import {
 } from "@/lib/jobUtils";
 import {
   fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
-  fetchAmazonJobs, fetchJPMJobs,
+  fetchAmazonJobsV2, fetchJPMJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs, fetchNetflixJobs,
   fetchWalmartJobs,
   type ScrapedJob,
@@ -808,7 +808,7 @@ const TIER_A_COMPANIES: Array<{ name: string; source: RefreshSource; fetcher: ()
   // Meta removed 2026-04-17 — fetchMetaJobs returns HTTP 400 since Meta added
   // per-request anti-replay tokens to its GraphQL endpoint. Replaced by the
   // sitemap+JSON-LD adapter in lib/scrapers/meta.ts (run via source="meta").
-  { name: "Amazon",         source: "playwright_amazon",    fetcher: fetchAmazonJobs       },
+  { name: "Amazon",         source: "amazon_jobs",          fetcher: fetchAmazonJobsV2     },
   { name: "JPMorgan Chase", source: "playwright_jpmorgan",  fetcher: fetchJPMJobs          },
   { name: "Goldman Sachs",  source: "playwright_google",    fetcher: fetchGoldmanSachsJobs }, // Oracle HCM
   { name: "OpenAI",         source: "playwright_microsoft", fetcher: fetchOpenAIJobs       }, // Ashby
@@ -918,7 +918,7 @@ export async function POST(req: NextRequest) {
         await deactivateMissingJobsForSource("playwright_microsoft", livePlaywrightIds.filter(id => id.startsWith("msft-") || id.startsWith("openai-")));
         await deactivateMissingJobsForSource("playwright_google",    livePlaywrightIds.filter(id => id.startsWith("goog-") || id.startsWith("gs-")));
         await deactivateMissingJobsForSource("playwright_apple",     livePlaywrightIds.filter(id => id.startsWith("aapl-") || id.startsWith("netflix-")));
-        await deactivateMissingJobsForSource("playwright_amazon",    livePlaywrightIds.filter(id => id.startsWith("amzn-")));
+        await deactivateMissingJobsForSource("amazon_jobs",           livePlaywrightIds.filter(id => id.startsWith("amzn-")));
         await deactivateMissingJobsForSource("playwright_jpmorgan",  livePlaywrightIds.filter(id => id.startsWith("jpm-")));
         await deactivateMissingJobsForSource("walmart_cxs",          livePlaywrightIds.filter(id => id.startsWith("wmt-")));
         markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeErr);

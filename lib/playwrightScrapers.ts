@@ -641,73 +641,143 @@ export async function fetchMetaJobs(): Promise<ScrapedJob[]> {
   return results;
 }
 
-// ── Amazon ────────────────────────────────────────────────────────────────
-// Uses Amazon Jobs API.
-// FULL WORKFLOW (workflow spec): primary query "software engineer" + optional
-// secondary "full stack developer", location=United States + sort=recent
-// native filters, early filters + 25-day horizon applied inside fetch loop.
-// MAX_PAGES preserved at 15 per user.
-export async function fetchAmazonJobs(): Promise<ScrapedJob[]> {
+// ── Amazon v2 ─────────────────────────────────────────────────────────────
+// Standalone pipeline — does NOT use runFullWorkflow.
+// Queries: "software engineer" + "full stack developer"
+// Native filters: loc_query=United States, sort=recent
+// Pagination: up to 15 pages × 10 results per page
+// Early filters + 25-day horizon applied in-loop (same logic as runFullWorkflow).
+// Extension mode: if 80-job cap hit with oldest < 14 days, extends to 120 / 20d.
+export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
 
   type AmznJob = {
-    id_icims?: string;
-    title?: string;
+    id_icims?:            string;
+    title?:               string;
     normalized_location?: string;
-    city?: string;
-    description?: string;
-    description_short?: string;
-    posted_date?: string;
+    city?:                string;
+    description?:         string;
+    description_short?:   string;
+    posted_date?:         string;
   };
 
-  const { jobs } = await runFullWorkflow<AmznJob>({
-    company:       "Amazon",
-    queries:       ["software engineer", "full stack developer"],
-    nativeFilters: ["loc_query=United States", "sort=recent"],
-    maxPages:      MAX_PAGES,
-    pageSize:      PAGE_SIZE,
-    fetchPage: async (query, page) => {
-      const params = new URLSearchParams({
-        base_query:    query,
-        loc_query:     "United States",
-        type:          "FULL_TIME",
-        sort:          "recent",
-        this_week:     "0",
-        offset:        String(page * PAGE_SIZE),
-        result_limit:  String(PAGE_SIZE),
-        format:        "json",
-      });
-      const res = await fetch(
-        `https://www.amazon.jobs/en/search.json?${params}`,
-        {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return ((data.jobs ?? []) as AmznJob[]);
-    },
-    toScrapedJob: (j) => {
-      const jobId = j.id_icims ?? String(Math.random());
-      return {
-        id:          `amzn-${jobId}`,
-        company:     "Amazon",
-        title:       j.title ?? "",
-        location:    j.normalized_location ?? j.city ?? "United States",
-        description: j.description ?? j.description_short ?? "",
-        applyUrl:    `https://www.amazon.jobs/en/jobs/${jobId}`,
-        postedAt:    j.posted_date ?? null,
-        type:        "Full-time",
-      };
-    },
-  });
+  const fetchPage = async (query: string, page: number): Promise<AmznJob[]> => {
+    const params = new URLSearchParams({
+      base_query:   query,
+      loc_query:    "United States",
+      type:         "FULL_TIME",
+      sort:         "recent",
+      this_week:    "0",
+      offset:       String(page * PAGE_SIZE),
+      result_limit: String(PAGE_SIZE),
+      format:       "json",
+    });
+    const res = await fetch(
+      `https://www.amazon.jobs/en/search.json?${params}`,
+      {
+        headers: {
+          "Accept":     "application/json",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        },
+        signal: AbortSignal.timeout(12_000),
+      }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.jobs ?? []) as AmznJob[];
+  };
 
-  return jobs;
+  const toScrapedJob = (j: AmznJob): ScrapedJob => {
+    const jobId = j.id_icims ?? String(Math.random());
+    return {
+      id:          `amzn-${jobId}`,
+      company:     "Amazon",
+      title:       j.title ?? "",
+      location:    j.normalized_location ?? j.city ?? "United States",
+      description: j.description ?? j.description_short ?? "",
+      applyUrl:    `https://www.amazon.jobs/en/jobs/${jobId}`,
+      postedAt:    j.posted_date ?? null,
+      type:        "Full-time",
+    };
+  };
+
+  const QUERIES = ["software engineer", "full stack developer"];
+  const seen    = new Set<string>();
+  const out: ScrapedJob[] = [];
+  const keptTimestamps: Array<number | null> = [];
+
+  let currentCap     = FULL_WORKFLOW_MAX_JOBS_PER_COMPANY;
+  let currentHorizon = EARLY_HORIZON_DAYS_FULL;
+  let extensionMode  = false;
+
+  function shouldEnterExtension(): boolean {
+    if (extensionMode || out.length < FULL_WORKFLOW_MAX_JOBS_PER_COMPANY) return false;
+    let oldest: number | null = null;
+    for (const t of keptTimestamps) {
+      if (t === null) continue;
+      if (oldest === null || t < oldest) oldest = t;
+    }
+    if (oldest === null) return false;
+    return (Date.now() - oldest) / 86_400_000 < FULL_WORKFLOW_EXTENSION_FRESHNESS_DAYS;
+  }
+
+  let pagesFetched = 0, rawJobs = 0;
+  let titleDrop = 0, locDrop = 0, dateDrop = 0, dedupeDrop = 0;
+  let stopReason = "page_limit";
+
+  queryLoop: for (const query of QUERIES) {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      if (out.length >= currentCap) {
+        stopReason = extensionMode ? "ext_cap_reached" : "cap_reached";
+        break queryLoop;
+      }
+      let rawPage: AmznJob[];
+      try {
+        rawPage = await fetchPage(query, page);
+      } catch {
+        stopReason = "error"; break queryLoop;
+      }
+      if (!rawPage || rawPage.length === 0) { stopReason = "no_results"; break; }
+      pagesFetched++;
+      rawJobs += rawPage.length;
+
+      let oldestOnPageTs: number | null = null;
+      for (const raw of rawPage) {
+        if (out.length >= currentCap) break;
+        const j = toScrapedJob(raw);
+        if (seen.has(j.id)) { dedupeDrop++; continue; }
+        seen.add(j.id);
+        if (!shouldIncludeTitle(j.title)) { titleDrop++; continue; }
+        if (!isUSLocation(j.location))    { locDrop++;   continue; }
+        if (!isWithinEarlyHorizon(j.postedAt, currentHorizon)) {
+          dateDrop++;
+          const t = j.postedAt ? new Date(j.postedAt).getTime() : 0;
+          if (t && (oldestOnPageTs === null || t < oldestOnPageTs)) oldestOnPageTs = t;
+          if (extensionMode) { stopReason = "ext_date_threshold"; break queryLoop; }
+          continue;
+        }
+        out.push(j);
+        keptTimestamps.push(j.postedAt ? new Date(j.postedAt).getTime() : null);
+        if (!extensionMode && shouldEnterExtension()) {
+          extensionMode  = true;
+          currentCap     = FULL_WORKFLOW_EXTENSION_CAP;
+          currentHorizon = FULL_WORKFLOW_EXTENSION_HORIZON_DAYS;
+        }
+      }
+
+      if (!extensionMode && oldestOnPageTs !== null) {
+        const ageDays = (Date.now() - oldestOnPageTs) / 86_400_000;
+        if (ageDays > currentHorizon && dateDrop >= rawPage.length / 2) {
+          stopReason = "date_threshold"; break;
+        }
+      }
+      if (rawPage.length < PAGE_SIZE) { stopReason = "no_results"; break; }
+    }
+  }
+
+  console.log(`[amazon_jobs] queries=${QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} title_drop=${titleDrop} loc_drop=${locDrop} date_drop=${dateDrop} dup_drop=${dedupeDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
+  return out;
 }
 
 // ── JPMorgan Chase ────────────────────────────────────────────────────────

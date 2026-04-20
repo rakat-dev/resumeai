@@ -25,7 +25,7 @@ export type RefreshSource =
   | "playwright_google"
   | "playwright_apple"
   | "playwright_meta"
-  | "playwright_amazon"
+  | "amazon_jobs"
   | "playwright_jpmorgan"
   | "walmart_cxs";
 
