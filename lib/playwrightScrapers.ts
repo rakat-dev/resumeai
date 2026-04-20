@@ -819,11 +819,40 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     "cloud engineer",
     "application engineer",
   ];
+  const amazonDiag = {
+    totalFetched:           0,
+    discarded_no_jobid:     0,
+    discarded_duplicate:    0,
+    discarded_title:        0,
+    discarded_non_us:       0,
+    discarded_non_full_time: 0,
+    discarded_no_date:      0,
+    discarded_old_date:     0,
+    discarded_no_desc:      0,
+    discarded_sponsorship:  0,
+    kept:                   0,
+  };
+  const amazonRejectedSamples: Array<{
+    jobId: string;
+    title: string;
+    location: string;
+    postedDateRaw: string;
+    reason: string;
+  }> = [];
+  const addSample = (jobId: string, raw: AmznJob, reason: string) => {
+    if (amazonRejectedSamples.length >= 50) return;
+    amazonRejectedSamples.push({
+      jobId,
+      title:         raw.title ?? "",
+      location:      raw.normalized_location ?? raw.city ?? "",
+      postedDateRaw: raw.posted_date ?? "",
+      reason,
+    });
+  };
+
   const seen = new Set<string>();
   const candidates: Array<{ raw: AmznJob; postedAtISO: string }> = [];
-
-  let pagesFetched = 0, rawJobs = 0;
-  let invalidIdDrop = 0, titleDrop = 0, locDrop = 0, noDateDrop = 0, oldDateDrop = 0, dedupeDrop = 0, fullTimeDrop = 0;
+  let pagesFetched = 0;
   let stopReason = "page_limit";
 
   // Phase 1: collect candidates passing early + date filters
@@ -841,29 +870,29 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       }
       if (!rawPage || rawPage.length === 0) { stopReason = "no_results"; break; }
       pagesFetched++;
-      rawJobs += rawPage.length;
+      amazonDiag.totalFetched += rawPage.length;
 
       for (const raw of rawPage) {
         if (candidates.length >= MAX_CANDIDATES) break;
         // Filter 1: valid job ID
-        if (!raw.id_icims) { invalidIdDrop++; continue; }
+        if (!raw.id_icims) { amazonDiag.discarded_no_jobid++; addSample("", raw, "no_jobid"); continue; }
         // Filter 2: dedupe
-        if (seen.has(raw.id_icims)) { dedupeDrop++; continue; }
+        if (seen.has(raw.id_icims)) { amazonDiag.discarded_duplicate++; addSample(raw.id_icims, raw, "duplicate"); continue; }
         seen.add(raw.id_icims);
         // Filter 3: title
-        if (!shouldIncludeTitle(raw.title ?? "")) { titleDrop++; continue; }
+        if (!shouldIncludeTitle(raw.title ?? "")) { amazonDiag.discarded_title++; addSample(raw.id_icims, raw, "title"); continue; }
         // Filter 4: US location
         const loc = raw.normalized_location ?? raw.city ?? "United States";
-        if (!isUSLocation(loc)) { locDrop++; continue; }
+        if (!isUSLocation(loc)) { amazonDiag.discarded_non_us++; addSample(raw.id_icims, raw, "non_us"); continue; }
         // Filter 5: full time
         const empType = (raw.job_schedule_type ?? raw.employment_type ?? "").toLowerCase();
-        if (empType && !empType.includes("full")) { fullTimeDrop++; continue; }
+        if (empType && !empType.includes("full")) { amazonDiag.discarded_non_full_time++; addSample(raw.id_icims, raw, "non_full_time"); continue; }
         // Filter 6: date — reject missing/invalid or older than AMAZON_MAX_AGE_DAYS
         const postedDateRaw = raw.posted_date ?? "";
         const postedDate = postedDateRaw ? new Date(postedDateRaw) : null;
-        if (!postedDate || isNaN(postedDate.getTime())) { noDateDrop++; continue; }
+        if (!postedDate || isNaN(postedDate.getTime())) { amazonDiag.discarded_no_date++; addSample(raw.id_icims, raw, "date_missing"); continue; }
         const ageDays = Math.floor((now - postedDate.getTime()) / 86400000);
-        if (ageDays > AMAZON_MAX_AGE_DAYS) { oldDateDrop++; continue; }
+        if (ageDays > AMAZON_MAX_AGE_DAYS) { amazonDiag.discarded_old_date++; addSample(raw.id_icims, raw, "date_older_than_10_days"); continue; }
 
         candidates.push({ raw, postedAtISO: postedDate.toISOString() });
       }
@@ -873,17 +902,24 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
 
   // Phase 2: fetch full JD, clean, sponsorship-filter; reject if no valid JD (>=500 chars)
   const out: ScrapedJob[] = [];
-  let noDescDrop = 0, sponsorDrop = 0;
   for (const c of candidates) {
     await new Promise(r => setTimeout(r, 150));
     const jd = await fetchAmazonDetail(c.raw.id_icims!);
-    if (!jd) { noDescDrop++; continue; }
+    if (!jd) { amazonDiag.discarded_no_desc++; addSample(c.raw.id_icims!, c.raw, "no_description"); continue; }
     const fullDesc = cleanAmazonJD(jd);
-    if (classifyAmazonSponsorship(fullDesc) === "not_supported") { sponsorDrop++; continue; }
+    if (classifyAmazonSponsorship(fullDesc) === "not_supported") {
+      amazonDiag.discarded_sponsorship++; addSample(c.raw.id_icims!, c.raw, "explicit_no_sponsorship"); continue;
+    }
+    amazonDiag.kept++;
     out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
   }
 
-  console.log(`[amazon_jobs] pages=${pagesFetched} raw=${rawJobs} invalid_id=${invalidIdDrop} dup=${dedupeDrop} title=${titleDrop} loc=${locDrop} full_time=${fullTimeDrop} no_date=${noDateDrop} old_date=${oldDateDrop} candidates=${candidates.length} no_desc=${noDescDrop} no_sponsor=${sponsorDrop} kept=${out.length} stop=${stopReason}`);
+  console.log(`[amazon_jobs] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} kept=${amazonDiag.kept} stop=${stopReason}`);
+  console.log("[Amazon v2 diagnostics]", JSON.stringify({
+    ...amazonDiag,
+    rejectedSampleCount: amazonRejectedSamples.length,
+    rejectedSamples:     amazonRejectedSamples,
+  }, null, 2));
   return out;
 }
 
