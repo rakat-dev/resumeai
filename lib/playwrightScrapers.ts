@@ -660,6 +660,8 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     description?:         string;
     description_short?:   string;
     posted_date?:         string;
+    job_schedule_type?:   string;
+    employment_type?:     string;
   };
 
   const fetchPage = async (query: string, page: number): Promise<AmznJob[]> => {
@@ -736,7 +738,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   }
 
   let pagesFetched = 0, rawJobs = 0;
-  let titleDrop = 0, locDrop = 0, dateDrop = 0, dedupeDrop = 0;
+  let invalidIdDrop = 0, titleDrop = 0, locDrop = 0, dateDrop = 0, dedupeDrop = 0, fullTimeDrop = 0;
   let stopReason = "page_limit";
 
   queryLoop: for (const query of AMAZON_QUERIES) {
@@ -758,11 +760,19 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       let oldestOnPageTs: number | null = null;
       for (const raw of rawPage) {
         if (out.length >= currentCap) break;
+        // Filter 1: valid job ID
+        if (!raw.id_icims) { invalidIdDrop++; continue; }
+        // Filter 2: dedupe
+        if (seen.has(raw.id_icims)) { dedupeDrop++; continue; }
+        seen.add(raw.id_icims);
         const j = toScrapedJob(raw);
-        if (seen.has(j.id)) { dedupeDrop++; continue; }
-        seen.add(j.id);
+        // Filter 3: title
         if (!shouldIncludeTitle(j.title)) { titleDrop++; continue; }
+        // Filter 4: US location
         if (!isUSLocation(j.location))    { locDrop++;   continue; }
+        // Filter 5: full time
+        const empType = (raw.job_schedule_type ?? raw.employment_type ?? "").toLowerCase();
+        if (empType && !empType.includes("full")) { fullTimeDrop++; continue; }
         if (!isWithinEarlyHorizon(j.postedAt, currentHorizon)) {
           dateDrop++;
           const t = j.postedAt ? new Date(j.postedAt).getTime() : 0;
@@ -789,7 +799,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     }
   }
 
-  console.log(`[amazon_jobs] queries=${AMAZON_QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} title_drop=${titleDrop} loc_drop=${locDrop} date_drop=${dateDrop} dup_drop=${dedupeDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
+  console.log(`[amazon_jobs] queries=${AMAZON_QUERIES.join("|")} filters=loc_query=United States|sort=recent pages=${pagesFetched} raw=${rawJobs} invalid_id_drop=${invalidIdDrop} dup_drop=${dedupeDrop} title_drop=${titleDrop} loc_drop=${locDrop} full_time_drop=${fullTimeDrop} date_drop=${dateDrop} kept=${out.length} ext=${extensionMode} stop=${stopReason}`);
   return out;
 }
 
