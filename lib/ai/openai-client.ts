@@ -1,12 +1,9 @@
-if (typeof window !== "undefined") {
-  throw new Error("openai-client must only be imported server-side");
-}
-
 import OpenAI from "openai";
 
 let _client: OpenAI | null = null;
 
-export function getOpenAIClient(): OpenAI {
+export function getOpenAIClient(): OpenAI | null {
+  if (!process.env.OPENAI_API_KEY) return null;
   if (!_client) {
     _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
@@ -29,10 +26,14 @@ export async function callOpenAI(
   userPrompt: string,
   opts: CallOpts = {}
 ): Promise<CallResult> {
+  const client = getOpenAIClient();
+  if (!client) {
+    throw new Error("OPENAI_API_KEY not configured");
+  }
+
   const model = opts.model ?? process.env.AI_MODEL_DEFAULT ?? "gpt-4o-mini";
   const maxTokens = opts.maxTokens ?? 500;
   const maxRetries = opts.retries ?? Number(process.env.AI_RETRY_COUNT ?? 1);
-  const client = getOpenAIClient();
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
