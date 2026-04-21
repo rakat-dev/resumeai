@@ -1011,87 +1011,89 @@ export async function POST(req: NextRequest) {
       if (sourceResult?.error) continue;
       console.log(`[ai_enrichment] source=${aiSource} started`);
       try {
-        const aiStart = Date.now();
         const { data: dbJobsRaw } = await supabaseAdmin
           .from("jobs")
-          .select("id, source, company, title, description, full_description, location, apply_url")
+          .select("id, source, company, title, description, full_description, location, apply_url, ai_enrichment")
           .eq("source", aiSource).eq("is_active", true).limit(200);
         const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
-        console.log(`[ai_enrichment] source=${aiSource} selected=${dbJobs.length}`);
-        const jobsForAi: JobInputForEnrichment[] = dbJobs.map(j => ({
-          id:          String(j.id ?? ""),
-          company:     String(j.company ?? ""),
-          title:       String(j.title ?? ""),
-          description: String(j.full_description ?? j.description ?? ""),
-          location:    String(j.location ?? ""),
-          url:         String(j.apply_url ?? ""),
-        }));
-        console.log(`[ai_enrichment] source=${aiSource} sending_to_batch=${jobsForAi.slice(0, 10).length}`);
-        const t0 = Date.now();
-        const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 10));
-        console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
-        console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed}`);
+        const eligibleJobs = dbJobs.filter(j => {
+          const description = j.full_description || j.description;
+          return (
+            !j.ai_enrichment &&
+            !!j.title &&
+            !!description
+          );
+        });
+        console.log(`[ai_enrichment] source=${aiSource} selected=${dbJobs.length} eligible=${eligibleJobs.length}`);
 
-        let updatesAttempted = 0;
-        let updatesSucceeded = 0;
-        let updatesFailed = 0;
-        let skippedInvalid = 0;
+        const AI_BATCH_SIZE = 25;
+        const AI_MAX_BATCHES_PER_REFRESH = 3;
+        const AI_MAX_RUNTIME_MS = 50_000;
+        const aiEnrichStart = Date.now();
 
-        for (const [key, enriched] of aiResults) {
-          if (!key || !enriched?.ai) {
-            if (skippedInvalid < 3) {
-              const reason = !key ? "missing_key" : "missing_ai";
-              console.warn(`[ai_enrichment] skip_invalid reason=${reason} id=${key} source=${aiSource}`);
+        let batchesAttempted = 0;
+        let batchesCompleted = 0;
+        let totalSentToEnrich = 0;
+        let totalPersisted = 0;
+        let totalSkipped = 0;
+        let stoppedEarly = false;
+
+        for (let batchIdx = 0; batchIdx < AI_MAX_BATCHES_PER_REFRESH; batchIdx++) {
+          if (Date.now() - aiEnrichStart > AI_MAX_RUNTIME_MS) {
+            console.warn(`[ai_enrichment] source=${aiSource} stopping early — time budget exceeded`);
+            stoppedEarly = true;
+            break;
+          }
+
+          const batch = eligibleJobs.slice(batchIdx * AI_BATCH_SIZE, (batchIdx + 1) * AI_BATCH_SIZE);
+          if (batch.length === 0) break;
+
+          batchesAttempted++;
+          totalSentToEnrich += batch.length;
+
+          const batchInput: JobInputForEnrichment[] = batch.map(j => {
+            const description = j.full_description || j.description;
+            return {
+              id:          String(j.id ?? ""),
+              company:     String(j.company ?? ""),
+              title:       String(j.title ?? ""),
+              description: String(description ?? ""),
+              location:    String(j.location ?? ""),
+              url:         String(j.apply_url ?? ""),
+            };
+          });
+
+          const t0 = Date.now();
+          const { results: batchResults, stats } = await enrichBatch(batchInput);
+          console.log(`[ai_enrichment] source=${aiSource} batch=${batchIdx + 1} enrichBatch_ms=${Date.now() - t0} enriched=${stats.enriched} failed=${stats.failed}`);
+
+          let batchPersisted = 0;
+          let batchSkipped = 0;
+          for (const [key, enriched] of batchResults) {
+            if (!key || !enriched?.ai) {
+              batchSkipped++;
+              totalSkipped++;
+              continue;
             }
-            skippedInvalid++;
-            continue;
+            const { error: updateErr } = await supabaseAdmin
+              .from("jobs")
+              .update({ ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta ?? null })
+              .eq("id", key);
+            if (updateErr) {
+              console.error(`[ai_enrichment] update failed id=${key} source=${aiSource}`, JSON.stringify({ message: updateErr.message, code: updateErr.code }));
+              batchSkipped++;
+              totalSkipped++;
+            } else {
+              batchPersisted++;
+              totalPersisted++;
+            }
           }
-          updatesAttempted++;
-          const { error: updateErr } = await supabaseAdmin
-            .from("jobs")
-            .update({
-              ai_enrichment: enriched.ai,
-              ai_meta: enriched.aiMeta ?? null,
-            })
-            .eq("id", key);
-          if (updateErr) {
-            console.error(`[ai_enrichment] update failed id=${key}`, JSON.stringify({ message: updateErr.message, details: updateErr.details, hint: updateErr.hint, code: updateErr.code }, null, 2));
-            updatesFailed++;
-          } else {
-            updatesSucceeded++;
-          }
+
+          batchesCompleted++;
+          console.log(`[ai_enrichment] source=${aiSource} batch=${batchIdx + 1} persisted=${batchPersisted} skipped=${batchSkipped}`);
         }
 
-        console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates_attempted=${updatesAttempted} updates_succeeded=${updatesSucceeded} updates_failed=${updatesFailed}`);
-        console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
-
-        // Classify all results
-        let aiNullCount = 0;
-        let statusFailed = 0;
-        let statusCached = 0;
-        let statusSuccess = 0;
-        let statusRateLimited = 0;
-        let hasErrorCount = 0;
-        for (const [, enriched] of aiResults) {
-          if (enriched.ai === null) aiNullCount++;
-          const s = enriched.aiMeta?.status;
-          if (s === "success") statusSuccess++;
-          else if (s === "cached") statusCached++;
-          else if (s === "failed") statusFailed++;
-          else if (s === "skipped") { /* count elsewhere */ }
-          if (enriched.aiMeta?.error) hasErrorCount++;
-          if (s === "failed" && (enriched.aiMeta as unknown as Record<string, unknown>)?.error === "rate_limited") statusRateLimited++;
-        }
-        console.log(`[ai_enrichment] source=${aiSource} ai_null=${aiNullCount} status_success=${statusSuccess} status_cached=${statusCached} status_failed=${statusFailed} rate_limited=${statusRateLimited} has_error=${hasErrorCount}`);
-
-        // Log first 3 missing-ai rows with aiMeta details
-        let missingAiLogged = 0;
-        for (const [key, enriched] of aiResults) {
-          if (enriched.ai === null && missingAiLogged < 3) {
-            console.warn(`[ai_enrichment] missing_ai id=${key} source=${aiSource} status=${enriched.aiMeta?.status} error=${(enriched.aiMeta as unknown as Record<string, unknown>)?.error ?? "none"}`);
-            missingAiLogged++;
-          }
-        }
+        console.log(`[ai_enrichment] source=${aiSource} eligible=${eligibleJobs.length} batches_attempted=${batchesAttempted} batches_completed=${batchesCompleted} total_sent=${totalSentToEnrich} persisted=${totalPersisted} skipped=${totalSkipped} stopped_early=${stoppedEarly}`);
       } catch (aiErr: unknown) {
         const msg = aiErr instanceof Error ? aiErr.message : String(aiErr);
         console.error(`[ai_enrichment] source=${aiSource} error="${msg}" — enrichment skipped, refresh continues`);
