@@ -688,8 +688,9 @@ function classifyAmazonSponsorship(cleanedJD: string): "not_supported" | "suppor
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
-  const AMAZON_MAX_AGE_DAYS = 10;
+  const AMAZON_MAX_AGE_DAYS = 5;
   const MAX_CANDIDATES = 500;
+  const AMAZON_JD_FETCH_CAP = 80;  // hard cap on Phase 2 detail fetches to stay under Vercel 60s
   const now = Date.now();
 
   type AmznJob = {
@@ -820,17 +821,18 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     "application engineer",
   ];
   const amazonDiag = {
-    totalFetched:           0,
-    discarded_no_jobid:     0,
-    discarded_duplicate:    0,
-    discarded_title:        0,
-    discarded_non_us:       0,
-    discarded_non_full_time: 0,
-    discarded_no_date:      0,
-    discarded_old_date:     0,
-    discarded_no_desc:      0,
-    discarded_sponsorship:  0,
-    kept:                   0,
+    totalFetched:             0,
+    discarded_no_jobid:       0,
+    discarded_duplicate:      0,
+    discarded_title:          0,
+    discarded_non_us:         0,
+    discarded_non_full_time:  0,
+    discarded_no_date:        0,
+    discarded_old_date:       0,
+    discarded_no_desc:        0,
+    discarded_sponsorship:    0,
+    kept:                     0,
+    queries_early_stopped:    0,  // queries terminated by freshness_boundary early-stop
   };
   const amazonRejectedSamples: Array<{
     jobId: string;
@@ -856,22 +858,32 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   let stopReason = "page_limit";
 
   // Phase 1: collect candidates passing early + date filters
+  // Early-stop per query: Amazon sorts by 'recent', so once any job on a page has a
+  // resolved age > AMAZON_MAX_AGE_DAYS, all deeper pages will be older — break that query.
   queryLoop: for (const query of AMAZON_QUERIES) {
+    let queryPages = 0;
+    let queryStopReason: "no_results" | "freshness_boundary" | "max_pages" | "cap_reached" | "error" = "max_pages";
+
     for (let page = 0; page < MAX_PAGES; page++) {
       if (candidates.length >= MAX_CANDIDATES) {
         stopReason = "cap_reached";
+        queryStopReason = "cap_reached";
         break queryLoop;
       }
       let rawPage: AmznJob[];
       try {
         rawPage = await fetchPage(query, page);
       } catch {
-        stopReason = "error"; break queryLoop;
+        stopReason = "error"; queryStopReason = "error"; break queryLoop;
       }
-      if (!rawPage || rawPage.length === 0) { stopReason = "no_results"; break; }
+      if (!rawPage || rawPage.length === 0) { stopReason = "no_results"; queryStopReason = "no_results"; break; }
       pagesFetched++;
+      queryPages++;
       amazonDiag.totalFetched += rawPage.length;
 
+      // Track whether any job on this page has a stale-but-parseable date.
+      // We process the full page first (keeping fresh jobs), then decide whether to stop.
+      let hitFreshnessBoundary = false;
       for (const raw of rawPage) {
         if (candidates.length >= MAX_CANDIDATES) break;
         // Filter 1: valid job ID
@@ -892,17 +904,34 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
         const postedDate = postedDateRaw ? new Date(postedDateRaw) : null;
         if (!postedDate || isNaN(postedDate.getTime())) { amazonDiag.discarded_no_date++; addSample(raw.id_icims, raw, "date_missing"); continue; }
         const ageDays = Math.floor((now - postedDate.getTime()) / 86400000);
-        if (ageDays > AMAZON_MAX_AGE_DAYS) { amazonDiag.discarded_old_date++; addSample(raw.id_icims, raw, "date_older_than_10_days"); continue; }
-
+        if (ageDays > AMAZON_MAX_AGE_DAYS) {
+          amazonDiag.discarded_old_date++;
+          addSample(raw.id_icims, raw, "date_older_than_5_days");
+          hitFreshnessBoundary = true;  // stale job seen — deeper pages will be older
+          continue;
+        }
         candidates.push({ raw, postedAtISO: postedDate.toISOString() });
       }
-      if (rawPage.length < PAGE_SIZE) { stopReason = "no_results"; break; }
+
+      // After processing the full page: if a stale job was found, stop this query.
+      // Fresh jobs from this page are already in candidates.
+      if (hitFreshnessBoundary) {
+        queryStopReason = "freshness_boundary";
+        amazonDiag.queries_early_stopped++;
+        break;
+      }
+      if (rawPage.length < PAGE_SIZE) { queryStopReason = "no_results"; stopReason = "no_results"; break; }
     }
+
+    console.log(`[amazon_jobs:query] q="${query}" pages=${queryPages} stop=${queryStopReason} candidates=${candidates.length}`);
   }
 
   // Phase 2: fetch full JD, clean, sponsorship-filter; reject if no valid JD (>=500 chars)
+  // Cap candidates before detail fetches — each fetch is ~150ms throttle + network,
+  // so 80 candidates ≈ 12s throttle + fetch time, well within Vercel 60s.
+  const phase2Candidates = candidates.slice(0, AMAZON_JD_FETCH_CAP);
   const out: ScrapedJob[] = [];
-  for (const c of candidates) {
+  for (const c of phase2Candidates) {
     await new Promise(r => setTimeout(r, 150));
     const jd = await fetchAmazonDetail(c.raw.id_icims!);
     if (!jd) { amazonDiag.discarded_no_desc++; addSample(c.raw.id_icims!, c.raw, "no_description"); continue; }
@@ -914,7 +943,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
   }
 
-  console.log(`[amazon_jobs] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} kept=${amazonDiag.kept} stop=${stopReason}`);
+  console.log(`[amazon_jobs] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} phase2_cap=${phase2Candidates.length} kept=${amazonDiag.kept} early_stopped_queries=${amazonDiag.queries_early_stopped} stop=${stopReason}`);
   console.log("[Amazon v2 diagnostics]", JSON.stringify({
     ...amazonDiag,
     rejectedSampleCount: amazonRejectedSamples.length,
