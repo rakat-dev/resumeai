@@ -716,7 +716,7 @@ export default function JobsPage(){
   };
 
   // ── Trigger background refresh ────────────────────────────────────────
-  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","playwright"] as const;
+  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","playwright_microsoft","playwright_google","playwright_apple","playwright_jpmorgan","playwright_goldman","playwright_openai","walmart_cxs","amazon_jobs"] as const;
 
   const handleRefresh=async(source="all")=>{
     setRefreshing(true);setRefreshMsg("");

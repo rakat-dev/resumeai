@@ -220,11 +220,17 @@ function markDone(company: string, source: RefreshSource,
 // ── Source caps ────────────────────────────────────────────────────────────
 const SOURCE_STORE_CAPS: Record<string, number> = {
   greenhouse: 3000, workday: 1500, jsearch: 500,
-  adzuna: 1000, jooble: 1000, playwright: 1500,
-  phenom: 800,       // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
-  meta: 1000,        // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
+  adzuna: 1000, jooble: 1000,
+  phenom: 800,              // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
+  meta: 1000,               // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
+  playwright_microsoft: 150,
+  playwright_google: 150,
+  playwright_apple: 100,
+  playwright_jpmorgan: 100,
+  playwright_goldman: 100,
+  playwright_openai: 50,
   walmart_cxs: 400,
-  amazon_jobs: 400,  // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
+  amazon_jobs: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -236,8 +242,14 @@ function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] 
 const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
   // meta: removed — Meta adapter now sets postedAt=null (no-date source, like Google/Apple).
   //        null postedAt passes isWithinHorizon unconditionally so no override needed.
-  playwright: 180,  // Tier A scrapers (Microsoft, Google, Amazon, Apple) keep reqs open months
-  phenom:     180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
+  playwright:           180,  // kept for backward compat (returns 400 at route level)
+  playwright_microsoft: 180,
+  playwright_google:    180,  // no-date source; override is a no-op but consistent
+  playwright_apple:     180,
+  playwright_jpmorgan:  180,
+  playwright_goldman:   180,
+  playwright_openai:    180,
+  phenom:               180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
 };
 
 async function ingestSource(
@@ -868,6 +880,22 @@ async function fetchPlaywrightTierA(): Promise<{
   return { raw: allRaw, fetched: allRaw.length, error: null, companyResults };
 }
 
+// ── Tier A per-company fetcher adapter ────────────────────────────────────
+// Converts a ScrapedJob[] fetcher into the { raw, fetched, error } shape
+// expected by ingestSource. Each per-company route calls exactly one fetcher.
+function makeTierAFetcher(source: RefreshSource, fetcher: () => Promise<ScrapedJob[]>) {
+  return async (): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> => {
+    const scraped = await fetcher();
+    const raw: RawJob[] = scraped.map(s => ({
+      id: s.id, source, company: s.company,
+      title: s.title, location: s.location, description: s.description,
+      applyUrl: s.applyUrl, postedAt: s.postedAt, type: s.type,
+      positionRank: s.positionRank,
+    }));
+    return { raw, fetched: raw.length, error: null };
+  };
+}
+
 // ── Route handler ──────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
@@ -878,6 +906,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: false,
       error: "source=all is disabled for UI refresh on Vercel. Use per-source orchestrated refresh.",
+    }, { status: 400 });
+  }
+
+  if (sourceFilter === "playwright") {
+    return NextResponse.json({
+      ok: false,
+      error: "source=playwright is deprecated; use company-specific playwright sources (playwright_microsoft, playwright_google, playwright_apple, playwright_jpmorgan, playwright_goldman, playwright_openai)",
     }, { status: 400 });
   }
 
@@ -897,75 +932,15 @@ export async function POST(req: NextRequest) {
   if (run("phenom"))     tasks.push(ingestSource("phenom",     fetchPhenomSource,     "phenom"    ).then(r => { results.phenom     = r; }));
   if (run("meta"))       tasks.push(ingestSource("meta",       fetchMetaSource,       "meta"      ).then(r => { results.meta       = r; }));
 
-  if (run("playwright")) {
-    tasks.push((async () => {
-      const startedAt = markRunning("playwright_tier_a", "playwright_microsoft");
-      try {
-        const { raw, fetched, companyResults } = await fetchPlaywrightTierA();
-        const normalized          = normalizeJobs(raw);
-        // Playwright Tier-A: use SOURCE_HORIZON_OVERRIDES["playwright"] = 180 days
-        const pwHorizonMs = (SOURCE_HORIZON_OVERRIDES["playwright"] ?? MAX_INGEST_DAYS) * 86_400_000;
-        let pw_title = 0, pw_type = 0, pw_loc = 0, pw_clear = 0, pw_hor = 0;
-        const filtered = normalized.filter(j => {
-          if (!shouldIncludeTitle(j.title))                       { pw_title++; return false; }
-          if (!isFullTime(j.employment_type, j.description))     { pw_type++;  return false; }
-          if (!isUSLocation(j.location))                         { pw_loc++;   return false; }
-          if (requiresSecurityClearance(j.title, j.description)) { pw_clear++; return false; }
-          if (Date.now() - new Date(j.posted_at ?? 0).getTime() > pwHorizonMs && j.posted_at) { pw_hor++; return false; }
-          return true;
-        });
-        const stats = { title_removed: pw_title, type_removed: pw_type, location_removed: pw_loc, clearance_removed: pw_clear, horizon_removed: pw_hor, input: normalized.length, output: filtered.length };
-        const deduped             = dedupeJobs(filtered);
-        const walmartDeduped      = deduped.filter(j => j.id.startsWith("wmt-"));
-        const nonWalmartDeduped   = deduped.filter(j => !j.id.startsWith("wmt-"));
-        const cappedPlaywright    = applySourceCap(nonWalmartDeduped, "playwright");
-        const cappedWalmart       = applySourceCap(walmartDeduped, "walmart_cxs");
-        const capped              = [...cappedPlaywright, ...cappedWalmart];
-        const { stored, error: storeErr } = await storeJobs(capped);
-        // Reconcile: deactivate old playwright rows not present in this run.
-        const livePlaywrightIds = capped.map(j => j.id);
-        await deactivateMissingJobsForSource("playwright_microsoft", livePlaywrightIds.filter(id => id.startsWith("msft-") || id.startsWith("openai-")));
-        await deactivateMissingJobsForSource("playwright_google",    livePlaywrightIds.filter(id => id.startsWith("goog-") || id.startsWith("gs-")));
-        await deactivateMissingJobsForSource("playwright_apple",     livePlaywrightIds.filter(id => id.startsWith("aapl-") || id.startsWith("netflix-")));
-        await deactivateMissingJobsForSource("amazon_jobs",           livePlaywrightIds.filter(id => id.startsWith("amzn-")));
-        await deactivateMissingJobsForSource("playwright_jpmorgan",  livePlaywrightIds.filter(id => id.startsWith("jpm-")));
-        await deactivateMissingJobsForSource("walmart_cxs",          livePlaywrightIds.filter(id => id.startsWith("wmt-")));
-        markDone("playwright_tier_a", "playwright_microsoft", startedAt, fetched, capped.length, storeErr);
-        console.log(`[refresh:playwright] raw=${fetched} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} filtered=${filtered.length} deduped=${deduped.length} stored=${stored}`);
-
-        // Optional AI enrichment — additive only, never breaks pipeline
-        if (process.env.AI_ENABLED === "true") {
-          try {
-            const { enrichBatch } = await import("@/lib/ai/enrich-batch");
-            const aiCandidates = capped
-              .filter(j => j.source === "walmart_cxs" || j.source === "amazon_jobs")
-              .slice(0, Number(process.env.AI_MAX_JOBS_PER_REFRESH ?? 100))
-              .map(j => ({
-                company:        j.company ?? "",
-                id:             j.id ?? "",
-                url:            j.apply_url ?? "",
-                title:          j.title ?? "",
-                location:       j.location ?? "",
-                description:    j.full_description ?? j.description ?? "",
-                employmentType: j.employment_type ?? "",
-              }));
-            if (aiCandidates.length > 0) {
-              const { stats: aiStats } = await enrichBatch(aiCandidates);
-              console.log("[AI] Post-fetch enrichment:", aiStats);
-            }
-          } catch (aiErr) {
-            console.error("[AI] enrichBatch error (non-fatal):", aiErr);
-          }
-        }
-
-        results.playwright = { raw: fetched, kept: capped.length, stored, error: storeErr, companies: companyResults };
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        markDone("playwright_tier_a", "playwright_microsoft", startedAt, 0, 0, msg);
-        results.playwright = { raw: 0, kept: 0, stored: 0, error: msg };
-      }
-    })());
-  }
+  // ── Per-company Tier A playwright sources ─────────────────────────────
+  if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", makeTierAFetcher("playwright_microsoft", fetchMicrosoftJobs),    "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
+  if (run("playwright_google"))    tasks.push(ingestSource("playwright_google",    makeTierAFetcher("playwright_google",    fetchGoogleJobs),       "playwright_google"   ).then(r => { results.playwright_google    = r; }));
+  if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
+  if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
+  if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));
+  if (run("playwright_openai"))    tasks.push(ingestSource("playwright_openai",    makeTierAFetcher("playwright_openai",    fetchOpenAIJobs),       "playwright_openai"   ).then(r => { results.playwright_openai    = r; }));
+  if (run("walmart_cxs"))          tasks.push(ingestSource("walmart_cxs",          makeTierAFetcher("walmart_cxs",          fetchWalmartJobs),      "walmart_cxs"         ).then(r => { results.walmart_cxs          = r; }));
+  if (run("amazon_jobs"))          tasks.push(ingestSource("amazon_jobs",          makeTierAFetcher("amazon_jobs",          fetchAmazonJobsV2),     "amazon_jobs"         ).then(r => { results.amazon_jobs          = r; }));
 
   await Promise.allSettled(tasks);
   await deactivateStaleJobs();

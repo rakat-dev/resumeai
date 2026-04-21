@@ -24,10 +24,14 @@ export type RefreshSource =
   | "playwright_microsoft"
   | "playwright_google"
   | "playwright_apple"
+  | "playwright_jpmorgan"
+  | "playwright_goldman"
+  | "playwright_openai"
   | "playwright_meta"
   | "amazon_jobs"
-  | "playwright_jpmorgan"
-  | "walmart_cxs";
+  | "walmart_cxs"
+  // @deprecated — use company-specific playwright sources; source=playwright returns 400
+  | "playwright";
 
 export interface RefreshState {
   company:         string;
