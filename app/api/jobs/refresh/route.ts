@@ -20,6 +20,48 @@ import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 
 export const maxDuration = 60;
 
+// ── Source health classification (A) ──────────────────────────────────────
+type SourceHealth =
+  | "success"
+  | "partial_success"
+  | "empty_but_ok"
+  | "rate_limited"
+  | "unauthorized"
+  | "unsupported_tenant"
+  | "bad_request"
+  | "timeout"
+  | "failed_unknown"
+  | "disabled";
+
+function classifyHealth(stored: number, fetched: number, error: string | null): SourceHealth {
+  if (error) {
+    if (error.includes("rate_limited"))            return "rate_limited";
+    if (error.includes("unauthorized") || error.includes("401")) return "unauthorized";
+    if (error.includes("422") || error.includes("unsupported_tenant")) return "unsupported_tenant";
+    if (error.includes("bad_request") || error.includes("400"))       return "bad_request";
+    if (error.includes("timeout"))                 return "timeout";
+    if (error.includes("disabled"))                return "disabled";
+    return "failed_unknown";
+  }
+  if (stored === 0)              return "empty_but_ok";
+  if (fetched > stored)         return "partial_success";
+  return "success";
+}
+
+function logSourceSummary(source: string, opts: {
+  durationMs: number;
+  fetched: number;
+  stored: number;
+  health: SourceHealth;
+  reason?: string;
+}): void {
+  const { durationMs, fetched, stored, health, reason } = opts;
+  const reasonStr = reason ? ` reason="${reason}"` : "";
+  console.log(
+    `[refresh:summary] source=${source} status=${health} duration=${durationMs}ms fetched=${fetched} stored=${stored}${reasonStr}`
+  );
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 interface RawJob {
   id:          string;
@@ -269,6 +311,7 @@ async function ingestSource(
     const { raw: rawJobs, fetched, error: fetchErr } = await fetchFn();
     if (fetchErr) {
       markDone(label, source, startedAt, 0, 0, fetchErr);
+      logSourceSummary(label, { durationMs: Date.now() - startedAt, fetched: 0, stored: 0, health: classifyHealth(0, 0, fetchErr), reason: fetchErr });
       return { raw: 0, kept: 0, stored: 0, error: fetchErr };
     }
     const normalized = normalizeJobs(rawJobs);
@@ -299,11 +342,14 @@ async function ingestSource(
     const liveIds = capped.map(j => j.id);
     await deactivateMissingJobsForSource(source, liveIds);
     markDone(label, source, startedAt, fetched, capped.length, storeErr);
+    const durationMs = Date.now() - startedAt;
     console.log(`[refresh:${label}] horizonDays=${horizonDays} raw=${fetched} norm=${normalized.length} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} type_drop=${stats.type_removed} clearance_drop=${stats.clearance_removed} horizon_drop=${stats.horizon_removed} filtered=${filtered.length} deduped=${deduped.length} capped=${capped.length} stored=${stored}`);
+    logSourceSummary(label, { durationMs, fetched, stored, health: classifyHealth(stored, fetched, storeErr), reason: storeErr ?? undefined });
     return { raw: fetched, kept: capped.length, stored, error: storeErr, filterStats: stats };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     markDone(label, source, startedAt, 0, 0, msg);
+    logSourceSummary(label, { durationMs: Date.now() - startedAt, fetched: 0, stored: 0, health: classifyHealth(0, 0, msg), reason: msg });
     return { raw: 0, kept: 0, stored: 0, error: msg };
   }
 }
@@ -415,8 +461,11 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         signal: AbortSignal.timeout(12_000),
       });
       if (!res.ok) {
-        // Log 422 so we know which tenants have bot protection
-        if (res.status === 422) console.warn(`[workday] ${name} returned 422 — tenant may require session cookie`);
+        if (res.status === 422) {
+          console.warn(`[workday] ${name} page=${page} status=422 reason=unsupported_tenant`);
+        } else {
+          console.warn(`[workday] ${name} page=${page} status=${res.status} reason=unexpected_error`);
+        }
         break;
       }
       const data = await res.json();
@@ -449,7 +498,11 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         });
       }
       if (jobs.length < WD_PAGE_SIZE) break;
-    } catch { break; }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[workday] ${name} page=${page} exception="${msg}"`);
+      break;
+    }
   }
   return results;
 }
@@ -492,7 +545,7 @@ async function fetchJSearchSource(): Promise<{ raw: RawJob[]; fetched: number; e
       headers: { "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "jsearch.p.rapidapi.com" },
       signal: AbortSignal.timeout(15_000),
     });
-    if (res.status === 429) { console.warn("[refresh] JSearch 429 rate_limited"); return { raw: [], fetched: 0, error: "rate_limited" }; }
+    if (res.status === 429) { console.warn("[jsearch] status=429 reason=rate_limited"); return { raw: [], fetched: 0, error: "rate_limited" }; }
     if (!res.ok) return { raw: [], fetched: 0, error: `HTTP ${res.status}` };
     const data = await res.json();
     const raw  = (data.data ?? []) as Record<string, unknown>[];
@@ -645,7 +698,9 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
   // rate limit, causing ~80% of companies to return 0 raw. Sequential takes
   // ~6-8s total which is still well inside the 60s refresh budget.
   type CallResult = { companyName: string; raw: Record<string, unknown>[] };
-  const settled: Array<{ status: "fulfilled"; value: CallResult } | { status: "rejected"; reason: Error; companyName: string }> = [];
+  type FailResult = { companyName: string; httpStatus: number | null; errorMsg: string };
+  const fulfilled: CallResult[] = [];
+  const failed: FailResult[] = [];
 
   for (const companyName of ADZUNA_TARGETED_COMPANIES) {
     try {
@@ -658,16 +713,15 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
       const url = `https://api.adzuna.com/v1/api/jobs/us/search/1?${params}`;
       const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
       if (!res.ok) {
-        console.warn(`[adzuna_targeted] ${companyName} HTTP ${res.status}`);
-        settled.push({ status: "rejected", reason: new Error(`HTTP ${res.status}`), companyName });
+        failed.push({ companyName, httpStatus: res.status, errorMsg: `HTTP ${res.status}` });
       } else {
         const data = await res.json();
         const raw = (data.results ?? []) as Record<string, unknown>[];
-        settled.push({ status: "fulfilled", value: { companyName, raw } });
+        fulfilled.push({ companyName, raw });
       }
     } catch (e) {
-      console.warn(`[adzuna_targeted] ${companyName} error ${(e as Error).message}`);
-      settled.push({ status: "rejected", reason: e as Error, companyName });
+      const msg = (e as Error).message ?? String(e);
+      failed.push({ companyName, httpStatus: null, errorMsg: msg });
     }
     // Small throttle between calls to avoid tripping Adzuna's per-IP rate limit
     await new Promise(r => setTimeout(r, 300));
@@ -680,9 +734,7 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
   }> = {};
   const seenIds = new Set<string>();
 
-  for (const result of settled) {
-    if (result.status !== "fulfilled") continue;
-    const { companyName, raw } = result.value;
+  for (const { companyName, raw } of fulfilled) {
     totalFetched += raw.length;
     const s = perCompany[companyName] = { raw: raw.length, keptEarly: 0, dropTitle: 0, dropLoc: 0, dropDate: 0, dropDup: 0 };
 
@@ -737,7 +789,10 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
   for (const [co, s] of Object.entries(perCompany)) {
     console.log(`[adzuna_targeted:${co}] raw=${s.raw} early_title_drop=${s.dropTitle} loc_drop=${s.dropLoc} date_drop=${s.dropDate} dup_drop=${s.dropDup} keptEarly=${s.keptEarly}`);
   }
-  console.log(`[adzuna_targeted] companies=${ADZUNA_TARGETED_COMPANIES.length} raw=${totalFetched} kept=${results.length} maxPerCompany=${ADZUNA_TARGETED_MAX_PER_COMPANY}`);
+  for (const f of failed) {
+    console.warn(`[adzuna_targeted] company="${f.companyName}" status=failed http=${f.httpStatus ?? "network_error"} error="${f.errorMsg}"`);
+  }
+  console.log(`[adzuna_targeted] companies_total=${ADZUNA_TARGETED_COMPANIES.length} success=${fulfilled.length} failed=${failed.length} raw=${totalFetched} kept=${results.length} maxPerCompany=${ADZUNA_TARGETED_MAX_PER_COMPANY}`);
   return { raw: results, fetched: totalFetched, error: null };
 }
 
