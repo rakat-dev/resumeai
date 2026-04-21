@@ -15,6 +15,7 @@ export async function enrichBatch(
   jobs: JobInputForEnrichment[],
   opts?: BatchOpts
 ): Promise<{ results: Map<string, EnrichedJob>; stats: AiBatchStats }> {
+  const batchStartMs = Date.now();
   const limit = opts?.maxJobs ?? MAX_JOBS_PER_REFRESH;
   const toProcess = jobs.slice(0, limit);
   const skippedCount = jobs.length - toProcess.length;
@@ -25,6 +26,7 @@ export async function enrichBatch(
     enriched:       0,
     cacheHits:      0,
     failed:         0,
+    rateLimited:    0,
     skipped:        skippedCount,
     totalLatencyMs: 0,
     totalTokens:    0,
@@ -47,7 +49,10 @@ export async function enrichBatch(
       const s = result.aiMeta.status;
       if (s === "success")       stats.enriched++;
       else if (s === "cached")   stats.cacheHits++;
-      else if (s === "failed")   stats.failed++;
+      else if (s === "failed") {
+        if (result.aiMeta?.error === "rate_limited") stats.rateLimited++;
+        else                                         stats.failed++;
+      }
       else if (s === "skipped")  stats.skipped++;
       stats.totalLatencyMs += result.aiMeta.latencyMs;
       stats.totalTokens    += result.aiMeta.tokenUsage?.total ?? 0;
@@ -73,6 +78,9 @@ export async function enrichBatch(
     }
   }
 
-  console.log("[AI batch] Stats:", JSON.stringify(stats));
+  const durationMs = Date.now() - batchStartMs;
+  console.log(
+    `[ai_batch] total=${stats.totalJobs} enriched=${stats.enriched} cached=${stats.cacheHits} failed=${stats.failed} skipped=${stats.skipped} rate_limited=${stats.rateLimited} durationMs=${durationMs}`
+  );
   return { results, stats };
 }

@@ -13,6 +13,7 @@ export function getOpenAIClient(): OpenAI | null {
 interface CallResult {
   content: string;
   usage: { input: number; output: number; total: number };
+  error?: "rate_limited";
 }
 
 interface CallOpts {
@@ -33,7 +34,7 @@ export async function callOpenAI(
 
   const model = opts.model ?? process.env.AI_MODEL_DEFAULT ?? "gpt-4o-mini";
   const maxTokens = opts.maxTokens ?? 500;
-  const maxRetries = opts.retries ?? Number(process.env.AI_RETRY_COUNT ?? 1);
+  const maxRetries = opts.retries ?? Number(process.env.AI_RETRY_COUNT ?? 2);
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -61,6 +62,16 @@ export async function callOpenAI(
     } catch (e) {
       lastError = e;
     }
+  }
+  const isRateLimit = (
+    lastError instanceof Error && (
+      (lastError as unknown as { status?: number }).status === 429 ||
+      lastError.message.toLowerCase().includes("rate limit") ||
+      lastError.message.includes("429")
+    )
+  );
+  if (isRateLimit) {
+    return { content: "", usage: { input: 0, output: 0, total: 0 }, error: "rate_limited" };
   }
   throw lastError;
 }
