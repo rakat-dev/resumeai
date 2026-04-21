@@ -1014,7 +1014,7 @@ export async function POST(req: NextRequest) {
         const aiStart = Date.now();
         const { data: dbJobsRaw } = await supabaseAdmin
           .from("jobs")
-          .select("id, company, title, description, full_description, location, apply_url")
+          .select("id, source, company, title, description, full_description, location, apply_url")
           .eq("source", aiSource).eq("is_active", true).limit(200);
         const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
         console.log(`[ai_enrichment] source=${aiSource} selected=${dbJobs.length}`);
@@ -1031,20 +1031,37 @@ export async function POST(req: NextRequest) {
         const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 50));
         console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
         console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed} skipped=${stats.skipped} rate_limited=${stats.rateLimited}`);
-        const updates: Array<{ id: string; ai_enrichment: unknown; ai_meta: unknown }> = [];
+        const updates: Array<{ id: string; source: string; title: string; company: string; location: string; ai_enrichment: unknown; ai_meta: unknown | null }> = [];
         let skippedInvalid = 0;
         for (const [key, enriched] of aiResults) {
-          if (!key || !enriched?.ai || !enriched?.aiMeta) {
+          if (!key || !enriched?.ai) {
             if (skippedInvalid < 3) {
-              const reason = !key ? "missing_key" : !enriched?.ai ? "missing_ai" : "missing_aiMeta";
+              const reason = !key ? "missing_key" : "missing_ai";
               console.warn(`[ai_enrichment] skip_invalid reason=${reason} id=${key} source=${aiSource}`);
             }
             skippedInvalid++;
             continue;
           }
-          updates.push({ id: key, ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta });
+          const job = dbJobs.find(j => String(j.id) === key);
+          if (!job) {
+            if (skippedInvalid < 3) console.warn(`[ai_enrichment] skip_invalid reason=job_not_found id=${key} source=${aiSource}`);
+            skippedInvalid++;
+            continue;
+          }
+          updates.push({
+            id:           String(job.id),
+            source:       String(job.source ?? aiSource),
+            title:        String(job.title ?? ""),
+            company:      String(job.company ?? ""),
+            location:     String(job.location ?? ""),
+            ai_enrichment: enriched.ai,
+            ai_meta:      enriched.aiMeta ?? null,
+          });
         }
         console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates=${updates.length}`);
+        if (updates.length > 0) {
+          console.log(`[ai_enrichment] sample_update:`, JSON.stringify(updates[0], null, 2));
+        }
         if (updates.length === 0) {
           console.warn(`[ai_enrichment] source=${aiSource} no valid updates — skipping upsert`);
         } else {
