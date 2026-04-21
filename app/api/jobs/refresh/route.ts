@@ -1024,13 +1024,20 @@ export async function POST(req: NextRequest) {
           location:    String(j.location ?? ""),
           url:         String(j.apply_url ?? ""),
         }));
-        const { results: aiResults, stats } = await enrichBatch(jobsForAi);
+        const t0 = Date.now();
+        const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 50));
+        console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
         const updates: Array<{ id: string; ai_enrichment: unknown; ai_meta: unknown }> = [];
         for (const [key, enriched] of aiResults) {
-          if (enriched.ai === null) continue;
+          if (!key || !enriched?.ai || !enriched?.aiMeta) {
+            console.warn("[ai_enrichment] skip invalid row", { id: key, hasAi: !!enriched?.ai, hasMeta: !!enriched?.aiMeta });
+            continue;
+          }
           updates.push({ id: key, ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta });
         }
-        if (updates.length > 0) {
+        if (updates.length === 0) {
+          console.warn(`[ai_enrichment] source=${aiSource} no valid updates — skipping upsert`);
+        } else {
           const { error: upsertErr } = await supabaseAdmin
             .from("jobs")
             .upsert(updates, { onConflict: "id" });
