@@ -1026,9 +1026,9 @@ export async function POST(req: NextRequest) {
           location:    String(j.location ?? ""),
           url:         String(j.apply_url ?? ""),
         }));
-        console.log(`[ai_enrichment] source=${aiSource} sending_to_batch=${jobsForAi.slice(0, 50).length}`);
+        console.log(`[ai_enrichment] source=${aiSource} sending_to_batch=${jobsForAi.slice(0, 10).length}`);
         const t0 = Date.now();
-        const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 50));
+        const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 10));
         console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
         console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed}`);
 
@@ -1064,6 +1064,34 @@ export async function POST(req: NextRequest) {
 
         console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates_attempted=${updatesAttempted} updates_succeeded=${updatesSucceeded} updates_failed=${updatesFailed}`);
         console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
+
+        // Classify all results
+        let aiNullCount = 0;
+        let statusFailed = 0;
+        let statusCached = 0;
+        let statusSuccess = 0;
+        let statusRateLimited = 0;
+        let hasErrorCount = 0;
+        for (const [, enriched] of aiResults) {
+          if (enriched.ai === null) aiNullCount++;
+          const s = enriched.aiMeta?.status;
+          if (s === "success") statusSuccess++;
+          else if (s === "cached") statusCached++;
+          else if (s === "failed") statusFailed++;
+          else if (s === "skipped") { /* count elsewhere */ }
+          if (enriched.aiMeta?.error) hasErrorCount++;
+          if (s === "failed" && (enriched.aiMeta as unknown as Record<string, unknown>)?.error === "rate_limited") statusRateLimited++;
+        }
+        console.log(`[ai_enrichment] source=${aiSource} ai_null=${aiNullCount} status_success=${statusSuccess} status_cached=${statusCached} status_failed=${statusFailed} rate_limited=${statusRateLimited} has_error=${hasErrorCount}`);
+
+        // Log first 3 missing-ai rows with aiMeta details
+        let missingAiLogged = 0;
+        for (const [key, enriched] of aiResults) {
+          if (enriched.ai === null && missingAiLogged < 3) {
+            console.warn(`[ai_enrichment] missing_ai id=${key} source=${aiSource} status=${enriched.aiMeta?.status} error=${(enriched.aiMeta as unknown as Record<string, unknown>)?.error ?? "none"}`);
+            missingAiLogged++;
+          }
+        }
       } catch (aiErr: unknown) {
         const msg = aiErr instanceof Error ? aiErr.message : String(aiErr);
         console.error(`[ai_enrichment] source=${aiSource} error="${msg}" — enrichment skipped, refresh continues`);

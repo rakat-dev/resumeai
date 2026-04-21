@@ -94,7 +94,11 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     const normUserPrompt = NORMALIZATION_PROMPT.replace("{{RAW_JOB_JSON}}", rawJobJson);
     const normResult = await callOpenAI(SYSTEM_PROMPT_BASE, normUserPrompt, { model });
     if (normResult.error === "rate_limited") {
+      console.warn(`[enrich-job] returning null ai reason=rate_limited_norm jobId=${job.id ?? "unknown"}`);
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
+    }
+    if (!normResult.content || normResult.content.trim() === "") {
+      console.warn(`[enrich-job] empty content from normalization jobId=${job.id ?? "unknown"}`);
     }
     totalInput  += normResult.usage.input;
     totalOutput += normResult.usage.output;
@@ -102,6 +106,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     const normParsed = JobNormalizationSchema.safeParse(JSON.parse(normResult.content));
     if (!normParsed.success) {
       console.warn("[AI] normalization validation failed:", normParsed.error.message);
+      console.warn(`[enrich-job] returning null ai reason=norm_parse_failed jobId=${job.id ?? "unknown"}`);
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "normalization_validation_failed" }) };
     }
     const normData: JobNormalization = normParsed.data;
@@ -111,7 +116,11 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
       .replace("{{NORMALIZATION_JSON}}", JSON.stringify(normData));
     const relResult = await callOpenAI(SYSTEM_PROMPT_BASE, relUserPrompt, { model });
     if (relResult.error === "rate_limited") {
+      console.warn(`[enrich-job] returning null ai reason=rate_limited_rel jobId=${job.id ?? "unknown"}`);
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
+    }
+    if (!relResult.content || relResult.content.trim() === "") {
+      console.warn(`[enrich-job] empty content from relevance jobId=${job.id ?? "unknown"}`);
     }
     totalInput  += relResult.usage.input;
     totalOutput += relResult.usage.output;
@@ -119,6 +128,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     const relParsed = RelevanceSchema.safeParse(JSON.parse(relResult.content));
     if (!relParsed.success) {
       console.warn("[AI] relevance validation failed:", relParsed.error.message);
+      console.warn(`[enrich-job] returning null ai reason=rel_parse_failed jobId=${job.id ?? "unknown"}`);
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "relevance_validation_failed" }) };
     }
     const relData = relParsed.data;
@@ -162,6 +172,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[AI] enrichJob error:", msg);
+    console.warn(`[enrich-job] returning null ai reason=outer_catch error=${msg} jobId=${job.id ?? "unknown"}`);
     return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: msg }) };
   }
 }
