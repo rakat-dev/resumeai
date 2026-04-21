@@ -20,7 +20,7 @@ export async function scoreJobFit(
     .replace("{{NORMALIZATION_JSON}}", normJson);
 
   try {
-    const result = await callOpenAI(SYSTEM_PROMPT_BASE, userPrompt, { model, maxTokens: 250 });
+    const result = await callOpenAI(SYSTEM_PROMPT_BASE, userPrompt, { model });
     const parsed = FitScoreSchema.safeParse(JSON.parse(result.content));
     if (!parsed.success) {
       console.warn("[AI] fitScore validation failed:", parsed.error.message);

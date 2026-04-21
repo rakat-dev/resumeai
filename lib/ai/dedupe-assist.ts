@@ -17,7 +17,7 @@ export async function dedupeAssist(
     .replace("{{JOB_B_JSON}}", JSON.stringify(jobB));
 
   try {
-    const result = await callOpenAI(SYSTEM_PROMPT_BASE, userPrompt, { model, maxTokens: 200 });
+    const result = await callOpenAI(SYSTEM_PROMPT_BASE, userPrompt, { model });
     const parsed = DedupeSchema.safeParse(JSON.parse(result.content));
     if (!parsed.success) {
       console.warn("[AI] dedupeAssist validation failed:", parsed.error.message);

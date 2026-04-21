@@ -18,7 +18,7 @@ interface CallResult {
 
 interface CallOpts {
   model?: string;
-  maxTokens?: number;
+
   retries?: number;
 }
 
@@ -33,7 +33,7 @@ export async function callOpenAI(
   }
 
   const model = opts.model ?? process.env.AI_MODEL_DEFAULT ?? "gpt-4o-mini";
-  const maxTokens = opts.maxTokens ?? 500;
+
   const maxRetries = opts.retries ?? Number(process.env.AI_RETRY_COUNT ?? 2);
 
   let lastError: unknown;
@@ -42,15 +42,16 @@ export async function callOpenAI(
       await new Promise(r => setTimeout(r, 500 * attempt));
     }
     try {
+      const messages = [
+        { role: "system" as const, content: systemPrompt },
+        { role: "user" as const, content: userPrompt },
+      ];
+      console.log("[AI DEBUG] payload:", JSON.stringify({ model, messages }));
       const res = await client.chat.completions.create({
         model,
         temperature: 0,
-
         response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
+        messages,
       });
       const content = res.choices[0]?.message?.content ?? "{}";
       const usage = {

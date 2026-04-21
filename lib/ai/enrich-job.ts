@@ -92,7 +92,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     const rawJobJson = JSON.stringify(job);
 
     const normUserPrompt = NORMALIZATION_PROMPT.replace("{{RAW_JOB_JSON}}", rawJobJson);
-    const normResult = await callOpenAI(SYSTEM_PROMPT_BASE, normUserPrompt, { model, maxTokens: 500 });
+    const normResult = await callOpenAI(SYSTEM_PROMPT_BASE, normUserPrompt, { model });
     if (normResult.error === "rate_limited") {
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
     }
@@ -109,7 +109,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     const relUserPrompt = RELEVANCE_PROMPT
       .replace("{{RAW_JOB_JSON}}", rawJobJson)
       .replace("{{NORMALIZATION_JSON}}", JSON.stringify(normData));
-    const relResult = await callOpenAI(SYSTEM_PROMPT_BASE, relUserPrompt, { model, maxTokens: 300 });
+    const relResult = await callOpenAI(SYSTEM_PROMPT_BASE, relUserPrompt, { model });
     if (relResult.error === "rate_limited") {
       return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
     }
