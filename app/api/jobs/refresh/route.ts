@@ -1030,9 +1030,13 @@ export async function POST(req: NextRequest) {
         const t0 = Date.now();
         const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 50));
         console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
-        console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed} skipped=${stats.skipped} rate_limited=${stats.rateLimited}`);
-        const updates: Array<{ id: string; source: string; title: string; company: string; location: string; ai_enrichment: unknown; ai_meta: unknown | null }> = [];
+        console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed}`);
+
+        let updatesAttempted = 0;
+        let updatesSucceeded = 0;
+        let updatesFailed = 0;
         let skippedInvalid = 0;
+
         for (const [key, enriched] of aiResults) {
           if (!key || !enriched?.ai) {
             if (skippedInvalid < 3) {
@@ -1042,36 +1046,24 @@ export async function POST(req: NextRequest) {
             skippedInvalid++;
             continue;
           }
-          const job = dbJobs.find(j => String(j.id) === key);
-          if (!job) {
-            if (skippedInvalid < 3) console.warn(`[ai_enrichment] skip_invalid reason=job_not_found id=${key} source=${aiSource}`);
-            skippedInvalid++;
-            continue;
-          }
-          updates.push({
-            id:           String(job.id),
-            source:       String(job.source ?? aiSource),
-            title:        String(job.title ?? ""),
-            company:      String(job.company ?? ""),
-            location:     String(job.location ?? ""),
-            ai_enrichment: enriched.ai,
-            ai_meta:      enriched.aiMeta ?? null,
-          });
-        }
-        console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates=${updates.length}`);
-        if (updates.length > 0) {
-          console.log(`[ai_enrichment] sample_update:`, JSON.stringify(updates[0], null, 2));
-        }
-        if (updates.length === 0) {
-          console.warn(`[ai_enrichment] source=${aiSource} no valid updates — skipping upsert`);
-        } else {
-          const { error: upsertErr } = await supabaseAdmin
+          updatesAttempted++;
+          const { error: updateErr } = await supabaseAdmin
             .from("jobs")
-            .upsert(updates, { onConflict: "id" });
-          if (upsertErr) console.error(`[ai_enrichment] source=${aiSource} upsert error: ${upsertErr.message}`);
-          if (!upsertErr) console.log(`[ai_enrichment] source=${aiSource} persisted=${updates.length}`);
+            .update({
+              ai_enrichment: enriched.ai,
+              ai_meta: enriched.aiMeta ?? null,
+            })
+            .eq("id", key);
+          if (updateErr) {
+            console.error(`[ai_enrichment] update failed id=${key}`, JSON.stringify({ message: updateErr.message, details: updateErr.details, hint: updateErr.hint, code: updateErr.code }, null, 2));
+            updatesFailed++;
+          } else {
+            updatesSucceeded++;
+          }
         }
-        console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} persisted=${updates.length} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
+
+        console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates_attempted=${updatesAttempted} updates_succeeded=${updatesSucceeded} updates_failed=${updatesFailed}`);
+        console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
       } catch (aiErr: unknown) {
         const msg = aiErr instanceof Error ? aiErr.message : String(aiErr);
         console.error(`[ai_enrichment] source=${aiSource} error="${msg}" — enrichment skipped, refresh continues`);
