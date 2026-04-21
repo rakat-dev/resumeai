@@ -9,6 +9,16 @@ import { saveJob, unsaveJob, isJobSaved, type SavedJob } from "@/lib/savedJobs";
 import { getBaseResume, saveBaseResume } from "@/lib/baseResume";
 
 
+// ── URL safety helper ─────────────────────────────────────────────────────
+// Safari throws DOMException "The string did not match the expected pattern"
+// when <a href> receives a structurally invalid URL (e.g. null cast to string,
+// relative-only path, malformed scheme). Return "#" for anything that doesn't
+// parse as an absolute URL so the anchor renders but never navigates blindly.
+function safeUrl(url: string | null | undefined): string {
+  if (!url) return "#";
+  try { new URL(url); return url; } catch { return "#"; }
+}
+
 // ── Session storage (clears when tab/browser closed) ──────────────────────
 const SS = { Q:"ss_rq", F:"ss_rf", J:"ss_rj", S:"ss_rs",
   SEL:"ss_sel", V1:"ss_v1", V2:"ss_v2", JD:"ss_jd",
@@ -1156,7 +1166,7 @@ export default function JobsPage(){
                       />
                     </div>
                   )}
-                  {selected.applyUrl&&selected.applyUrl!=="#"&&<a href={selected.applyUrl} target="_blank" rel="noopener noreferrer"
+                  {safeUrl(selected.applyUrl)!=="#"&&<a href={safeUrl(selected.applyUrl)} target="_blank" rel="noopener noreferrer"
                     style={{...S.btn("var(--accent2)","#0a0a0f"),textDecoration:"none",display:"inline-flex",width:"100%",justifyContent:"center",marginTop:10}}>🚀 Apply Now</a>}
                 </>}
               </div>
@@ -1323,7 +1333,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           style={{...S.btn("var(--surface2)","var(--accent)",true),border:"1px solid rgba(108,99,255,0.4)"}}>
           \ud83d\udccb JD
         </button>}
-        {job.applyUrl&&job.applyUrl!=="#"&&<a href={job.applyUrl} target="_blank" rel="noopener noreferrer"
+        {safeUrl(job.applyUrl)!=="#"&&<a href={safeUrl(job.applyUrl)} target="_blank" rel="noopener noreferrer"
           style={{...S.btn("var(--surface2)","var(--text)",true),border:"1px solid var(--border)",textDecoration:"none"}}>\ud83d\udd17 View</a>}
         <button onClick={handleBookmark}
           style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"7px 12px",borderRadius:10,border:saved?"1px solid rgba(0,229,176,0.4)":"1px solid var(--border)",background:saved?"rgba(0,229,176,0.1)":"var(--surface2)",color:saved?"var(--accent2)":"var(--muted)",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all .2s",fontFamily:"'DM Sans',sans-serif",whiteSpace:"nowrap"}}>

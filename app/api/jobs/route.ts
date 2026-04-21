@@ -71,7 +71,7 @@ function rowToJob(row: JobRow): Job {
     location:        row.location,
     type:            row.employment_type ?? "Full-time",
     description:     row.description ?? "",
-    applyUrl:        row.apply_url,
+    applyUrl:        row.apply_url ?? "#",
     postedAt:        row.posted_at ?? "",
     postedDate:      ts ? formatPostedDate(ts) : "Recently",
     postedTimestamp: ts,
