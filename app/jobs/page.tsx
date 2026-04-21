@@ -634,6 +634,16 @@ const S={
   btn:(bg:string,color:string,small=false)=>({display:"inline-flex",alignItems:"center",gap:7,padding:small?"7px 14px":"12px 22px",borderRadius:11,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:small?12:14,cursor:"pointer",border:"none",background:bg,color,transition:"all .2s"} as React.CSSProperties),
 };
 
+// ── Safe JSON parser (guards against Vercel timeout HTML responses) ─────────
+async function parseJsonSafe(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(text ? `Server error: ${text.slice(0, 200)}` : `HTTP ${res.status}`);
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 export default function JobsPage(){
   const [jobs,setJobs]=useState<Job[]>([]);
@@ -706,21 +716,58 @@ export default function JobsPage(){
   };
 
   // ── Trigger background refresh ────────────────────────────────────────
+  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","playwright"] as const;
+
   const handleRefresh=async(source="all")=>{
     setRefreshing(true);setRefreshMsg("");
+    // Per-source sequential orchestration — avoids Vercel 60s timeout
+    if(source==="all"){
+      let totalUpserted=0;
+      const sourceErrors:string[]=[];
+      const t0=Date.now();
+      for(let i=0;i<REFRESH_SOURCES.length;i++){
+        const src=REFRESH_SOURCES[i];
+        setRefreshMsg(`Refreshing ${src}... (${i+1}/${REFRESH_SOURCES.length})`);
+        try{
+          const res=await fetch("/api/jobs/refresh",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({source:src}),
+          });
+          const data=await parseJsonSafe(res);
+          if(!res.ok){
+            sourceErrors.push(`${src}: ${(data.error as string)||`HTTP ${res.status}`}`);
+          } else {
+            totalUpserted+=(data.jobs_upserted_this_run as number)??0;
+          }
+        }catch(e:unknown){
+          sourceErrors.push(`${src}: ${e instanceof Error?e.message:"failed"}`);
+        }
+      }
+      const secs=Math.round((Date.now()-t0)/1000);
+      await loadJobs(filters.datePosted,sort);
+      if(sourceErrors.length>0){
+        setRefreshMsg(`⚠️ Refresh complete (${secs}s) — ${totalUpserted} rows upserted. Errors: ${sourceErrors.join("; ")}`);
+      } else {
+        setRefreshMsg(`✅ Refresh complete (${secs}s) — ${totalUpserted} rows upserted across ${REFRESH_SOURCES.length} sources`);
+      }
+      setRefreshing(false);
+      setTimeout(()=>setRefreshMsg(""),10000);
+      return;
+    }
+    // Single-source path (source dropdown / individual source buttons)
     try{
       const res=await fetch("/api/jobs/refresh",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({source}),
       });
-      const data=await res.json();
-      if(!res.ok)throw new Error(data.error||`HTTP ${res.status}`);
-      const upserted = data.jobs_upserted_this_run ?? data.jobs_stored ?? 0;
+      const data=await parseJsonSafe(res);
+      if(!res.ok)throw new Error((data.error as string)||`HTTP ${res.status}`);
+      const upserted = (data.jobs_upserted_this_run as number) ?? (data.jobs_stored as number) ?? 0;
       const dbTotal  = data.board_db_total ?? "?";
-      const secs     = Math.round(data.duration_ms/1000);
+      const secs     = Math.round((data.duration_ms as number)/1000);
       setRefreshMsg(`✅ Refresh done (${secs}s) — ${upserted} rows upserted this run • ${dbTotal} active rows in DB`);
-      // Reload jobs after refresh
       await loadJobs(filters.datePosted,sort);
     }catch(e:unknown){
       setRefreshMsg(`❌ ${e instanceof Error?e.message:"Refresh failed"}`);
