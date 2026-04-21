@@ -927,7 +927,7 @@ export async function POST(req: NextRequest) {
         console.log(`[refresh:playwright] raw=${fetched} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} filtered=${filtered.length} deduped=${deduped.length} stored=${stored}`);
 
         // Optional AI enrichment — additive only, never breaks pipeline
-        if (process.env.AI_ENABLED !== "false" && process.env.AI_ENRICHMENT_ENABLED !== "false") {
+        if (process.env.AI_ENABLED === "true") {
           try {
             const { enrichBatch } = await import("@/lib/ai/enrich-batch");
             const aiCandidates = capped
