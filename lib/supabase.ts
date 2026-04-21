@@ -40,4 +40,6 @@ export interface JobRow {
   is_active:           boolean;
   position_rank:       number | null;   // 1..120 for no-date Tier A scrapers (Google etc.); NULL otherwise
   full_description:    string | null;   // full cleaned JD body (no truncation); NULL for sources without JD
+  ai_enrichment:       unknown | null;  // AiEnrichment JSONB; null until enriched
+  ai_meta:             unknown | null;  // AiMeta JSONB; null until enriched
 }

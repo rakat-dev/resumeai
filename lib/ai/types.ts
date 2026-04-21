@@ -75,6 +75,7 @@ export interface AiBatchStats {
   enriched: number;
   cacheHits: number;
   failed: number;
+  rateLimited: number;
   skipped: number;
   totalLatencyMs: number;
   totalTokens: number;

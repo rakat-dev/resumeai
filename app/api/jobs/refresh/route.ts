@@ -17,6 +17,9 @@ import {
 import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } from "@/lib/companyAtsRegistry";
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
+import { enrichBatch } from "@/lib/ai/enrich-batch";
+import { isAiEnabled } from "@/lib/ai/enrich-job";
+import type { JobInputForEnrichment } from "@/lib/ai/enrich-job";
 
 export const maxDuration = 60;
 
@@ -999,6 +1002,47 @@ export async function POST(req: NextRequest) {
 
   await Promise.allSettled(tasks);
   await deactivateStaleJobs();
+
+  // ── AI enrichment (opt-in, non-blocking) ──────────────────────────────────
+  if (isAiEnabled()) {
+    for (const aiSource of ["walmart_cxs", "amazon_jobs"] as const) {
+      if (!run(aiSource)) continue;
+      const sourceResult = results[aiSource] as { error?: string | null } | undefined;
+      if (sourceResult?.error) continue;
+      try {
+        const aiStart = Date.now();
+        const { data: dbJobsRaw } = await supabaseAdmin
+          .from("jobs")
+          .select("id, company, title, description, full_description, location, apply_url")
+          .eq("source", aiSource).eq("is_active", true).limit(200);
+        const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
+        const jobsForAi: JobInputForEnrichment[] = dbJobs.map(j => ({
+          id:          String(j.id ?? ""),
+          company:     String(j.company ?? ""),
+          title:       String(j.title ?? ""),
+          description: String(j.full_description ?? j.description ?? ""),
+          location:    String(j.location ?? ""),
+          url:         String(j.apply_url ?? ""),
+        }));
+        const { results: aiResults, stats } = await enrichBatch(jobsForAi);
+        const updates: Array<{ id: string; ai_enrichment: unknown; ai_meta: unknown }> = [];
+        for (const [key, enriched] of aiResults) {
+          if (enriched.ai === null) continue;
+          updates.push({ id: key, ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta });
+        }
+        if (updates.length > 0) {
+          const { error: upsertErr } = await supabaseAdmin
+            .from("jobs")
+            .upsert(updates, { onConflict: "id" });
+          if (upsertErr) console.error(`[ai_enrichment] source=${aiSource} upsert error: ${upsertErr.message}`);
+        }
+        console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} persisted=${updates.length} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
+      } catch (aiErr: unknown) {
+        const msg = aiErr instanceof Error ? aiErr.message : String(aiErr);
+        console.error(`[ai_enrichment] source=${aiSource} error="${msg}" — enrichment skipped, refresh continues`);
+      }
+    }
+  }
 
   // Query DB for actual visible board count after this run
   let boardVisibleTotal = 0;

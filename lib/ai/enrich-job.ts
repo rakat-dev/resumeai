@@ -93,6 +93,9 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
 
     const normUserPrompt = NORMALIZATION_PROMPT.replace("{{RAW_JOB_JSON}}", rawJobJson);
     const normResult = await callOpenAI(SYSTEM_PROMPT_BASE, normUserPrompt, { model, maxTokens: 500 });
+    if (normResult.error === "rate_limited") {
+      return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
+    }
     totalInput  += normResult.usage.input;
     totalOutput += normResult.usage.output;
 
@@ -107,6 +110,9 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
       .replace("{{RAW_JOB_JSON}}", rawJobJson)
       .replace("{{NORMALIZATION_JSON}}", JSON.stringify(normData));
     const relResult = await callOpenAI(SYSTEM_PROMPT_BASE, relUserPrompt, { model, maxTokens: 300 });
+    if (relResult.error === "rate_limited") {
+      return { ai: null, aiMeta: makeMeta(cacheKey, rawHash, startMs, "failed", { error: "rate_limited" }) };
+    }
     totalInput  += relResult.usage.input;
     totalOutput += relResult.usage.output;
 
