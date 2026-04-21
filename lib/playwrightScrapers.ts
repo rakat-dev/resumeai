@@ -1055,42 +1055,42 @@ export async function fetchGoldmanSachsJobs(): Promise<ScrapedJob[]> {
 // ── OpenAI (Ashby) ────────────────────────────────────────────────────────
 // Ashby public job board API: GET /api/jobPostings?organizationHostedJobsPageName={slug}
 export async function fetchOpenAIJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
-  try {
-    const res = await fetch(
-      "https://api.ashbyhq.com/posting-api/job-board?organizationHostedJobsPageName=openai",
-      {
-        headers: { "Accept": "application/json" },
-        signal: AbortSignal.timeout(15_000),
-      }
-    );
-    if (!res.ok) {
-      console.warn(`[playwright] OpenAI (Ashby) HTTP ${res.status}`);
-      return results;
-    }
-    const data = await res.json();
-    const jobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
-
-    for (const j of jobs) {
-      const jobId   = (j.id as string) ?? String(Math.random());
-      const locArr  = ((j.location as Record<string,unknown>)?.name as string) ?? (j.locationName as string) ?? "United States";
-      const applyUrl = (j.jobUrl as string) ?? `https://openai.com/careers`;
-      results.push({
-        id:          `openai-${jobId}`,
-        company:     "OpenAI",
-        title:       (j.title as string) ?? "",
-        location:    locArr,
-        description: (j.descriptionPlain as string) ?? (j.description as string) ?? "",
-        applyUrl,
-        postedAt:    (j.publishedDate as string) ?? (j.createdAt as string) ?? null,
-        type:        "Full-time",
-      });
-    }
-  } catch (e) {
-    console.warn(`[playwright] OpenAI fetch error: ${e}`);
+  if (process.env.OPENAI_SOURCE_ENABLED === "false") {
+    throw new Error("disabled: OPENAI_SOURCE_ENABLED=false");
   }
 
-  console.log(`[playwright] OpenAI: ${results.length} raw`);
+  const results: ScrapedJob[] = [];
+  const res = await fetch(
+    "https://api.ashbyhq.com/posting-api/job-board?organizationHostedJobsPageName=openai",
+    {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    }
+  );
+  if (!res.ok) {
+    const errLabel = res.status === 401 ? "unauthorized" : `http_${res.status}`;
+    throw new Error(`${errLabel}: Ashby returned HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  const jobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
+
+  for (const j of jobs) {
+    const jobId   = (j.id as string) ?? String(Math.random());
+    const locArr  = ((j.location as Record<string,unknown>)?.name as string) ?? (j.locationName as string) ?? "United States";
+    const applyUrl = (j.jobUrl as string) ?? `https://openai.com/careers`;
+    results.push({
+      id:          `openai-${jobId}`,
+      company:     "OpenAI",
+      title:       (j.title as string) ?? "",
+      location:    locArr,
+      description: (j.descriptionPlain as string) ?? (j.description as string) ?? "",
+      applyUrl,
+      postedAt:    (j.publishedDate as string) ?? (j.createdAt as string) ?? null,
+      type:        "Full-time",
+    });
+  }
+
+  if (results.length > 0) console.log(`[playwright_openai] fetched=${results.length}`);
   return results;
 }
 
