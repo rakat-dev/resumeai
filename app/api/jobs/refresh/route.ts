@@ -1009,6 +1009,7 @@ export async function POST(req: NextRequest) {
       if (!run(aiSource)) continue;
       const sourceResult = results[aiSource] as { error?: string | null } | undefined;
       if (sourceResult?.error) continue;
+      console.log(`[ai_enrichment] source=${aiSource} started`);
       try {
         const aiStart = Date.now();
         const { data: dbJobsRaw } = await supabaseAdmin
@@ -1016,6 +1017,7 @@ export async function POST(req: NextRequest) {
           .select("id, company, title, description, full_description, location, apply_url")
           .eq("source", aiSource).eq("is_active", true).limit(200);
         const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
+        console.log(`[ai_enrichment] source=${aiSource} selected=${dbJobs.length}`);
         const jobsForAi: JobInputForEnrichment[] = dbJobs.map(j => ({
           id:          String(j.id ?? ""),
           company:     String(j.company ?? ""),
@@ -1024,17 +1026,25 @@ export async function POST(req: NextRequest) {
           location:    String(j.location ?? ""),
           url:         String(j.apply_url ?? ""),
         }));
+        console.log(`[ai_enrichment] source=${aiSource} sending_to_batch=${jobsForAi.slice(0, 50).length}`);
         const t0 = Date.now();
         const { results: aiResults, stats } = await enrichBatch(jobsForAi.slice(0, 50));
         console.log(`[ai_enrichment] source=${aiSource} enrichBatch done in ${Date.now() - t0}ms`);
+        console.log(`[ai_enrichment] source=${aiSource} batch_results=${aiResults.size} enriched=${stats.enriched} failed=${stats.failed} skipped=${stats.skipped} rate_limited=${stats.rateLimited}`);
         const updates: Array<{ id: string; ai_enrichment: unknown; ai_meta: unknown }> = [];
+        let skippedInvalid = 0;
         for (const [key, enriched] of aiResults) {
           if (!key || !enriched?.ai || !enriched?.aiMeta) {
-            console.warn("[ai_enrichment] skip invalid row", { id: key, hasAi: !!enriched?.ai, hasMeta: !!enriched?.aiMeta });
+            if (skippedInvalid < 3) {
+              const reason = !key ? "missing_key" : !enriched?.ai ? "missing_ai" : "missing_aiMeta";
+              console.warn(`[ai_enrichment] skip_invalid reason=${reason} id=${key} source=${aiSource}`);
+            }
+            skippedInvalid++;
             continue;
           }
           updates.push({ id: key, ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta });
         }
+        console.log(`[ai_enrichment] source=${aiSource} skipped_invalid=${skippedInvalid} updates=${updates.length}`);
         if (updates.length === 0) {
           console.warn(`[ai_enrichment] source=${aiSource} no valid updates — skipping upsert`);
         } else {
@@ -1042,6 +1052,7 @@ export async function POST(req: NextRequest) {
             .from("jobs")
             .upsert(updates, { onConflict: "id" });
           if (upsertErr) console.error(`[ai_enrichment] source=${aiSource} upsert error: ${upsertErr.message}`);
+          if (!upsertErr) console.log(`[ai_enrichment] source=${aiSource} persisted=${updates.length}`);
         }
         console.log(`[ai_enrichment] source=${aiSource} total=${stats.totalJobs} enriched=${stats.enriched} persisted=${updates.length} failed=${stats.failed} rate_limited=${stats.rateLimited} durationMs=${Date.now() - aiStart}`);
       } catch (aiErr: unknown) {
