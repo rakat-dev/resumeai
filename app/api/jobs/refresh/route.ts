@@ -870,6 +870,7 @@ async function fetchPlaywrightTierA(): Promise<{
 
 // ── Route handler ──────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  try {
   const body = await req.json().catch(() => ({}));
   const sourceFilter = (body.source as string) || "all";
 
@@ -989,6 +990,14 @@ export async function POST(req: NextRequest) {
     note:                  `${jobsUpsertedThisRun} rows upserted this run. Board shows ${boardVisibleTotal} active rows in DB (diversity caps may reduce visible count further).`,
     results,
   });
+  } catch (outerErr: unknown) {
+    // Belt-and-suspenders: ensure the refresh route ALWAYS returns JSON.
+    // Without this, an unexpected throw returns a non-JSON HTML error page
+    // which breaks the UI's res.json() call.
+    const msg = outerErr instanceof Error ? outerErr.message : String(outerErr);
+    console.error("[refresh] uncaught outer error:", msg);
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+  }
 }
 
 export async function GET(req: NextRequest) { return POST(req); }
