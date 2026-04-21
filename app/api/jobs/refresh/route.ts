@@ -874,6 +874,13 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const sourceFilter = (body.source as string) || "all";
 
+  if (sourceFilter === "all") {
+    return NextResponse.json({
+      ok: false,
+      error: "source=all is disabled for UI refresh on Vercel. Use per-source orchestrated refresh.",
+    }, { status: 400 });
+  }
+
   console.log(`[refresh] triggered source=${sourceFilter}`);
   const startMs = Date.now();
   const results: Record<string, unknown> = {};
