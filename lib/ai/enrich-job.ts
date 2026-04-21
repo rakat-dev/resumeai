@@ -6,10 +6,13 @@ import { scoreJobFit } from "./score-job";
 import type { EnrichedJob, AiEnrichment, AiMeta, JobNormalization } from "./types";
 
 export function isAiEnabled(): boolean {
+  // AI is OPT-IN: requires AI_ENABLED=true to be explicitly set.
+  // Default-off prevents accidental function timeouts when the key is
+  // present but the operator has not confirmed the enrichment budget.
   return (
-    !!process.env.OPENAI_API_KEY &&
-    process.env.AI_ENABLED !== "false" &&
-    process.env.AI_ENRICHMENT_ENABLED !== "false"
+    process.env.AI_ENABLED === "true" &&
+    process.env.AI_ENRICHMENT_ENABLED !== "false" &&
+    !!process.env.OPENAI_API_KEY
   );
 }
 
