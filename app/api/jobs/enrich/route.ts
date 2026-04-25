@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { enrichBatch } from "@/lib/ai/enrich-batch";
 import { isAiEnabled } from "@/lib/ai/enrich-job";
 import type { JobInputForEnrichment } from "@/lib/ai/enrich-job";
+import { PROMPT_VERSION } from "@/lib/ai/prompts";
 
 export const maxDuration = 60;
 
@@ -39,7 +40,7 @@ async function enrichSource(source: string): Promise<EnrichResult> {
 
   const { data: dbJobsRaw, error: selectErr } = await supabaseAdmin
     .from("jobs")
-    .select("id, source, company, title, description, full_description, location, apply_url, ai_enrichment")
+    .select("id, source, company, title, description, full_description, location, apply_url, ai_enrichment, ai_meta")
     .eq("source", source).eq("is_active", true).limit(200);
   if (selectErr) {
     result.error = selectErr.message;
@@ -48,11 +49,28 @@ async function enrichSource(source: string): Promise<EnrichResult> {
   const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
   result.selected = dbJobs.length;
 
+  // Eligibility:
+  //   1. must have a title and a description (otherwise nothing to classify)
+  //   2. either has never been enriched, OR the stored prompt version differs
+  //      from the current PROMPT_VERSION (existing enrichment is stale).
+  // Stored ai_meta is JSONB written by enrich-job.ts:makeMeta — keys are
+  // camelCase (`promptVersion`) per JSON.stringify.
+  let staleVersionCount = 0;
   const eligibleJobs = dbJobs.filter(j => {
     const description = j.full_description || j.description;
-    return !j.ai_enrichment && !!j.title && !!description;
+    if (!j.title || !description) return false;
+    if (!j.ai_enrichment) return true;
+    const aiMeta = j.ai_meta as { promptVersion?: string } | null | undefined;
+    if (!aiMeta || aiMeta.promptVersion !== PROMPT_VERSION) {
+      staleVersionCount++;
+      return true;
+    }
+    return false;
   });
   result.eligible = eligibleJobs.length;
+  if (staleVersionCount > 0) {
+    console.log(`[ai_enrichment] source=${source} stale_version_count=${staleVersionCount} current_prompt_version=${PROMPT_VERSION}`);
+  }
   console.log(`[ai_enrichment] source=${source} selected=${result.selected} eligible=${result.eligible}`);
 
   const enrichStart = Date.now();

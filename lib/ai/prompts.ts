@@ -1,4 +1,8 @@
-export const PROMPT_VERSION = process.env.AI_PROMPT_VERSION ?? "v1";
+// v2 (2026-04-25): section-aware prompt construction, structured trim,
+// sponsorship safety appendix, JD-length confidence tiers (lib/ai/enrich-job.ts).
+// Bump invalidates the cache key + makes existing enrichments stale on the
+// re-enrich eligibility check in app/api/jobs/enrich/route.ts.
+export const PROMPT_VERSION = process.env.AI_PROMPT_VERSION ?? "v2";
 
 export const SYSTEM_PROMPT_BASE = `You are a job-ingestion enrichment service.
 
