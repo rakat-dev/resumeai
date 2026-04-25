@@ -3,6 +3,7 @@ import { callOpenAI } from "./openai-client";
 import { JobNormalizationSchema, RelevanceSchema } from "./schemas";
 import { SYSTEM_PROMPT_BASE, NORMALIZATION_PROMPT, RELEVANCE_PROMPT, PROMPT_VERSION } from "./prompts";
 import { scoreJobFit } from "./score-job";
+import { cleanJobDescription } from "./clean-job-description";
 import type { EnrichedJob, AiEnrichment, AiMeta, JobNormalization } from "./types";
 
 export function isAiEnabled(): boolean {
@@ -88,8 +89,17 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
   const model = process.env.AI_MODEL_DEFAULT ?? "gpt-4o-mini";
   let totalInput = 0, totalOutput = 0;
 
+  // Strip script/style/legal/analytics noise from the description before it
+  // goes into any prompt. Keeps the cache key (built from the raw job above)
+  // deterministic on raw input — bumping PROMPT_VERSION still invalidates
+  // when the cleaning logic itself changes.
+  const promptJob: JobInputForEnrichment = {
+    ...job,
+    description: cleanJobDescription(job.description),
+  };
+
   try {
-    const rawJobJson = JSON.stringify(job);
+    const rawJobJson = JSON.stringify(promptJob);
 
     const normUserPrompt = NORMALIZATION_PROMPT.replace("{{RAW_JOB_JSON}}", rawJobJson);
     const normResult = await callOpenAI(SYSTEM_PROMPT_BASE, normUserPrompt, { model });
@@ -133,9 +143,10 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
     }
     const relData = relParsed.data;
 
-    // Step 3: Fit score
+    // Step 3: Fit score — uses the cleaned description for the same reason
+    // the normalization/relevance prompts do (smaller, no noise).
     const fitResult = await scoreJobFit(
-      { company: job.company, title: job.title, location: job.location, description: job.description },
+      { company: promptJob.company, title: promptJob.title, location: promptJob.location, description: promptJob.description },
       normData
     );
     if (fitResult) {

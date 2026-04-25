@@ -762,48 +762,54 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       return null;
     }
 
-    // Priority 1: JSON-LD structured data
-    const ldRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-    let ldMatch: RegExpExecArray | null;
-    while ((ldMatch = ldRe.exec(html)) !== null) {
-      try {
-        const data = JSON.parse(ldMatch[1]) as Record<string, unknown>;
-        const raw = (data.description ?? "") as string;
-        const stripped = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-        if (stripped.length >= 500) return stripped;
-      } catch { /* continue */ }
+    // Amazon job pages put the real JD inside:
+    //   <div id="job-detail-body">
+    //     <div class="content">
+    //       <div class="section"><h2>Description</h2><p>...</p></div>
+    //       <div class="section"><h2>Key job responsibilities</h2><p>...</p></div>
+    //       <div class="section"><h2>About the team</h2><p>...</p></div>
+    //       <div class="section"><h2>Basic Qualifications</h2><p>...</p></div>
+    //       <div class="section"><h2>Preferred Qualifications</h2><p>...</p></div>
+    //     </div>
+    //   </div>
+    // The previous extractor's `htmlLower.indexOf("description")` matched the
+    // <meta name="description"> at the top of the page and sliced page chrome
+    // (Boomerang / analytics / nav) instead of the JD body, producing 0/47
+    // useful descriptions in production.
+    const bodyIdx = html.indexOf('id="job-detail-body"');
+    if (bodyIdx === -1) return null;
+    const contentStart = html.indexOf('<div class="content">', bodyIdx);
+    if (contentStart === -1) return null;
+    // Content body ends just before the `addCriticalFeatureMarker` script
+    // that separates content from the sidebar. Cap to 30KB defensively.
+    let contentEnd = html.indexOf('addCriticalFeatureMarker', contentStart);
+    if (contentEnd === -1 || contentEnd - contentStart > 30000) {
+      contentEnd = contentStart + 30000;
     }
+    const contentHtml = html.slice(contentStart, contentEnd);
 
-    // Priority 2: Semantic section extraction
-    const sectionNames = [
-      "Description",
-      "Key job responsibilities",
-      "Basic Qualifications",
-      "Preferred Qualifications",
-      "About the team",
-      "Job details",
-    ];
-    const htmlLower = html.toLowerCase();
+    const decode = (s: string): string =>
+      s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+       .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+       .replace(/&#?\w+;/g, " ");
+
+    const sectionRe = /<div class="section"[^>]*>\s*<h2[^>]*>([^<]+)<\/h2>([\s\S]*?)<\/div>(?=\s*<div|\s*<\/div>|\s*<script>)/gi;
     const parts: string[] = [];
-    for (const name of sectionNames) {
-      const idx = htmlLower.indexOf(name.toLowerCase());
-      if (idx === -1) continue;
-      const tagEnd = html.indexOf(">", idx);
-      if (tagEnd === -1) continue;
-      let nextIdx = html.length;
-      for (const other of sectionNames) {
-        if (other === name) continue;
-        const oi = htmlLower.indexOf(other.toLowerCase(), idx + name.length);
-        if (oi !== -1 && oi < nextIdx) nextIdx = oi;
-      }
-      const sectionText = html.slice(tagEnd + 1, nextIdx)
-        .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      if (sectionText.length > 50) parts.push(sectionText);
+    let m: RegExpExecArray | null;
+    while ((m = sectionRe.exec(contentHtml)) !== null) {
+      const heading = decode(m[1].trim());
+      const body = decode(
+        m[2]
+          .replace(/<br\s*\/?>/gi, " ")
+          .replace(/<\/p>\s*<p[^>]*>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+      ).replace(/\s+/g, " ").trim();
+      if (body.length < 20) continue;
+      parts.push(`${heading}\n${body}`);
     }
-    const combined = parts.join(" ").trim();
-    if (combined.length >= 500) return combined;
-
-    return null;
+    if (parts.length === 0) return null;
+    const combined = parts.join("\n\n").trim();
+    return combined.length >= 200 ? combined : null;
   };
 
   const AMAZON_QUERIES = [
