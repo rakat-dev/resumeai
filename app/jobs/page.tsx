@@ -1289,6 +1289,24 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
     : bucket==="strong" ? {label:"\u2b50 Strong",color:"#ff9500",bg:"rgba(255,149,0,0.1)"}
     : null;
 
+  // AI enrichment badge \u2014 three states based on ai_meta written by
+  // app/api/jobs/enrich (status + confidence). Hidden when ai_meta is absent
+  // (job has never been through the enrich pipeline).
+  const aiMeta = (job as Job & {aiMeta?: Job["aiMeta"]}).aiMeta;
+  const aiBadge = (() => {
+    if (!aiMeta) return null;
+    if (aiMeta.status === "success" && aiMeta.confidence === "low") {
+      return {label:"\ud83d\udfe1 AI (Limited)", color:"#a16207", bg:"rgba(234,179,8,0.10)", border:"rgba(234,179,8,0.30)"};
+    }
+    if (aiMeta.status === "success") {
+      return {label:"\ud83d\udfe2 AI \u2713", color:"#15803d", bg:"rgba(34,197,94,0.10)", border:"rgba(34,197,94,0.30)"};
+    }
+    if (aiMeta.status === "skipped" && aiMeta.reason === "insufficient_jd_content") {
+      return {label:"\ud83d\udd34 No AI", color:"#b91c1c", bg:"rgba(239,68,68,0.10)", border:"rgba(239,68,68,0.30)"};
+    }
+    return null;
+  })();
+
   const handleBookmark=(e:React.MouseEvent)=>{
     e.stopPropagation();
     if(saved){
@@ -1350,7 +1368,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           </div>
           <div style={{fontSize:12,color:"var(--accent2)",fontWeight:500}}>{job.company}</div>
         </div>
-        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
+        <div style={{display:"flex",flexDirection:"row",alignItems:"center",gap:4,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
           {(() => {
             const rank=(job as Job&{positionRank?:number}).positionRank;
             if (typeof rank === "number" && rank > 0) {
@@ -1359,6 +1377,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
             return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>\ud83d\udd50 {job.postedDate}</span>;
           })()}
           {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
+          {aiBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:aiBadge.bg,color:aiBadge.color,border:`1px solid ${aiBadge.border}`,whiteSpace:"nowrap",fontWeight:600}}>{aiBadge.label}</span>}
           <SourceBadge source={job.source} sourceType={sourceType}/>
         </div>
       </div>
@@ -1369,7 +1388,10 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
         {exp&&<span style={S.tag}>\u23f1 {exp}</span>}
         {sponsorship==="mentioned"&&<span style={{...S.tag,color:"#00c864",borderColor:"rgba(0,200,100,0.3)",background:"rgba(0,200,100,0.08)"}}>&#x2705; Visa mentioned</span>}
       </div>
-      {job.description&&<div style={{fontSize:11,color:"var(--muted)",marginTop:8,lineHeight:1.6}}>{job.description.slice(0,200)}\u2026</div>}
+      {job.description&&<div style={{marginTop:8}}>
+        <div style={{fontSize:11,color:"var(--muted)",fontStyle:"italic",marginBottom:3,fontFamily:"'DM Sans',sans-serif"}}>Summary</div>
+        <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.6}}>{job.description.slice(0,200)}\u2026</div>
+      </div>}
       <GapSkills skills={job.skills}/>
       <div style={{display:"flex",gap:8,marginTop:10,alignItems:"center",flexWrap:"wrap"}}>
         <button onClick={handleTailorClick} disabled={tailoring&&selected?.id===job.id}

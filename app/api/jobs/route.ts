@@ -38,6 +38,13 @@ export interface Job {
   bucket?: QualityBucket;
   positionRank?: number;   // 1..120 for jobs from no-date Tier A scrapers (Google etc.)
   fullDescription?: string; // full JD body — populated when available (Walmart etc.)
+  // Subset of the AiMeta JSONB column surfaced for UI badge rendering.
+  // Backed by the `ai_meta` column populated by app/api/jobs/enrich.
+  aiMeta?: {
+    status?: "success" | "skipped" | "failed" | "cached";
+    confidence?: "low" | "normal";
+    reason?: string;
+  };
 }
 
 export interface SourceStatus {
@@ -84,6 +91,9 @@ function rowToJob(row: JobRow): Job {
     fortuneRank:     getFortuneTier(row.company),
     positionRank:    row.position_rank ?? undefined,
     fullDescription: row.full_description ?? undefined,
+    // Surface only the three fields the UI badge needs. Cast through
+    // `unknown` because JobRow.ai_meta is typed as `unknown` (raw JSONB).
+    aiMeta:          (row.ai_meta as Job["aiMeta"]) ?? undefined,
   };
 }
 
