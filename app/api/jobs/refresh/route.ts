@@ -1059,13 +1059,14 @@ export async function POST(req: NextRequest) {
 
   // ── Per-company Tier A playwright sources ─────────────────────────────
   if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", makeTierAFetcher("playwright_microsoft", fetchMicrosoftJobs),    "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
-  // playwright_google is replaced by google_v2 (SSR hydration parser produces
-  // real descriptions + posted_at). Kept gated behind PLAYWRIGHT_GOOGLE_ENABLED=true
-  // for emergency rollback; the import + fetchGoogleJobs definition remain in
-  // lib/playwrightScrapers.ts untouched.
-  if (run("playwright_google") && process.env.PLAYWRIGHT_GOOGLE_ENABLED === "true") {
-    tasks.push(ingestSource("playwright_google", makeTierAFetcher("playwright_google", fetchGoogleJobs), "playwright_google").then(r => { results.playwright_google = r; }));
-  }
+  // DISABLED: playwright_google has been permanently replaced by google_v2
+  // (SSR hydration parser — real descriptions + posted_at). The import of
+  // fetchGoogleJobs and the function itself remain in lib/playwrightScrapers.ts
+  // for rollback reference, but this block must NEVER execute. Even an explicit
+  // POST source=playwright_google is a no-op now.
+  //
+  // To roll back: re-introduce a registration line here, then redeploy. Do
+  // NOT just flip an env var — that path was removed deliberately.
   if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
   if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
