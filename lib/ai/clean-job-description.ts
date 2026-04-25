@@ -6,15 +6,18 @@
 // UE analytics blobs and end with `var CXT = ...; dispatchEvent(...)`. That
 // pads each prompt by 5-10KB of garbage that the model has to read.
 
-// Smart trim threshold + head/tail sizes. Preserves the first ~3KB of content
-// (responsibilities + basic qualifications usually) AND the last ~1.5KB
-// (preferred quals, sponsorship/visa clauses, salary range). The middle is
-// the part most likely to be EEO/legal/repeated boilerplate the AI doesn't
-// need.
-const SMART_TRIM_THRESHOLD = 5500;
-const SMART_TRIM_HEAD_CHARS = 3000;
-const SMART_TRIM_TAIL_CHARS = 1500;
-const SMART_TRIM_SEPARATOR = "\n\n[...]\n\n";
+// ── Prompt assembly budgets ───────────────────────────────────────────────
+// Total budget for the description block before fallback head/tail trimming.
+const PROMPT_BUDGET_CHARS = 5500;
+// `rest` (any prose outside the canonical sections) gets trimmed first.
+const REST_TRIM_CHARS = 500;
+// `preferredQuals` is nice-to-have detail; trim before falling back.
+const PREFERRED_QUALS_TRIM_CHARS = 800;
+
+// Fallback head/tail trim (only if structured trimming can't fit budget).
+const FALLBACK_HEAD_CHARS = 3000;
+const FALLBACK_TAIL_CHARS = 1500;
+const FALLBACK_SEPARATOR = "\n\n[...]\n\n";
 
 // Common JD section openers. Matched as proper headers only — preceded by
 // whitespace or start of string, and followed by something header-like (colon,
@@ -191,14 +194,246 @@ export function cleanJobDescription(raw: string): string {
   // 7. Collapse whitespace.
   text = text.replace(/\s+/g, " ").trim();
 
-  // 8. Smart trim — preserve head + tail, drop middle. Keeps the leading
-  //    sections (description + responsibilities + basic quals) AND the
-  //    trailing sections (preferred quals + sponsorship/visa + salary), at
-  //    the cost of any boilerplate-heavy middle.
-  if (text.length > SMART_TRIM_THRESHOLD) {
-    const head = text.slice(0, SMART_TRIM_HEAD_CHARS);
-    const tail = text.slice(-SMART_TRIM_TAIL_CHARS);
-    text = head + SMART_TRIM_SEPARATOR + tail;
-  }
+  // Trimming is no longer done here — the caller runs `parseJobSections` on
+  // this output and then `assemblePromptDescription` to do structured trim.
   return text;
+}
+
+// ── Section parser ────────────────────────────────────────────────────────
+// Splits a cleaned JD into named groups (responsibilities / basicQuals /
+// preferredQuals / rest). Headers are matched as proper headings — preceded
+// by whitespace, followed by header-style punctuation or a capital letter.
+// Multiple headers in the same group are concatenated.
+
+export type SectionGroup = "responsibilities" | "basicQuals" | "preferredQuals";
+
+export interface ParsedSections {
+  responsibilities?: string;
+  basicQuals?: string;
+  preferredQuals?: string;
+  rest?: string;
+}
+
+interface SectionDef {
+  group: SectionGroup;
+  patterns: string[];
+}
+
+const SECTION_DEFINITIONS: SectionDef[] = [
+  {
+    group: "responsibilities",
+    patterns: [
+      "Key job responsibilities",
+      "Job responsibilities",
+      "Responsibilities",
+      "What you'll do",
+      "What you will do",
+      "About the role",
+      "Position Summary",
+      "Job Summary",
+      "Job Description",
+      "Description",
+    ],
+  },
+  {
+    group: "basicQuals",
+    patterns: [
+      "Basic Qualifications",
+      "Minimum Qualifications",
+      "Required Qualifications",
+      "Requirements",
+    ],
+  },
+  {
+    group: "preferredQuals",
+    patterns: [
+      "Preferred Qualifications",
+      "Nice to have",
+      "Bonus qualifications",
+    ],
+  },
+];
+
+interface HeaderMatch {
+  start: number;       // start of header word in source text
+  end: number;         // end of header word
+  group: SectionGroup;
+  name: string;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+export function parseJobSections(text: string): ParsedSections {
+  if (!text) return {};
+
+  // Build a flat (longest-first) list so "Key job responsibilities" wins
+  // over the shorter "Responsibilities" when both could match.
+  const allPatterns = SECTION_DEFINITIONS.flatMap(d =>
+    d.patterns.map(name => ({ group: d.group, name })),
+  ).sort((a, b) => b.name.length - a.name.length);
+
+  const matches: HeaderMatch[] = [];
+  const claimed = new Array(text.length).fill(false);
+
+  for (const { group, name } of allPatterns) {
+    // Header must be at start, after whitespace, or after `>`; followed by
+    // header-style punctuation OR uppercase-starting word OR end.
+    const re = new RegExp(
+      `(?:^|[\\s>])(${escapeRegex(name)})(?=\\s*[:.\\-]|\\s+[A-Z]|$)`,
+      "gi",
+    );
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const headerWordStart = m.index + (m[0].length - m[1].length);
+      const headerWordEnd = headerWordStart + m[1].length;
+      if (claimed[headerWordStart]) continue;
+      for (let i = headerWordStart; i < headerWordEnd; i++) claimed[i] = true;
+      matches.push({ start: headerWordStart, end: headerWordEnd, group, name });
+    }
+  }
+
+  matches.sort((a, b) => a.start - b.start);
+
+  const result: ParsedSections = {};
+
+  if (matches.length === 0) {
+    const trimmed = text.trim();
+    if (trimmed.length > 0) result.rest = trimmed;
+    return result;
+  }
+
+  // Anything before the first header → rest
+  if (matches[0].start > 0) {
+    const pre = text.slice(0, matches[0].start).trim();
+    if (pre.length >= 20) result.rest = pre;
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    const nextStart = i + 1 < matches.length ? matches[i + 1].start : text.length;
+    let body = text.slice(cur.end, nextStart).trim();
+    // Drop a leading punctuation char (`:` / `-` / `.`) immediately after the
+    // header word so the body reads naturally.
+    body = body.replace(/^[:.\-]\s*/, "").trim();
+    if (body.length < 5) continue;
+    const existing = result[cur.group];
+    result[cur.group] = existing ? `${existing} ${body}` : body;
+  }
+
+  return result;
+}
+
+// ── Sponsorship safety: extract visa / work-auth lines ────────────────────
+// These lines must appear at the END of every prompt regardless of trimming.
+
+const SPONSORSHIP_KEYWORDS_RE =
+  /\b(?:sponsorship|sponsor|visa|work\s+authorization|H-?1B|OPT|CPT|EAD|STEM\s+OPT)\b/i;
+
+// If a captured sponsorship "sentence" is very long (run-on prose without a
+// period between sections), trim it down to a window centered on the keyword.
+// Keeps the appended sponsorship block bounded.
+const SPONSORSHIP_LINE_MAX_CHARS = 300;
+
+export function extractSponsorshipLines(text: string): string[] {
+  if (!text) return [];
+  // The cleaner collapses whitespace, so split on sentence-end punctuation
+  // (preserving the punctuation in each sentence).
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of sentences) {
+    let s = raw.trim();
+    if (s.length < 5) continue;
+    const m = s.match(SPONSORSHIP_KEYWORDS_RE);
+    if (!m || m.index === undefined) continue;
+    if (s.length > SPONSORSHIP_LINE_MAX_CHARS) {
+      // Window the sentence around the keyword: ~80 chars before, ~220 after.
+      const start = Math.max(0, m.index - 80);
+      const end = Math.min(s.length, m.index + 220);
+      s = (start > 0 ? "…" : "") + s.slice(start, end) + (end < s.length ? "…" : "");
+    }
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+// ── Prompt-description assembler with structured trim ─────────────────────
+// Builds the final description text for the AI prompt, in priority order:
+//   1. responsibilities / description
+//   2. basicQuals
+//   3. preferredQuals
+//   4. rest
+// Followed always by a "Sponsorship / Work Authorization" block built from
+// `sponsorshipLines` (so visa info is never lost to trimming).
+//
+// If total exceeds PROMPT_BUDGET_CHARS, structured trim runs:
+//   step 1: trim rest to REST_TRIM_CHARS
+//   step 2: drop rest entirely
+//   step 3: trim preferredQuals to PREFERRED_QUALS_TRIM_CHARS
+//   step 4 (last resort): head(FALLBACK_HEAD_CHARS) + [...] + tail(FALLBACK_TAIL_CHARS)
+//                         — sponsorship block still appended at end.
+// basicQuals is never removed; sponsorship lines are never removed.
+
+function build(s: ParsedSections, sponsor: string[]): string {
+  const parts: string[] = [];
+  if (s.responsibilities) parts.push(`Description / Responsibilities\n${s.responsibilities}`);
+  if (s.basicQuals)       parts.push(`Basic Qualifications\n${s.basicQuals}`);
+  if (s.preferredQuals)   parts.push(`Preferred Qualifications\n${s.preferredQuals}`);
+  if (s.rest)             parts.push(`Other\n${s.rest}`);
+  if (sponsor.length > 0) parts.push(`Sponsorship / Work Authorization\n${sponsor.join(" ")}`);
+  return parts.join("\n\n");
+}
+
+export function assemblePromptDescription(
+  sections: ParsedSections,
+  sponsorshipLines: string[] = [],
+): string {
+  // No structure detected and no body — return empty so the < 1000 guard
+  // upstream catches it.
+  const hasAny =
+    sections.responsibilities || sections.basicQuals ||
+    sections.preferredQuals || sections.rest;
+  if (!hasAny) return sponsorshipLines.length > 0
+    ? `Sponsorship / Work Authorization\n${sponsorshipLines.join(" ")}`
+    : "";
+
+  let working: ParsedSections = { ...sections };
+  let assembled = build(working, sponsorshipLines);
+  if (assembled.length <= PROMPT_BUDGET_CHARS) return assembled;
+
+  // Step 1: trim rest to REST_TRIM_CHARS.
+  if (working.rest && working.rest.length > REST_TRIM_CHARS) {
+    working = { ...working, rest: working.rest.slice(0, REST_TRIM_CHARS) };
+    assembled = build(working, sponsorshipLines);
+    if (assembled.length <= PROMPT_BUDGET_CHARS) return assembled;
+  }
+
+  // Step 2: drop rest entirely.
+  if (working.rest) {
+    working = { ...working, rest: undefined };
+    assembled = build(working, sponsorshipLines);
+    if (assembled.length <= PROMPT_BUDGET_CHARS) return assembled;
+  }
+
+  // Step 3: trim preferredQuals.
+  if (working.preferredQuals && working.preferredQuals.length > PREFERRED_QUALS_TRIM_CHARS) {
+    working = { ...working, preferredQuals: working.preferredQuals.slice(0, PREFERRED_QUALS_TRIM_CHARS) };
+    assembled = build(working, sponsorshipLines);
+    if (assembled.length <= PROMPT_BUDGET_CHARS) return assembled;
+  }
+
+  // Step 4 (fallback): head + tail of the sections-only text, then sponsor
+  //                    block always appended at the end.
+  const sectionsOnly = build(working, []);
+  const head = sectionsOnly.slice(0, FALLBACK_HEAD_CHARS);
+  const tail = sectionsOnly.slice(-FALLBACK_TAIL_CHARS);
+  let out = head + FALLBACK_SEPARATOR + tail;
+  if (sponsorshipLines.length > 0) {
+    out += `\n\nSponsorship / Work Authorization\n${sponsorshipLines.join(" ")}`;
+  }
+  return out;
 }

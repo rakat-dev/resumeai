@@ -3,8 +3,24 @@ import { callOpenAI } from "./openai-client";
 import { JobNormalizationSchema, RelevanceSchema } from "./schemas";
 import { SYSTEM_PROMPT_BASE, NORMALIZATION_PROMPT, RELEVANCE_PROMPT, PROMPT_VERSION } from "./prompts";
 import { scoreJobFit } from "./score-job";
-import { cleanJobDescription } from "./clean-job-description";
+import {
+  cleanJobDescription,
+  parseJobSections,
+  extractSponsorshipLines,
+  assemblePromptDescription,
+} from "./clean-job-description";
 import type { EnrichedJob, AiEnrichment, AiMeta, JobNormalization } from "./types";
+
+// Three-tier JD-length policy for AI enrichment:
+//   < MIN_JD_CHARS_FOR_ENRICHMENT (800)         → skip OpenAI entirely
+//   [MIN, LOW_CONFIDENCE_JD_THRESHOLD) (800-1200) → enrich, tag aiMeta.confidence="low"
+//   >= LOW_CONFIDENCE_JD_THRESHOLD (1200)        → enrich normally
+//
+// Confidence tagging is metadata only — it does not change prompt content or
+// scoring. Job ingestion/storage are NOT gated by this; only the enrichment
+// path here is affected.
+const MIN_JD_CHARS_FOR_ENRICHMENT = 800;
+const LOW_CONFIDENCE_JD_THRESHOLD = 1200;
 
 export function isAiEnabled(): boolean {
   // AI is OPT-IN: requires AI_ENABLED=true to be explicitly set.
@@ -35,6 +51,10 @@ export interface JobInputForEnrichment {
   description: string;
   employmentType?: string;
   team?: string;
+  // Source tag (e.g. "amazon_jobs", "walmart_cxs") — surfaced in skip
+  // diagnostics so the operator can attribute insufficient_jd_content cases
+  // to a specific scraper.
+  source?: string;
 }
 
 export function buildCacheKey(job: JobInputForEnrichment): string {
@@ -89,13 +109,46 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
   const model = process.env.AI_MODEL_DEFAULT ?? "gpt-4o-mini";
   let totalInput = 0, totalOutput = 0;
 
-  // Strip script/style/legal/analytics noise from the description before it
-  // goes into any prompt. Keeps the cache key (built from the raw job above)
-  // deterministic on raw input — bumping PROMPT_VERSION still invalidates
-  // when the cleaning logic itself changes.
+  // 1. Clean the raw description (strip scripts/HTML/analytics/EEO/etc.).
+  //    Cache key was already computed from the *raw* job above so bumping
+  //    PROMPT_VERSION is the way to invalidate when cleaning logic changes.
+  const cleanedDescription = cleanJobDescription(job.description);
+
+  // 2. Safety guard — if the cleaner produced too little content, the JD is
+  //    almost certainly broken (failed extraction, page chrome only). Don't
+  //    burn an OpenAI call on it.
+  if (cleanedDescription.length < MIN_JD_CHARS_FOR_ENRICHMENT) {
+    console.log(
+      `[ai_skip] job_id=${job.id ?? "unknown"} source=${job.source ?? "unknown"} chars=${cleanedDescription.length} reason=insufficient_jd_content`,
+    );
+    return {
+      ai: null,
+      aiMeta: makeMeta(cacheKey, rawHash, startMs, "skipped", {
+        reason: "insufficient_jd_content",
+        source: job.source,
+        jobId: job.id,
+      }),
+    };
+  }
+
+  // 2b. Enrich, but flag the result as low-confidence when the cleaned JD
+  //     sits in the [MIN, LOW_CONFIDENCE_JD_THRESHOLD) band — the AI is
+  //     working from limited evidence and downstream consumers should weight
+  //     the result accordingly. Metadata only; prompt/scoring unchanged.
+  const isLowConfidence = cleanedDescription.length < LOW_CONFIDENCE_JD_THRESHOLD;
+
+  // 3. Parse cleaned text into sections + extract sponsorship lines so they
+  //    can be appended unconditionally at the end of every prompt.
+  const sections = parseJobSections(cleanedDescription);
+  const sponsorshipLines = extractSponsorshipLines(cleanedDescription);
+
+  // 4. Assemble the final prompt description (priority-ordered + structured
+  //    trim). This replaces job.description in the JSON payload sent to the
+  //    model — title/company/location/url stay intact.
+  const promptDescription = assemblePromptDescription(sections, sponsorshipLines);
   const promptJob: JobInputForEnrichment = {
     ...job,
-    description: cleanJobDescription(job.description),
+    description: promptDescription,
   };
 
   try {
@@ -175,6 +228,7 @@ export async function enrichJob(job: JobInputForEnrichment): Promise<EnrichedJob
 
     const aiMeta: AiMeta = makeMeta(cacheKey, rawHash, startMs, "success", {
       tokenUsage: { input: totalInput, output: totalOutput, total: totalInput + totalOutput },
+      ...(isLowConfidence ? { confidence: "low" as const } : {}),
     });
 
     const enriched: EnrichedJob = { ai: aiEnrichment, aiMeta };

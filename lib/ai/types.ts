@@ -63,6 +63,16 @@ export interface AiMeta {
   status: AiStatus;
   tokenUsage?: { input: number; output: number; total: number };
   error?: string;
+  // Optional context for skipped/failed cases — populated by the safety guards
+  // in enrich-job.ts so downstream telemetry can attribute the skip to a
+  // specific job/source without having to re-correlate against the request.
+  reason?: string;
+  source?: string;
+  jobId?: string;
+  // Marked "low" when the cleaned JD is short enough that the AI is working
+  // from limited evidence (LOW_CONFIDENCE_JD_THRESHOLD in enrich-job.ts).
+  // Pure metadata — does not feed back into prompts or scoring.
+  confidence?: "low" | "normal";
 }
 
 export interface EnrichedJob {

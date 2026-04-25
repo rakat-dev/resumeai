@@ -77,6 +77,7 @@ async function enrichSource(source: string): Promise<EnrichResult> {
         description: String(description ?? ""),
         location:    String(j.location ?? ""),
         url:         String(j.apply_url ?? ""),
+        source:      source,  // for ai_skip diagnostics in enrich-job.ts
       };
     });
 
