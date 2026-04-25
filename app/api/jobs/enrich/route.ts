@@ -8,9 +8,13 @@ export const maxDuration = 60;
 
 const ENRICH_ELIGIBLE_SOURCES = new Set(["walmart_cxs", "amazon_jobs"]);
 
-const AI_BATCH_SIZE = 25;
-const AI_MAX_BATCHES_PER_CALL = 3;
-const AI_MAX_RUNTIME_MS = 50_000;
+// Sized so a single call reliably fits inside Vercel's 60s function limit.
+// Empirically: 15 jobs × ~2 OpenAI calls each at concurrency 3 ≈ 25-35s wall.
+// Two batches max with a 40s budget keeps the worst case well under 60s.
+// Operators can call /api/jobs/enrich repeatedly to drain remaining jobs.
+const AI_BATCH_SIZE = 15;
+const AI_MAX_BATCHES_PER_CALL = 2;
+const AI_MAX_RUNTIME_MS = 40_000;
 
 interface EnrichResult {
   source:             string;
