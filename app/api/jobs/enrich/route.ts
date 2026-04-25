@@ -7,7 +7,7 @@ import { PROMPT_VERSION } from "@/lib/ai/prompts";
 
 export const maxDuration = 60;
 
-const ENRICH_ELIGIBLE_SOURCES = new Set(["walmart_cxs", "amazon_jobs"]);
+const ENRICH_ELIGIBLE_SOURCES = new Set(["walmart_cxs", "amazon_jobs", "google_v2"]);
 
 // Sized so a single call reliably fits inside Vercel's 60s function limit.
 // Empirically: 15 jobs × ~2 OpenAI calls each at concurrency 3 ≈ 25-35s wall.
