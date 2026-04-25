@@ -17,6 +17,7 @@ import {
 import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } from "@/lib/companyAtsRegistry";
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
+import { fetchGoogleV2Jobs } from "@/lib/scrapers/google";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -275,6 +276,7 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   playwright_openai: 50,
   walmart_cxs: 400,
   amazon_jobs: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
+  google_v2:   200,         // Google Careers hydration parser — replaces playwright_google
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -339,6 +341,15 @@ async function ingestSource(
     }
     const capped              = applySourceCap(deduped, source);
     const { stored, error: storeErr } = await storeJobs(capped);
+    // google_v2-specific health probe: confirm full_description + posted_at
+    // populated counts on the normalized set (post-clean, pre-cap). Helps
+    // detect a hydration parser regression where Google ships data but our
+    // adapter loses the description or timestamp fields.
+    if (source === "google_v2") {
+      const gdFull  = normalized.filter(j => !!j.full_description).length;
+      const gdDated = normalized.filter(j => !!j.posted_at).length;
+      console.log(`[google_v2] full_description=${gdFull}/${normalized.length} posted_at=${gdDated}/${normalized.length}`);
+    }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
     const liveIds = capped.map(j => j.id);
@@ -883,6 +894,36 @@ async function fetchPhenomSource(): Promise<{ raw: RawJob[]; fetched: number; er
   }
 }
 
+// 1g-2. Google Careers v2 (lib/scrapers/google.ts).
+// SSR + AF_initDataCallback hydration parser. Replaces the legacy
+// playwright_google source which shipped empty descriptions and null
+// posted dates. The adapter returns ParsedGoogleJob (snake_case fields
+// + a separate full_description) so we can't reuse makeTierAFetcher —
+// translate to RawJob here, passing the cleaned full JD as `description`
+// so normalizeJobs derives both the 220-char preview and full_description
+// the same way it does for every other source.
+async function fetchGoogleV2Source(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const parsed = await fetchGoogleV2Jobs();
+    const raw: RawJob[] = parsed.map(p => ({
+      id:           p.id,
+      source:       "google_v2",
+      company:      p.company,
+      title:        p.title,
+      location:     p.location,
+      description:  p.full_description,   // pass FULL text — normalizeJobs will produce both preview+full
+      applyUrl:     p.apply_url,
+      postedAt:     p.posted_at,
+      type:         "Full-time",
+      positionRank: p.position_rank,      // always undefined for v2; real timestamps render rank moot
+    }));
+    return { raw, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
 // 1h. Meta sitemap+JSON-LD (lib/scrapers/meta.ts).
 // Replaces playwright_meta which broke when Meta added per-request anti-replay
 // tokens to its GraphQL endpoint. Sitemap exposes ~918 job URLs each with full
@@ -1018,7 +1059,14 @@ export async function POST(req: NextRequest) {
 
   // ── Per-company Tier A playwright sources ─────────────────────────────
   if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", makeTierAFetcher("playwright_microsoft", fetchMicrosoftJobs),    "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
-  if (run("playwright_google"))    tasks.push(ingestSource("playwright_google",    makeTierAFetcher("playwright_google",    fetchGoogleJobs),       "playwright_google"   ).then(r => { results.playwright_google    = r; }));
+  // playwright_google is replaced by google_v2 (SSR hydration parser produces
+  // real descriptions + posted_at). Kept gated behind PLAYWRIGHT_GOOGLE_ENABLED=true
+  // for emergency rollback; the import + fetchGoogleJobs definition remain in
+  // lib/playwrightScrapers.ts untouched.
+  if (run("playwright_google") && process.env.PLAYWRIGHT_GOOGLE_ENABLED === "true") {
+    tasks.push(ingestSource("playwright_google", makeTierAFetcher("playwright_google", fetchGoogleJobs), "playwright_google").then(r => { results.playwright_google = r; }));
+  }
+  if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
   if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
   if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));
