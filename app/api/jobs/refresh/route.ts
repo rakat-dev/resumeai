@@ -17,10 +17,9 @@ import {
 import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } from "@/lib/companyAtsRegistry";
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
-import { enrichBatch } from "@/lib/ai/enrich-batch";
-import { isAiEnabled } from "@/lib/ai/enrich-job";
-import type { JobInputForEnrichment } from "@/lib/ai/enrich-job";
+import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
+const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
 export const maxDuration = 60;
 
 // ── Source health classification (A) ──────────────────────────────────────
@@ -447,6 +446,10 @@ async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number
 const WD_PAGE_SIZE = 20;
 const WD_MAX_PAGES = 15;
 
+function isJsonContentType(ct: string | null): boolean {
+  return !!ct && ct.toLowerCase().includes("application/json");
+}
+
 async function fetchWorkdayCompany(name: string, tenant: string, site: string, server: string): Promise<RawJob[]> {
   const results: RawJob[] = [];
   const baseUrl = `https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`;
@@ -463,12 +466,22 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         body: JSON.stringify({ appliedFacets: {}, limit: WD_PAGE_SIZE, offset: page * WD_PAGE_SIZE, searchText: "software engineer" }),
         signal: AbortSignal.timeout(12_000),
       });
+      const ct = res.headers.get("content-type");
       if (!res.ok) {
         if (res.status === 422) {
-          console.warn(`[workday] ${name} page=${page} status=422 reason=unsupported_tenant`);
+          // 422 = Workday tenant blocks this query shape. Treat as skipped.
+          console.warn(`[workday] tenant_skipped source=workday company="${name}" page=${page} status=422 reason=unsupported_tenant`);
         } else {
-          console.warn(`[workday] ${name} page=${page} status=${res.status} reason=unexpected_error`);
+          const body = await res.text().catch(() => "");
+          console.warn(`[workday] tenant_skipped source=workday company="${name}" page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`);
         }
+        break;
+      }
+      if (!isJsonContentType(ct)) {
+        // HTML / login page from Workday tenant — skip the tenant rather
+        // than letting JSON.parse explode and surface as a generic exception.
+        const body = await res.text();
+        console.warn(`[workday] tenant_skipped source=workday company="${name}" page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}" reason=non_json_response`);
         break;
       }
       const data = await res.json();
@@ -539,6 +552,15 @@ async function fetchWorkdaySource(): Promise<{ raw: RawJob[]; fetched: number; e
 async function fetchJSearchSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   const apiKey = process.env.RAPIDAPI_KEY;
   if (!apiKey) return { raw: [], fetched: 0, error: "RAPIDAPI_KEY not set" };
+  // Cooldown: skip the call entirely if we recently received a 429.
+  // Returning the rate_limited error here flows through ingestSource's
+  // `if (fetchErr)` branch, which marks the source rate_limited and skips
+  // both store and deactivate.
+  const cooldownMs = await getSourceCooldownMs("jsearch");
+  if (cooldownMs > 0) {
+    console.warn(`[jsearch] skip reason=cooldown remaining_ms=${cooldownMs}`);
+    return { raw: [], fetched: 0, error: "rate_limited" };
+  }
   try {
     const params = new URLSearchParams({
       query: "software engineer", page: "1", num_pages: "2",
@@ -548,7 +570,11 @@ async function fetchJSearchSource(): Promise<{ raw: RawJob[]; fetched: number; e
       headers: { "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "jsearch.p.rapidapi.com" },
       signal: AbortSignal.timeout(15_000),
     });
-    if (res.status === 429) { console.warn("[jsearch] status=429 reason=rate_limited"); return { raw: [], fetched: 0, error: "rate_limited" }; }
+    if (res.status === 429) {
+      console.warn(`[jsearch] status=429 reason=rate_limited cooldown_seconds=${JSEARCH_COOLDOWN_SECONDS}`);
+      await setSourceCooldown("jsearch", JSEARCH_COOLDOWN_SECONDS);
+      return { raw: [], fetched: 0, error: "rate_limited" };
+    }
     if (!res.ok) return { raw: [], fetched: 0, error: `HTTP ${res.status}` };
     const data = await res.json();
     const raw  = (data.data ?? []) as Record<string, unknown>[];
@@ -1003,103 +1029,9 @@ export async function POST(req: NextRequest) {
   await Promise.allSettled(tasks);
   await deactivateStaleJobs();
 
-  // ── AI enrichment (opt-in, non-blocking) ──────────────────────────────────
-  if (isAiEnabled()) {
-    for (const aiSource of ["walmart_cxs", "amazon_jobs"] as const) {
-      if (!run(aiSource)) continue;
-      const sourceResult = results[aiSource] as { error?: string | null } | undefined;
-      if (sourceResult?.error) continue;
-      console.log(`[ai_enrichment] source=${aiSource} started`);
-      try {
-        const { data: dbJobsRaw } = await supabaseAdmin
-          .from("jobs")
-          .select("id, source, company, title, description, full_description, location, apply_url, ai_enrichment")
-          .eq("source", aiSource).eq("is_active", true).limit(200);
-        const dbJobs = (dbJobsRaw ?? []) as Array<Record<string, unknown>>;
-        const eligibleJobs = dbJobs.filter(j => {
-          const description = j.full_description || j.description;
-          return (
-            !j.ai_enrichment &&
-            !!j.title &&
-            !!description
-          );
-        });
-        console.log(`[ai_enrichment] source=${aiSource} selected=${dbJobs.length} eligible=${eligibleJobs.length}`);
-
-        const AI_BATCH_SIZE = 25;
-        const AI_MAX_BATCHES_PER_REFRESH = 3;
-        const AI_MAX_RUNTIME_MS = 50_000;
-        const aiEnrichStart = Date.now();
-
-        let batchesAttempted = 0;
-        let batchesCompleted = 0;
-        let totalSentToEnrich = 0;
-        let totalPersisted = 0;
-        let totalSkipped = 0;
-        let stoppedEarly = false;
-
-        for (let batchIdx = 0; batchIdx < AI_MAX_BATCHES_PER_REFRESH; batchIdx++) {
-          if (Date.now() - aiEnrichStart > AI_MAX_RUNTIME_MS) {
-            console.warn(`[ai_enrichment] source=${aiSource} stopping early — time budget exceeded`);
-            stoppedEarly = true;
-            break;
-          }
-
-          const batch = eligibleJobs.slice(batchIdx * AI_BATCH_SIZE, (batchIdx + 1) * AI_BATCH_SIZE);
-          if (batch.length === 0) break;
-
-          batchesAttempted++;
-          totalSentToEnrich += batch.length;
-
-          const batchInput: JobInputForEnrichment[] = batch.map(j => {
-            const description = j.full_description || j.description;
-            return {
-              id:          String(j.id ?? ""),
-              company:     String(j.company ?? ""),
-              title:       String(j.title ?? ""),
-              description: String(description ?? ""),
-              location:    String(j.location ?? ""),
-              url:         String(j.apply_url ?? ""),
-            };
-          });
-
-          const t0 = Date.now();
-          const { results: batchResults, stats } = await enrichBatch(batchInput);
-          console.log(`[ai_enrichment] source=${aiSource} batch=${batchIdx + 1} enrichBatch_ms=${Date.now() - t0} enriched=${stats.enriched} failed=${stats.failed}`);
-
-          let batchPersisted = 0;
-          let batchSkipped = 0;
-          for (const [key, enriched] of batchResults) {
-            if (!key || !enriched?.ai) {
-              batchSkipped++;
-              totalSkipped++;
-              continue;
-            }
-            const { error: updateErr } = await supabaseAdmin
-              .from("jobs")
-              .update({ ai_enrichment: enriched.ai, ai_meta: enriched.aiMeta ?? null })
-              .eq("id", key);
-            if (updateErr) {
-              console.error(`[ai_enrichment] update failed id=${key} source=${aiSource}`, JSON.stringify({ message: updateErr.message, code: updateErr.code }));
-              batchSkipped++;
-              totalSkipped++;
-            } else {
-              batchPersisted++;
-              totalPersisted++;
-            }
-          }
-
-          batchesCompleted++;
-          console.log(`[ai_enrichment] source=${aiSource} batch=${batchIdx + 1} persisted=${batchPersisted} skipped=${batchSkipped}`);
-        }
-
-        console.log(`[ai_enrichment] source=${aiSource} eligible=${eligibleJobs.length} batches_attempted=${batchesAttempted} batches_completed=${batchesCompleted} total_sent=${totalSentToEnrich} persisted=${totalPersisted} skipped=${totalSkipped} stopped_early=${stoppedEarly}`);
-      } catch (aiErr: unknown) {
-        const msg = aiErr instanceof Error ? aiErr.message : String(aiErr);
-        console.error(`[ai_enrichment] source=${aiSource} error="${msg}" — enrichment skipped, refresh continues`);
-      }
-    }
-  }
+  // AI enrichment is intentionally NOT run here. It lives at
+  // POST /api/jobs/enrich?source=<source> and is invoked separately so the
+  // refresh request stays well inside the Vercel 60s budget.
 
   // Query DB for actual visible board count after this run
   let boardVisibleTotal = 0;

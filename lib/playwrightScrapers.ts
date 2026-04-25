@@ -1329,6 +1329,10 @@ function classifyWalmartSponsorship(cleanedJD: string): SponsorshipStatus {
   return "unknown";
 }
 
+function isJsonContentType(ct: string | null): boolean {
+  return !!ct && ct.toLowerCase().includes("application/json");
+}
+
 async function fetchWalmartDetail(externalPath: string): Promise<string | null> {
   try {
     const res = await fetch(`${WALMART_CXS_BASE}${externalPath}`, {
@@ -1340,6 +1344,12 @@ async function fetchWalmartDetail(externalPath: string): Promise<string | null> 
       signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return null;
+    const ct = res.headers.get("content-type");
+    if (!isJsonContentType(ct)) {
+      const body = await res.text();
+      console.warn(`[walmart_cxs] detail non-json source=walmart_cxs company=Walmart status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`);
+      return null;
+    }
     const data = await res.json() as Record<string, unknown>;
     const info = (data.jobPostingInfo ?? {}) as Record<string, unknown>;
     return (info.jobDescription as string) ?? (info.externalDescription as string) ?? null;
@@ -1411,13 +1421,31 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         }),
         signal: AbortSignal.timeout(15_000),
       });
+      const ct = res.headers.get("content-type");
       if (!res.ok) {
-        console.warn(`[playwright:Walmart] search HTTP ${res.status} page=${page}`);
+        const body = await res.text().catch(() => "");
+        const msg = `walmart_cxs search HTTP ${res.status} page=${page} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
+        console.warn(`[walmart_cxs] ${msg}`);
+        // Page 0 failure = upstream broken. Throw so ingestSource records the
+        // error and SKIPS deactivation — otherwise existing Walmart jobs would
+        // be wiped on every refresh whenever Workday CXS hiccups.
+        if (page === 0) throw new Error(`walmart_cxs upstream failure: ${msg}`);
+        break;
+      }
+      if (!isJsonContentType(ct)) {
+        const body = await res.text();
+        const msg = `walmart_cxs search non-json page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
+        console.warn(`[walmart_cxs] ${msg}`);
+        if (page === 0) throw new Error(`walmart_cxs upstream returned non-JSON: ${msg}`);
         break;
       }
       data = (await res.json()) as Record<string, unknown>;
     } catch (e) {
-      console.warn(`[playwright:Walmart] search error page=${page}: ${(e as Error).message}`);
+      const msg = (e as Error).message;
+      console.warn(`[walmart_cxs] search error page=${page}: ${msg}`);
+      // Same rule: a page-0 throw must propagate so ingestSource sees the
+      // failure and does NOT deactivate existing Walmart rows.
+      if (page === 0) throw e instanceof Error ? e : new Error(String(e));
       break;
     }
 

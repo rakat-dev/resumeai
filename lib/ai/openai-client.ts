@@ -46,7 +46,12 @@ export async function callOpenAI(
         { role: "system" as const, content: systemPrompt },
         { role: "user" as const, content: userPrompt },
       ];
-      console.log("[AI DEBUG] payload:", JSON.stringify({ model, messages }));
+      // Lightweight log only — never dump the full prompt payload (used to leak
+      // entire job descriptions into Vercel logs and slowed log fetching).
+      // Token estimate uses the rough 4-chars-per-token heuristic.
+      const promptChars = systemPrompt.length + userPrompt.length;
+      const promptTokenEstimate = Math.ceil(promptChars / 4);
+      console.log(`[ai] call model=${model} prompt_chars=${promptChars} prompt_tokens_est=${promptTokenEstimate}`);
       const res = await client.chat.completions.create({
         model,
         temperature: 0,
