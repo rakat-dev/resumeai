@@ -134,7 +134,11 @@ function parsePostedAt(raw: string | null): string | null {
   return isNaN(p.getTime()) ? null : p.toISOString();
 }
 
-const MAX_INGEST_DAYS  = 30;
+// 14-day primary working set: jobs older than 14 days fall outside the
+// freshness window for v2 sources (google_v2, walmart_cxs, amazon_jobs) and
+// every other source that doesn't supply a SOURCE_HORIZON_OVERRIDES entry.
+// Tier-A no-date scrapers (playwright_*) keep their 180-day override below.
+const MAX_INGEST_DAYS  = 14;
 const INGEST_CUTOFF_MS = MAX_INGEST_DAYS * 86_400_000;
 
 function isWithinIngestHorizon(iso: string | null): boolean {
@@ -284,7 +288,10 @@ function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] 
 
 // ── Ingest pipeline ────────────────────────────────────────────────────────
 // Per-source horizon overrides: some companies keep reqs open for months.
-// Using the global 30-day horizon drops 78%+ of Meta/Tier-A inventory.
+// Tier-A scrapers below stay at 180 days because most are no-date sources
+// (postedAt=null bypasses the horizon check) and the global 14-day default
+// would otherwise drop the ~78% of Meta/Tier-A inventory that DOES carry
+// older posted_at values.
 const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
   // meta: removed — Meta adapter now sets postedAt=null (no-date source, like Google/Apple).
   //        null postedAt passes isWithinHorizon unconditionally so no override needed.

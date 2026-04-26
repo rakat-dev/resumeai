@@ -7,7 +7,19 @@ import { PROMPT_VERSION } from "@/lib/ai/prompts";
 
 export const maxDuration = 60;
 
-const ENRICH_ELIGIBLE_SOURCES = new Set(["walmart_cxs", "amazon_jobs", "google_v2"]);
+// Sources allowed to drive AI enrichment. Greenhouse added after confirming
+// it ships full_description payloads with a 5738-char median and all rows
+// over the 800-char MIN_JD_CHARS_FOR_ENRICHMENT threshold. Adzuna excluded
+// despite having descriptions because the API truncates every payload to
+// exactly 500 chars — 0% of rows clear the threshold. Workday/jsearch/lever
+// excluded — Workday rows land with an empty description column, and
+// jsearch/lever have no active rows in the dataset.
+const ENRICH_ELIGIBLE_SOURCES = new Set([
+  "walmart_cxs",
+  "amazon_jobs",
+  "google_v2",
+  "greenhouse",
+]);
 
 // Sized so a single call reliably fits inside Vercel's 60s function limit.
 // Empirically: 15 jobs × ~2 OpenAI calls each at concurrency 3 ≈ 25-35s wall.
