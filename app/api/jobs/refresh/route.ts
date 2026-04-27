@@ -485,8 +485,117 @@ function isJsonContentType(ct: string | null): boolean {
   return !!ct && ct.toLowerCase().includes("application/json");
 }
 
+// ── Workday detail-fetch helpers ──────────────────────────────────────────
+// Workday's CXS /jobs LISTING endpoint ships only a metadata header per row
+// (title, postedOn, locationsText, externalPath). The actual jobDescription
+// HTML and the canonical startDate live on the per-job DETAIL endpoint:
+//   https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/job${externalPath}
+// Notes on URL shape:
+//  • externalPath already starts with "/", typical value
+//    "/US-CA-Santa-Clara/Software-Engineer_R-12345"
+//  • The customer-facing apply URL has the same shape but under /en-US/...
+//    We previously appended a literal "/job" before externalPath, which
+//    produced /en-US/${site}/job/job/... — a 404 path. Fixed in this commit.
+
+const WD_DETAIL_TIMEOUT_MS  = 8_000;
+const WD_DETAIL_CONCURRENCY = 6;
+const WD_DETAIL_BUDGET_MS   = 18_000; // per-tenant budget for the detail pass
+
+interface WorkdayDetail {
+  description: string | null;
+  /** Detail-endpoint's `startDate` field — always ISO yyyy-MM-dd when present. */
+  startDate:   string | null;
+  /** Detail-endpoint's `postedOn` field — Workday's relative human string. */
+  postedOn:    string | null;
+}
+
+function workdayApplyUrl(tenant: string, server: string, site: string, externalPath: string): string {
+  // externalPath already begins with "/job/..." in the listing payload OR
+  // with "/Some-Slug" (older tenants). Either way, just concatenate — the
+  // template must NOT add its own "/job" segment or the URL doubles up.
+  if (!externalPath) return `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}`;
+  return `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}${externalPath}`;
+}
+
+function workdayDetailApiUrl(tenant: string, server: string, site: string, externalPath: string): string {
+  return `https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}${externalPath}`;
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function fetchWorkdayDetail(detailUrl: string): Promise<WorkdayDetail | null> {
+  try {
+    const res = await fetch(detailUrl, {
+      headers: {
+        "Accept":         "application/json",
+        "Accept-Language":"en-US",
+        "User-Agent":     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      },
+      signal: AbortSignal.timeout(WD_DETAIL_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const ct = res.headers.get("content-type");
+    if (!isJsonContentType(ct)) return null;
+    const data    = await res.json() as Record<string, unknown>;
+    const info    = (data.jobPostingInfo as Record<string, unknown> | undefined) ?? {};
+    // Description: jobPostingInfo.jobDescription is HTML.
+    const descRaw = (info.jobDescription as string | undefined) ?? null;
+    const cleaned = descRaw ? htmlToPlainText(descRaw) : null;
+    const startDate = (info.startDate as string | undefined) ?? null;
+    const postedOn  = (info.postedOn  as string | undefined) ?? null;
+    return { description: cleaned, startDate, postedOn };
+  } catch {
+    return null;
+  }
+}
+
+async function detailMapWithConcurrency<T, U>(
+  items: T[],
+  limit: number,
+  budgetMs: number,
+  fn: (item: T) => Promise<U>,
+): Promise<U[]> {
+  const out = new Array<U>(items.length);
+  let cursor = 0;
+  const deadline = Date.now() + budgetMs;
+  async function worker(): Promise<void> {
+    while (Date.now() < deadline) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) workers.push(worker());
+  await Promise.all(workers);
+  return out;
+}
+
 async function fetchWorkdayCompany(name: string, tenant: string, site: string, server: string): Promise<RawJob[]> {
-  const results: RawJob[] = [];
+  // ── Phase 1: listing pass (collect candidates) ─────────────────────────
+  interface Pending {
+    job:          RawJob;
+    externalPath: string;
+    listingDate:  string | null;   // raw "Posted N Days Ago" / null from listing
+    listingDesc:  string;
+  }
+  const pendings: Pending[] = [];
   const baseUrl = `https://${tenant}.${server}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/jobs`;
 
   for (let page = 0; page < WD_MAX_PAGES; page++) {
@@ -504,7 +613,6 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
       const ct = res.headers.get("content-type");
       if (!res.ok) {
         if (res.status === 422) {
-          // 422 = Workday tenant blocks this query shape. Treat as skipped.
           console.warn(`[workday] tenant_skipped source=workday company="${name}" page=${page} status=422 reason=unsupported_tenant`);
         } else {
           const body = await res.text().catch(() => "");
@@ -513,8 +621,6 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         break;
       }
       if (!isJsonContentType(ct)) {
-        // HTML / login page from Workday tenant — skip the tenant rather
-        // than letting JSON.parse explode and surface as a generic exception.
         const body = await res.text();
         console.warn(`[workday] tenant_skipped source=workday company="${name}" page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}" reason=non_json_response`);
         break;
@@ -529,23 +635,26 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
         const rawDesc      = ((j.jobDescription as Record<string, unknown>)?.jobDescription as string) ?? (j.shortDesc as string) ?? "";
         const locText      = (j.locationsText as string) ?? (j.location as string) ?? "United States";
         const externalPath = (j.externalPath as string) ?? "";
-        const applyUrl     = externalPath
-          ? `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}/job${externalPath}`
-          : `https://${tenant}.${server}.myworkdayjobs.com/en-US/${site}`;
-        // Stable ID: externalPath contains unique req slug. Fallback: composite.
+        const applyUrl     = workdayApplyUrl(tenant, server, site, externalPath);
         const uid = externalPath
           ? externalPath.replace(/\//g, "-").slice(-48)
-          : `${tenant}-${title.toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${locText.slice(0, 20)}-${page}-${results.length}`;
-        results.push({
-          id:          `wd-${uid}`,
-          source:      "workday",
-          company:     name,
-          title,
-          location:    locText,
-          description: rawDesc,
-          applyUrl,
-          postedAt:    (j.postedOn as string) ?? null,
-          type:        "Full-time",
+          : `${tenant}-${title.toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${locText.slice(0, 20)}-${page}-${pendings.length}`;
+        const listingDate = (j.postedOn as string) ?? null;
+        pendings.push({
+          job: {
+            id:          `wd-${uid}`,
+            source:      "workday",
+            company:     name,
+            title,
+            location:    locText,
+            description: rawDesc,
+            applyUrl,
+            postedAt:    listingDate,
+            type:        "Full-time",
+          },
+          externalPath,
+          listingDate,
+          listingDesc: rawDesc,
         });
       }
       if (jobs.length < WD_PAGE_SIZE) break;
@@ -555,14 +664,62 @@ async function fetchWorkdayCompany(name: string, tenant: string, site: string, s
       break;
     }
   }
-  return results;
+
+  // ── Phase 2: detail-fetch pass for jobs missing JD or posted_at ────────
+  // The listing endpoint usually omits jobDescription entirely AND ships
+  // postedOn as a relative string (e.g. "Posted 5 Days Ago"); both are filled
+  // in by the per-job CXS detail endpoint. Bound the pass with a per-tenant
+  // budget so a slow tenant can't blow past Promise.race timeout in the caller.
+  const needsDetail = pendings.filter(p => p.externalPath && (!p.listingDesc || !p.listingDate));
+  let detailAttempted    = 0;
+  let detailSuccess      = 0;
+  let detailFail         = 0;
+  let postedAtRecovered  = 0;   // jobs where listing supplied no date but detail.startDate did
+  let isoUpgrades        = 0;   // jobs where listing had a relative string but detail.startDate replaced it with ISO
+  let descRecovered      = 0;
+  if (needsDetail.length > 0) {
+    await detailMapWithConcurrency(needsDetail, WD_DETAIL_CONCURRENCY, WD_DETAIL_BUDGET_MS, async (p) => {
+      detailAttempted++;
+      const detailUrl = workdayDetailApiUrl(tenant, server, site, p.externalPath);
+      const det = await fetchWorkdayDetail(detailUrl);
+      if (!det) { detailFail++; return; }
+      detailSuccess++;
+      if (det.description && !p.listingDesc) {
+        p.job.description = det.description;
+        descRecovered++;
+      }
+      // Date precedence:
+      //   1. Detail.startDate (always ISO yyyy-MM-dd) — preferred whenever present.
+      //   2. Listing.postedOn (Workday relative string, parseable for today / N days).
+      //   3. Detail.postedOn (same shape as listing's, used as last resort).
+      // We OVERWRITE the listing's postedAt with detail.startDate even when the
+      // listing already had a date, because the ISO is unambiguous and the
+      // relative-string parser fails on "Posted Yesterday" / "Posted 30+ Days Ago".
+      const beforeHadDate = !!p.listingDate;
+      if (det.startDate) {
+        p.job.postedAt = det.startDate;
+        if (!beforeHadDate) postedAtRecovered++;
+        else                isoUpgrades++;
+      } else if (!p.listingDate && det.postedOn) {
+        p.job.postedAt = det.postedOn;
+        postedAtRecovered++;
+      }
+    });
+  }
+  console.log(`[workday:${name}] candidates=${pendings.length} detail_needed=${needsDetail.length} detail_attempted=${detailAttempted} detail_success=${detailSuccess} detail_fail=${detailFail} posted_at_recovered=${postedAtRecovered} iso_upgrades=${isoUpgrades} desc_recovered=${descRecovered}`);
+
+  return pendings.map(p => p.job);
 }
 
 async function fetchWorkdaySource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   const results: RawJob[] = [];
   const companies = getWorkdayConfigs(); // registry-driven
   const BATCH = 12;              // was 4 — more parallelism to stay under Vercel 60s
-  const PER_TENANT_MS = 20_000;  // hard cap per tenant (paging can blow past per-call 12s)
+  // 40s per-tenant cap to fit listing (≤15 pages × 1-2s) + detail pass (300
+  // candidates / 6 workers × ~100ms ≈ 5s) within Vercel's 60s function ceiling.
+  // 20s was leaving Salesforce/Adobe/Intel/NVIDIA mid-pass — their detail
+  // results landed AFTER Promise.race had already discarded the work.
+  const PER_TENANT_MS = 40_000;
 
   for (let i = 0; i < companies.length; i += BATCH) {
     const settled = await Promise.allSettled(
