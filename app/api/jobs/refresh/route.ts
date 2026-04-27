@@ -8,7 +8,7 @@ import {
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
 import {
-  fetchMicrosoftJobs, fetchAppleJobs,
+  fetchAppleJobs,
   fetchAmazonJobsV2, fetchJPMJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs,
   fetchWalmartJobs,
@@ -18,7 +18,10 @@ import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } fro
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 import { fetchGoogleV2Jobs } from "@/lib/scrapers/google";
-import { fetchMicrosoftV2Jobs } from "@/lib/scrapers/microsoft";
+// API-based Microsoft adapter — replaces the legacy `fetchMicrosoftJobs` from
+// playwrightScrapers.ts. Source name remains "playwright_microsoft" to keep
+// existing DB rows valid (no migration needed).
+import { fetchMicrosoftJobs } from "@/lib/scrapers/microsoft";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -282,7 +285,6 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   walmart_cxs: 400,
   amazon_jobs: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
   google_v2:    200,        // Google Careers hydration parser — replaces playwright_google
-  microsoft_v2: 200,        // Microsoft Careers public search API + per-job detail fetch
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -369,10 +371,10 @@ async function ingestSource(
       const gdDated = normalized.filter(j => !!j.posted_at).length;
       console.log(`[google_v2] full_description=${gdFull}/${normalized.length} posted_at=${gdDated}/${normalized.length}`);
     }
-    if (source === "microsoft_v2") {
+    if (source === "playwright_microsoft") {
       const msFull  = normalized.filter(j => !!j.full_description).length;
       const msDated = normalized.filter(j => !!j.posted_at).length;
-      console.log(`[microsoft_v2] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
+      console.log(`[playwright_microsoft] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
     }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
@@ -1105,17 +1107,17 @@ async function fetchGoogleV2Source(): Promise<{ raw: RawJob[]; fetched: number; 
   }
 }
 
-// 1g-3. Microsoft Careers v2 (lib/scrapers/microsoft.ts).
-// Public search API + per-job detail fetch. Returns ParsedMicrosoftJob with
-// snake_case fields and a separate full_description, mirroring google_v2.
-// Translate to RawJob here so normalizeJobs builds the 220-char preview and
-// full_description the same way it does for every other source.
-async function fetchMicrosoftV2Source(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+// 1g-3. Microsoft Careers (lib/scrapers/microsoft.ts).
+// Public search API + per-job detail fetch (≤7d only). Returns
+// ParsedMicrosoftJob with snake_case fields and a separate full_description,
+// mirroring google_v2. Source name remains "playwright_microsoft" for DB
+// continuity even though the implementation is API-based.
+async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   try {
-    const parsed = await fetchMicrosoftV2Jobs();
+    const parsed = await fetchMicrosoftJobs();
     const raw: RawJob[] = parsed.map(p => ({
       id:          p.id,
-      source:      "microsoft_v2",
+      source:      "playwright_microsoft",
       company:     p.company,
       title:       p.title,
       location:    p.location,
@@ -1199,7 +1201,10 @@ export async function POST(req: NextRequest) {
   if (run("meta"))       tasks.push(ingestSource("meta",       fetchMetaSource,       "meta"      ).then(r => { results.meta       = r; }));
 
   // ── Per-company Tier A playwright sources ─────────────────────────────
-  if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", makeTierAFetcher("playwright_microsoft", fetchMicrosoftJobs),    "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
+  // playwright_microsoft now uses the API-based scraper in lib/scrapers/microsoft.ts
+  // (replaces the legacy fetchMicrosoftJobs in lib/playwrightScrapers.ts which
+  // shipped empty descriptions and used a less reliable backend endpoint).
+  if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", fetchMicrosoftSource,                                             "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
   // DISABLED: playwright_google has been permanently replaced by google_v2
   // (SSR hydration parser — real descriptions + posted_at). The import of
   // fetchGoogleJobs and the function itself remain in lib/playwrightScrapers.ts
@@ -1209,7 +1214,6 @@ export async function POST(req: NextRequest) {
   // To roll back: re-introduce a registration line here, then redeploy. Do
   // NOT just flip an env var — that path was removed deliberately.
   if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
-  if (run("microsoft_v2"))         tasks.push(ingestSource("microsoft_v2",         fetchMicrosoftV2Source,                                           "microsoft_v2"        ).then(r => { results.microsoft_v2         = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
   if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
   if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));

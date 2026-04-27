@@ -31,7 +31,6 @@ export type RefreshSource =
   | "amazon_jobs"
   | "walmart_cxs"
   | "google_v2"                    // Google Careers SSR + AF_initDataCallback hydration parser (lib/scrapers/google.ts)
-  | "microsoft_v2"                 // Microsoft Careers public search API + per-job detail fetch (lib/scrapers/microsoft.ts)
   // @deprecated — use company-specific playwright sources; source=playwright returns 400
   | "playwright";
 
