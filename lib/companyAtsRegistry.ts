@@ -198,7 +198,7 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "Sitemap+JSON-LD scrape added 2026-04-17. Replaces playwright_meta (HTTP 400 since Meta added per-request anti-replay tokens to GraphQL)." },
 
   // ── PLAYWRIGHT / CUSTOM CAREER PAGE APIs (Tier A) ─────────────────────────
-  { company: "Microsoft",      ats: "custom", careersUrl: "https://jobs.careers.microsoft.com/global/en/search",   adapter: "playwright_microsoft", enabled: true },
+  { company: "Microsoft",      ats: "custom", careersUrl: "https://jobs.careers.microsoft.com/global/en/search",   adapter: "microsoft_v2", enabled: true },
   { company: "Google",         ats: "custom", careersUrl: "https://careers.google.com/api/v3/search",              adapter: "playwright_google",    enabled: true },
   { company: "Apple",          ats: "custom", careersUrl: "https://jobs.apple.com/api/role/search",                adapter: "playwright_apple",     enabled: true },
   { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: false,

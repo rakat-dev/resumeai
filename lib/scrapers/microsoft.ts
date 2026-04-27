@@ -14,17 +14,17 @@
 //   field names differ. The user-facing apply URL we store is still the
 //   canonical `https://jobs.careers.microsoft.com/global/en/job/{displayId}`.
 //
-// Source name is intentionally "playwright_microsoft" — the dispatch slot
+// Source name is intentionally "microsoft_v2" — the dispatch slot
 // downstream stays put even though we no longer use Playwright. Keeping the
 // name avoids a database migration for existing rows that already carry
-// source="playwright_microsoft".
+// source="microsoft_v2".
 
 export type MicrosoftPriority = "high" | "medium" | "low" | "date_missing";
 
 export interface ParsedMicrosoftJob {
-  /** Stable adapter-prefixed ID. Format: `playwright_microsoft-{numericId}`. */
+  /** Stable adapter-prefixed ID. Format: `microsoft_v2-{numericId}`. */
   id:               string;
-  source:           "playwright_microsoft";
+  source:           "microsoft_v2";
   title:            string;
   company:          string;          // always "Microsoft"
   location:         string;          // first US-anchored location, or "United States"
@@ -384,8 +384,8 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
     const fetched    = fullText.get(numericId);
     const fullJd     = fetched ?? "";
     return {
-      id:               `playwright_microsoft-${numericId}`,
-      source:           "playwright_microsoft",
+      id:               `microsoft_v2-${numericId}`,
+      source:           "microsoft_v2",
       title:            s.pos.name ?? "",
       company:          "Microsoft",
       location:         s.location,
@@ -405,7 +405,7 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
     return acc;
   }, {} as Record<string, number>);
   console.log(
-    `[playwright_microsoft] fetched=${totalFetched} deduped=${candidates.length} ` +
+    `[microsoft_v2] fetched=${totalFetched} deduped=${candidates.length} ` +
     `rejected_no_date=0 date_missing=${date_missing} ` +
     `rejected_old=${rejected_old} rejected_title=${rejected_title} ` +
     `rejected_location=${rejected_location} ` +
@@ -418,7 +418,7 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
   for (const [bucket, samples] of Object.entries(rejectSamples)) {
     if (samples.length === 0) continue;
     for (const s of samples) {
-      console.log(`[playwright_microsoft:${bucket}] title="${s.title}" reason="${s.reason}"`);
+      console.log(`[microsoft_v2:${bucket}] title="${s.title}" reason="${s.reason}"`);
     }
   }
 

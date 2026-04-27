@@ -69,7 +69,7 @@ function rowToJob(row: JobRow): Job {
   const rawSource = row.source as string;
   // v2 sources (direct API adapters that ship full_description + posted_at)
   // bucket together so the UI/scorer can treat them uniformly.
-  const V2_SOURCES = new Set(["walmart_cxs", "amazon_jobs", "google_v2"]);
+  const V2_SOURCES = new Set(["walmart_cxs", "amazon_jobs", "google_v2", "microsoft_v2"]);
   const sourceType: Job["sourceType"] = V2_SOURCES.has(rawSource)
     ? "v2"
     : rawSource.startsWith("playwright")

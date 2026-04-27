@@ -19,7 +19,7 @@ import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 import { fetchGoogleV2Jobs } from "@/lib/scrapers/google";
 // API-based Microsoft adapter — replaces the legacy `fetchMicrosoftJobs` from
-// playwrightScrapers.ts. Source name remains "playwright_microsoft" to keep
+// playwrightScrapers.ts. Source name remains "microsoft_v2" to keep
 // existing DB rows valid (no migration needed).
 import { fetchMicrosoftJobs } from "@/lib/scrapers/microsoft";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
@@ -276,7 +276,7 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   adzuna: 1000, jooble: 1000,
   phenom: 800,              // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
   meta: 1000,               // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
-  playwright_microsoft: 150,
+  microsoft_v2: 150,
   playwright_google: 150,
   playwright_apple: 100,
   playwright_jpmorgan: 100,
@@ -371,10 +371,10 @@ async function ingestSource(
       const gdDated = normalized.filter(j => !!j.posted_at).length;
       console.log(`[google_v2] full_description=${gdFull}/${normalized.length} posted_at=${gdDated}/${normalized.length}`);
     }
-    if (source === "playwright_microsoft") {
+    if (source === "microsoft_v2") {
       const msFull  = normalized.filter(j => !!j.full_description).length;
       const msDated = normalized.filter(j => !!j.posted_at).length;
-      console.log(`[playwright_microsoft] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
+      console.log(`[microsoft_v2] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
     }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
@@ -1110,14 +1110,14 @@ async function fetchGoogleV2Source(): Promise<{ raw: RawJob[]; fetched: number; 
 // 1g-3. Microsoft Careers (lib/scrapers/microsoft.ts).
 // Public search API + per-job detail fetch (≤7d only). Returns
 // ParsedMicrosoftJob with snake_case fields and a separate full_description,
-// mirroring google_v2. Source name remains "playwright_microsoft" for DB
+// mirroring google_v2. Source name remains "microsoft_v2" for DB
 // continuity even though the implementation is API-based.
 async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   try {
     const parsed = await fetchMicrosoftJobs();
     const raw: RawJob[] = parsed.map(p => ({
       id:          p.id,
-      source:      "playwright_microsoft",
+      source:      "microsoft_v2",
       company:     p.company,
       title:       p.title,
       location:    p.location,
@@ -1180,7 +1180,7 @@ export async function POST(req: NextRequest) {
   if (sourceFilter === "playwright") {
     return NextResponse.json({
       ok: false,
-      error: "source=playwright is deprecated; use company-specific playwright sources (playwright_microsoft, playwright_google, playwright_apple, playwright_jpmorgan, playwright_goldman, playwright_openai)",
+      error: "source=playwright is deprecated; use company-specific playwright sources (microsoft_v2, playwright_google, playwright_apple, playwright_jpmorgan, playwright_goldman, playwright_openai)",
     }, { status: 400 });
   }
 
@@ -1201,10 +1201,10 @@ export async function POST(req: NextRequest) {
   if (run("meta"))       tasks.push(ingestSource("meta",       fetchMetaSource,       "meta"      ).then(r => { results.meta       = r; }));
 
   // ── Per-company Tier A playwright sources ─────────────────────────────
-  // playwright_microsoft now uses the API-based scraper in lib/scrapers/microsoft.ts
+  // microsoft_v2 now uses the API-based scraper in lib/scrapers/microsoft.ts
   // (replaces the legacy fetchMicrosoftJobs in lib/playwrightScrapers.ts which
   // shipped empty descriptions and used a less reliable backend endpoint).
-  if (run("playwright_microsoft")) tasks.push(ingestSource("playwright_microsoft", fetchMicrosoftSource,                                             "playwright_microsoft").then(r => { results.playwright_microsoft = r; }));
+  if (run("microsoft_v2")) tasks.push(ingestSource("microsoft_v2", fetchMicrosoftSource,                                             "microsoft_v2").then(r => { results.microsoft_v2 = r; }));
   // DISABLED: playwright_google has been permanently replaced by google_v2
   // (SSR hydration parser — real descriptions + posted_at). The import of
   // fetchGoogleJobs and the function itself remain in lib/playwrightScrapers.ts
