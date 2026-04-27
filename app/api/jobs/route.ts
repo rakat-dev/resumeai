@@ -28,7 +28,7 @@ export interface Job {
   postedDate: string;
   postedTimestamp: number;
   source: string;
-  sourceType: "greenhouse" | "workday" | "jsearch" | "adzuna" | "jooble" | "phenom" | "meta" | "playwright" | "other";
+  sourceType: "greenhouse" | "workday" | "jsearch" | "adzuna" | "jooble" | "phenom" | "meta" | "playwright" | "v2" | "other";
   skills: string[];
   sponsorshipTag: "mentioned" | "not_mentioned";
   experience?: string;
@@ -67,9 +67,14 @@ export interface SourceDiagnostic {
 function rowToJob(row: JobRow): Job {
   const ts = row.posted_at ? Math.floor(new Date(row.posted_at).getTime() / 1000) : 0;
   const rawSource = row.source as string;
-  const sourceType: Job["sourceType"] = rawSource.startsWith("playwright") || rawSource === "walmart_cxs"
-    ? "playwright"
-    : (rawSource as Job["sourceType"]) ?? "other";
+  // v2 sources (direct API adapters that ship full_description + posted_at)
+  // bucket together so the UI/scorer can treat them uniformly.
+  const V2_SOURCES = new Set(["walmart_cxs", "amazon_jobs", "google_v2", "microsoft_v2"]);
+  const sourceType: Job["sourceType"] = V2_SOURCES.has(rawSource)
+    ? "v2"
+    : rawSource.startsWith("playwright")
+      ? "playwright"
+      : (rawSource as Job["sourceType"]) ?? "other";
 
   return {
     id:              row.id,

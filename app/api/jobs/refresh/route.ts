@@ -8,9 +8,9 @@ import {
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
 import {
-  fetchMicrosoftJobs, fetchGoogleJobs, fetchAppleJobs,
+  fetchMicrosoftJobs, fetchAppleJobs,
   fetchAmazonJobsV2, fetchJPMJobs,
-  fetchGoldmanSachsJobs, fetchOpenAIJobs, fetchNetflixJobs,
+  fetchGoldmanSachsJobs, fetchOpenAIJobs,
   fetchWalmartJobs,
   type ScrapedJob,
 } from "@/lib/playwrightScrapers";
@@ -18,6 +18,7 @@ import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } fro
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 import { fetchGoogleV2Jobs } from "@/lib/scrapers/google";
+import { fetchMicrosoftV2Jobs } from "@/lib/scrapers/microsoft";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -280,28 +281,24 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   playwright_openai: 50,
   walmart_cxs: 400,
   amazon_jobs: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
-  google_v2:   200,         // Google Careers hydration parser — replaces playwright_google
+  google_v2:    200,        // Google Careers hydration parser — replaces playwright_google
+  microsoft_v2: 200,        // Microsoft Careers public search API + per-job detail fetch
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
 }
 
 // ── Ingest pipeline ────────────────────────────────────────────────────────
-// Per-source horizon overrides: some companies keep reqs open for months.
-// Tier-A scrapers below stay at 180 days because most are no-date sources
-// (postedAt=null bypasses the horizon check) and the global 14-day default
-// would otherwise drop the ~78% of Meta/Tier-A inventory that DOES carry
-// older posted_at values.
+// Per-source horizon overrides. Most sources now use the global 14-day rule;
+// only sources documented to keep older requisitions intentionally get an
+// override here.
 const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
-  // meta: removed — Meta adapter now sets postedAt=null (no-date source, like Google/Apple).
-  //        null postedAt passes isWithinHorizon unconditionally so no override needed.
+  // meta: removed — Meta adapter sets postedAt=null (the only approved no-date
+  //        source). Null postedAt bypasses the horizon check entirely so no
+  //        override is needed.
   playwright:           180,  // kept for backward compat (returns 400 at route level)
-  playwright_microsoft: 180,
-  playwright_google:    180,  // no-date source; override is a no-op but consistent
-  playwright_apple:     180,
-  playwright_jpmorgan:  180,
-  playwright_goldman:   180,
-  playwright_openai:    180,
+  playwright_goldman:   180,  // Oracle HCM feed; reqs stay open longer than 14 days
+  playwright_openai:    180,  // Ashby feed; reqs stay open longer than 14 days
   phenom:               180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
 };
 
@@ -311,7 +308,8 @@ async function ingestSource(
   label: string
 ): Promise<{ raw: number; kept: number; stored: number; error: string | null; filterStats?: FilterStats }> {
   const startedAt = markRunning(label, source);
-  // Use per-source horizon if configured; otherwise fall back to global 30-day default.
+  // Use per-source horizon if configured; otherwise fall back to the global
+  // MAX_INGEST_DAYS (14) default.
   const horizonDays = SOURCE_HORIZON_OVERRIDES[source] ?? MAX_INGEST_DAYS;
   const horizonMs   = horizonDays * 86_400_000;
   function isWithinHorizon(iso: string | null): boolean {
@@ -326,10 +324,24 @@ async function ingestSource(
       return { raw: 0, kept: 0, stored: 0, error: fetchErr };
     }
     const normalized = normalizeJobs(rawJobs);
+    // Reject jobs with no posted_at date. The lone exception is "meta", which
+    // is the only source approved to publish dateless rows (its sitemap+JSON-LD
+    // adapter has no postedAt anchor). Every other source must carry a real
+    // date so the global 14-day horizon means what it says.
+    let rejected_no_date = 0;
+    const dated = source === "meta"
+      ? normalized
+      : normalized.filter(j => {
+          if (!j.posted_at) { rejected_no_date++; return false; }
+          return true;
+        });
+    if (rejected_no_date > 0) {
+      console.log(`[${source}] rejected_no_date=${rejected_no_date}`);
+    }
     // Apply per-source horizon inside the filter pass
     let title_removed = 0, type_removed = 0, location_removed = 0,
         clearance_removed = 0, horizon_removed = 0, company_blocked = 0;
-    const filtered = normalized.filter(j => {
+    const filtered = dated.filter(j => {
       if (isBlockedCompany(j.company))                        { company_blocked++; return false; }
       if (!shouldIncludeTitle(j.title))                       { title_removed++;    return false; }
       if (!isFullTime(j.employment_type, j.description))     { type_removed++;     return false; }
@@ -356,6 +368,11 @@ async function ingestSource(
       const gdFull  = normalized.filter(j => !!j.full_description).length;
       const gdDated = normalized.filter(j => !!j.posted_at).length;
       console.log(`[google_v2] full_description=${gdFull}/${normalized.length} posted_at=${gdDated}/${normalized.length}`);
+    }
+    if (source === "microsoft_v2") {
+      const msFull  = normalized.filter(j => !!j.full_description).length;
+      const msDated = normalized.filter(j => !!j.posted_at).length;
+      console.log(`[microsoft_v2] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
     }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
@@ -931,6 +948,32 @@ async function fetchGoogleV2Source(): Promise<{ raw: RawJob[]; fetched: number; 
   }
 }
 
+// 1g-3. Microsoft Careers v2 (lib/scrapers/microsoft.ts).
+// Public search API + per-job detail fetch. Returns ParsedMicrosoftJob with
+// snake_case fields and a separate full_description, mirroring google_v2.
+// Translate to RawJob here so normalizeJobs builds the 220-char preview and
+// full_description the same way it does for every other source.
+async function fetchMicrosoftV2Source(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const parsed = await fetchMicrosoftV2Jobs();
+    const raw: RawJob[] = parsed.map(p => ({
+      id:          p.id,
+      source:      "microsoft_v2",
+      company:     p.company,
+      title:       p.title,
+      location:    p.location,
+      description: p.full_description,   // pass FULL text — normalizeJobs derives both preview+full
+      applyUrl:    p.apply_url,
+      postedAt:    p.posted_at,
+      type:        "Full-time",
+    }));
+    return { raw, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
 // 1h. Meta sitemap+JSON-LD (lib/scrapers/meta.ts).
 // Replaces playwright_meta which broke when Meta added per-request anti-replay
 // tokens to its GraphQL endpoint. Sitemap exposes ~918 job URLs each with full
@@ -944,72 +987,6 @@ async function fetchMetaSource(): Promise<{ raw: RawJob[]; fetched: number; erro
     const msg = e instanceof Error ? e.message : String(e);
     return { raw: [], fetched: 0, error: msg };
   }
-}
-
-const TIER_A_COMPANIES: Array<{ name: string; source: RefreshSource; fetcher: () => Promise<ScrapedJob[]> }> = [
-  { name: "Microsoft",      source: "playwright_microsoft", fetcher: fetchMicrosoftJobs    },
-  { name: "Google",         source: "playwright_google",    fetcher: fetchGoogleJobs       },
-  { name: "Apple",          source: "playwright_apple",     fetcher: fetchAppleJobs        },
-  // Meta removed 2026-04-17 — fetchMetaJobs returns HTTP 400 since Meta added
-  // per-request anti-replay tokens to its GraphQL endpoint. Replaced by the
-  // sitemap+JSON-LD adapter in lib/scrapers/meta.ts (run via source="meta").
-  { name: "Amazon",         source: "amazon_jobs",          fetcher: fetchAmazonJobsV2     },
-  { name: "JPMorgan Chase", source: "playwright_jpmorgan",  fetcher: fetchJPMJobs          },
-  { name: "Goldman Sachs",  source: "playwright_google",    fetcher: fetchGoldmanSachsJobs }, // Oracle HCM
-  { name: "OpenAI",         source: "playwright_microsoft", fetcher: fetchOpenAIJobs       }, // Ashby
-  { name: "Netflix",        source: "playwright_apple",     fetcher: fetchNetflixJobs      }, // Lever
-  // Walmart: direct Workday CXS backend, scoped to 4 Job Profile IDs.
-  // Replaces Adzuna targeted fetch (2026-04-18) — direct source returns 265
-  // jobs with real req IDs and careers.walmart.com apply links.
-  { name: "Walmart",        source: "walmart_cxs",          fetcher: fetchWalmartJobs      },
-];
-
-async function fetchPlaywrightTierA(): Promise<{
-  raw: RawJob[]; fetched: number; error: string | null;
-  companyResults: Record<string, { raw: number; filtered: number; error: string | null }>;
-}> {
-  const allRaw: RawJob[] = [];
-  const companyResults: Record<string, { raw: number; filtered: number; error: string | null }> = {};
-
-  const settled = await Promise.allSettled(
-    TIER_A_COMPANIES.map(async ({ name, source, fetcher }) => {
-      const t0 = Date.now();
-      persistState({ company: name, source, status: "running",
-        started_at: t0, finished_at: null, duration_ms: null,
-        raw_count: null, kept_count: null, error_message: null,
-        last_success_at: null, last_attempt_at: t0 });
-      try {
-        const scraped = await fetcher();
-        const raw: RawJob[] = scraped.map(s => ({
-          id: s.id, source: source as RefreshSource, company: s.company,
-          title: s.title, location: s.location, description: s.description,
-          applyUrl: s.applyUrl, postedAt: s.postedAt, type: s.type,
-          positionRank: s.positionRank,
-        }));
-        const now = Date.now();
-        persistState({ company: name, source, status: "success",
-          started_at: t0, finished_at: now, duration_ms: now - t0,
-          raw_count: raw.length, kept_count: raw.length, error_message: null,
-          last_success_at: now, last_attempt_at: t0 });
-        companyResults[name] = { raw: raw.length, filtered: raw.length, error: null };
-        console.log(`[playwright:${name}] raw=${raw.length}`);
-        return raw;
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const now = Date.now();
-        persistState({ company: name, source, status: "failed",
-          started_at: t0, finished_at: now, duration_ms: now - t0,
-          raw_count: 0, kept_count: 0, error_message: msg,
-          last_success_at: null, last_attempt_at: t0 });
-        companyResults[name] = { raw: 0, filtered: 0, error: msg };
-        return [] as RawJob[];
-      }
-    })
-  );
-
-  settled.forEach(r => { if (r.status === "fulfilled") allRaw.push(...r.value); });
-  console.log(`[playwright] TierA total raw: ${allRaw.length}`);
-  return { raw: allRaw, fetched: allRaw.length, error: null, companyResults };
 }
 
 // ── Tier A per-company fetcher adapter ────────────────────────────────────
@@ -1075,6 +1052,7 @@ export async function POST(req: NextRequest) {
   // To roll back: re-introduce a registration line here, then redeploy. Do
   // NOT just flip an env var — that path was removed deliberately.
   if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
+  if (run("microsoft_v2"))         tasks.push(ingestSource("microsoft_v2",         fetchMicrosoftV2Source,                                           "microsoft_v2"        ).then(r => { results.microsoft_v2         = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
   if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
   if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));

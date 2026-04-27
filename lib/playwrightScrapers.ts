@@ -688,7 +688,7 @@ function classifyAmazonSponsorship(cleanedJD: string): "not_supported" | "suppor
 export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   const MAX_PAGES = 15;
   const PAGE_SIZE = 10;
-  const AMAZON_MAX_AGE_DAYS = 5;
+  const AMAZON_MAX_AGE_DAYS = 14;
   const MAX_CANDIDATES = 500;
   const AMAZON_JD_FETCH_CAP = 80;  // hard cap on Phase 2 detail fetches to stay under Vercel 60s
   const now = Date.now();
@@ -1180,7 +1180,7 @@ function buildWalmartCanonicalUrl(reqId: string): string {
 const WALMART_PAGE_SIZE       = 20;
 const WALMART_MAX_PAGES       = 20;
 const WALMART_BATCH_SIZE      = 15;
-const WALMART_MAX_AGE_DAYS = 10;
+const WALMART_MAX_AGE_DAYS = 14;
 
 interface WalmartDateResult {
   postedAtIso: string | null;
