@@ -1291,7 +1291,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const displayJobId = (() => {
     const raw = job.id;
     if (!raw) return "Not available";
-    const stripped = raw.replace(/^(amazon_v2|microsoft_v2|google_v2|walmart_v2|playwright_microsoft|playwright_apple|playwright_jpmorgan|playwright_goldman|playwright_openai|playwright_google|googv2|wmt|amzn|msft|gh|wd|az|azt|jb|js|jbsh)-/, "");
+    const stripped = raw.replace(/^(amazon_v2|microsoft_v2|google_v2|walmart_v2|playwright_apple|playwright_jpmorgan|playwright_goldman|playwright_openai|googv2|wmt|amzn|msft|gh|wd|az|azt|jb|js|jbsh)-/, "");
     return stripped || "Not available";
   })();
   const bucketBadge = bucket==="hot" ? {label:"\ud83d\udd25 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
@@ -1383,7 +1383,12 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
             if (typeof rank === "number" && rank > 0) {
               return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,.1)",color:"var(--accent)",border:"1px solid rgba(108,99,255,.3)",whiteSpace:"nowrap",fontWeight:600}}>#{rank}</span>;
             }
-            return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>\ud83d\udd50 {job.postedDate}</span>;
+            // Amazon adapter stores posted_at = max(posted_date, updated_time).
+            // Mark the pill so users understand the date is the most-recent of
+            // the two values Amazon ships, not just the original post date.
+            const isAmazon = job.source === "amazon_v2";
+            const label = isAmazon ? `\ud83d\udd50 ${job.postedDate} \u00b7 latest of posted/updated` : `\ud83d\udd50 ${job.postedDate}`;
+            return <span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,.1)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,.3)",whiteSpace:"nowrap"}}>{label}</span>;
           })()}
           {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
           {aiBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:aiBadge.bg,color:aiBadge.color,border:`1px solid ${aiBadge.border}`,whiteSpace:"nowrap",fontWeight:600}}>{aiBadge.label}</span>}

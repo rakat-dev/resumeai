@@ -199,7 +199,7 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
 
   // ── PLAYWRIGHT / CUSTOM CAREER PAGE APIs (Tier A) ─────────────────────────
   { company: "Microsoft",      ats: "custom", careersUrl: "https://jobs.careers.microsoft.com/global/en/search",   adapter: "microsoft_v2", enabled: true },
-  { company: "Google",         ats: "custom", careersUrl: "https://careers.google.com/api/v3/search",              adapter: "playwright_google",    enabled: true },
+  { company: "Google",         ats: "custom", careersUrl: "https://careers.google.com/api/v3/search",              adapter: "google_v2",            enabled: true },
   { company: "Apple",          ats: "custom", careersUrl: "https://jobs.apple.com/api/role/search",                adapter: "playwright_apple",     enabled: true },
   { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: false,
     note: "Disabled 2026-04-17 — Meta added per-request anti-replay tokens to its GraphQL endpoint, breaking server-side replay (returns HTTP 400 / noncoercible_variable_value). Replaced by the meta sitemap+JSON-LD adapter (above, adapter:'meta')." },
