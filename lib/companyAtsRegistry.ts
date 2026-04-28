@@ -78,11 +78,6 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     adapter: "oracle_hcm", enabled: true,
   },
   {
-    company: "Goldman Sachs", ats: "oracle_hcm",
-    careersUrl: "https://hdpc.fa.us2.oraclecloud.com", hostHint: "goldmansachs",
-    adapter: "oracle_hcm", enabled: true,
-  },
-  {
     company: "Bank of America", ats: "oracle_hcm",
     careersUrl: "https://bofa.fa.oraclecloud.com", hostHint: "bofa",
     adapter: "oracle_hcm", enabled: false,
@@ -158,7 +153,6 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Dropbox",      ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/dropbox",      adapter: "greenhouse", enabled: true },
 
   // ── ASHBY ─────────────────────────────────────────────────────────────────
-  { company: "OpenAI",  ats: "ashby", careersUrl: "https://jobs.ashbyhq.com/openai",  adapter: "ashby", enabled: true },
   { company: "Perplexity", ats: "ashby", careersUrl: "https://jobs.ashbyhq.com/perplexity-ai", adapter: "ashby", enabled: true },
 
   // ── LEVER ─────────────────────────────────────────────────────────────────

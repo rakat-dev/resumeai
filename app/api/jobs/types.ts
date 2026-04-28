@@ -23,8 +23,6 @@ export type RefreshSource =
   | "meta"                         // Meta sitemap-based scrape (replaces broken playwright_meta)
   | "microsoft_v2"
   | "playwright_apple"
-  | "playwright_goldman"
-  | "playwright_openai"
   | "playwright_meta"
   | "amazon_v2"
   | "walmart_v2"

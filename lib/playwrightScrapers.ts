@@ -960,97 +960,13 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
 
 // JPMorgan Chase scraper moved to lib/scrapers/jpmorgan.ts (jpmorgan_v2).
 
-// ── Goldman Sachs (Oracle HCM) ─────────────────────────────────────────────
-export async function fetchGoldmanSachsJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
-  const MAX_PAGES = 15;
-  const PAGE_SIZE = 25;
-
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
-      const offset = page * PAGE_SIZE;
-      // Goldman Sachs Oracle HCM REST endpoint
-      const res = await fetch(
-        `https://hdpc.fa.us2.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand=requisitionList.secondaryLocations,flexFieldsFacet.values&finder=findReqs;siteNumber=CX_1001,facetsList=LOCATIONS%3BWORK_LOCATIONS%3BWORKPLACE_TYPES%3BTITLES%3BCATEGORIES%3BORGANIZATIONS%3BPOSTING_DATES%3BFLEX_FIELDS,limit=${PAGE_SIZE},offset=${offset},sortBy=POSTING_DATES_DESC,keyword=software%20engineer`,
-        {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-      if (!res.ok) break;
-      const data = await res.json();
-      const items = (data.items ?? []) as Record<string, unknown>[];
-      const reqs  = items.flatMap(i =>
-        ((i.requisitionList ?? []) as Record<string, unknown>[])
-      );
-      if (reqs.length === 0) break;
-
-      for (const j of reqs) {
-        const jobId  = (j.Id as string) ?? (j.requisitionId as string) ?? String(Math.random());
-        const locObj = (j.primaryLocation as Record<string, unknown>) ?? {};
-        results.push({
-          id:          `gs-${jobId}`,
-          company:     "Goldman Sachs",
-          title:       (j.Title as string) ?? "",
-          location:    (locObj.Name as string) ?? "United States",
-          description: (j.ExternalDescriptionStr as string) ?? "",
-          applyUrl:    `https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/${jobId}`,
-          postedAt:    (j.PostedDate as string) ?? null,
-          type:        "Full-time",
-        });
-      }
-      if (reqs.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
-
-  console.log(`[playwright] Goldman Sachs: ${results.length} raw`);
-  return results;
-}
-
-// ── OpenAI (Ashby) ────────────────────────────────────────────────────────
-// Ashby public job board API: GET /api/jobPostings?organizationHostedJobsPageName={slug}
-export async function fetchOpenAIJobs(): Promise<ScrapedJob[]> {
-  if (process.env.OPENAI_SOURCE_ENABLED === "false") {
-    throw new Error("disabled: OPENAI_SOURCE_ENABLED=false");
-  }
-
-  const results: ScrapedJob[] = [];
-  const res = await fetch(
-    "https://api.ashbyhq.com/posting-api/job-board?organizationHostedJobsPageName=openai",
-    {
-      headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(15_000),
-    }
-  );
-  if (!res.ok) {
-    const errLabel = res.status === 401 ? "unauthorized" : `http_${res.status}`;
-    throw new Error(`${errLabel}: Ashby returned HTTP ${res.status}`);
-  }
-  const data = await res.json();
-  const jobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
-
-  for (const j of jobs) {
-    const jobId   = (j.id as string) ?? String(Math.random());
-    const locArr  = ((j.location as Record<string,unknown>)?.name as string) ?? (j.locationName as string) ?? "United States";
-    const applyUrl = (j.jobUrl as string) ?? `https://openai.com/careers`;
-    results.push({
-      id:          `openai-${jobId}`,
-      company:     "OpenAI",
-      title:       (j.title as string) ?? "",
-      location:    locArr,
-      description: (j.descriptionPlain as string) ?? (j.description as string) ?? "",
-      applyUrl,
-      postedAt:    (j.publishedDate as string) ?? (j.createdAt as string) ?? null,
-      type:        "Full-time",
-    });
-  }
-
-  if (results.length > 0) console.log(`[playwright_openai] fetched=${results.length}`);
-  return results;
-}
+// Goldman Sachs adapter removed: the public Oracle HCM tenant
+// (hdpc.fa.us2.oraclecloud.com) was emptied when Goldman migrated their
+// careers stack to higher.gs.com behind Okta. No public unauthenticated
+// endpoint remains.
+//
+// OpenAI adapter removed: the Ashby public board endpoint started returning
+// HTTP 401 and the source had been silently producing 0 active rows.
 
 // ── Netflix (Lever) ───────────────────────────────────────────────────────
 // Lever public API: GET https://api.lever.co/v0/postings/{company}?mode=json

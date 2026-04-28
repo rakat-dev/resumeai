@@ -9,7 +9,6 @@ import {
 } from "@/lib/jobUtils";
 import {
   fetchAppleJobs,
-  fetchGoldmanSachsJobs, fetchOpenAIJobs,
   fetchWalmartJobs,
   type ScrapedJob,
 } from "@/lib/playwrightScrapers";
@@ -282,8 +281,6 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   meta: 1000,               // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
   microsoft_v2: 150,
   playwright_apple: 100,
-  playwright_goldman: 100,
-  playwright_openai: 50,
   walmart_v2: 400,
   amazon_v2: 400,           // Amazon v2 pipeline — 14-day window, per-job JD detail, sponsorship filter
   google_v2: 200,           // Google Careers SSR hydration parser
@@ -302,8 +299,6 @@ const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
   //        source). Null postedAt bypasses the horizon check entirely so no
   //        override is needed.
   playwright:           180,  // kept for backward compat (returns 400 at route level)
-  playwright_goldman:   180,  // Oracle HCM feed; reqs stay open longer than 14 days
-  playwright_openai:    180,  // Ashby feed; reqs stay open longer than 14 days
   phenom:               180,  // CVS Health Phenom feed is accurate; no reason to drop older reqs
 };
 
@@ -1243,7 +1238,7 @@ export async function POST(req: NextRequest) {
   if (sourceFilter === "playwright") {
     return NextResponse.json({
       ok: false,
-      error: "source=playwright is deprecated; use company-specific sources (microsoft_v2, google_v2, jpmorgan_v2, playwright_apple, playwright_goldman, playwright_openai)",
+      error: "source=playwright is deprecated; use company-specific sources (microsoft_v2, google_v2, jpmorgan_v2, playwright_apple)",
     }, { status: 400 });
   }
 
@@ -1271,8 +1266,6 @@ export async function POST(req: NextRequest) {
   if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
   if (run("jpmorgan_v2"))          tasks.push(ingestSource("jpmorgan_v2",          fetchJpmorganSource,                                              "jpmorgan_v2"         ).then(r => { results.jpmorgan_v2          = r; }));
-  if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));
-  if (run("playwright_openai"))    tasks.push(ingestSource("playwright_openai",    makeTierAFetcher("playwright_openai",    fetchOpenAIJobs),       "playwright_openai"   ).then(r => { results.playwright_openai    = r; }));
   if (run("walmart_v2"))          tasks.push(ingestSource("walmart_v2",          makeTierAFetcher("walmart_v2",          fetchWalmartJobs),      "walmart_v2"         ).then(r => { results.walmart_v2          = r; }));
   if (run("amazon_v2"))            tasks.push(ingestSource("amazon_v2",            fetchAmazonSource,                                                "amazon_v2"           ).then(r => { results.amazon_v2            = r; }));
 
