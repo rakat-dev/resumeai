@@ -1,9 +1,12 @@
 // ── Validator Observability — Diagnostics Data Model ─────────────────────
-// In-memory store for the latest refresh diagnostics. Updated by the ingest
-// pipeline and by adapter functions that do pre-filtering. Consumed by
-// GET /api/jobs/diagnostics and the UI dashboard at /diagnostics.
+// In-memory store + Redis persistence for the latest refresh diagnostics.
+// Updated by the ingest pipeline; consumed by GET /api/jobs/diagnostics
+// and the UI dashboard at /diagnostics.
 //
-// Only the LATEST refresh is kept. No DB table — pure in-memory singleton.
+// In-memory singleton = fast within-run upserts.
+// Redis = survives serverless instance recycling; 24h TTL.
+// Only the LATEST refresh is kept.
+import { saveDiagnosticsToRedis, getStoredDiagnostics } from "@/lib/redis";
 
 export type DropReason =
   | "date"
@@ -96,12 +99,18 @@ export function upsertSourceDiagnostics(d: SourceDiagnostics): void {
   _latest.sources.push(d);
 }
 
-export function finishDiagnosticsRun(): void {
-  if (_latest) _latest.refresh_finished_at = new Date().toISOString();
+export async function finishDiagnosticsRun(): Promise<void> {
+  if (_latest) {
+    _latest.refresh_finished_at = new Date().toISOString();
+    await saveDiagnosticsToRedis(_latest);
+  }
 }
 
-export function getLatestDiagnostics(): LatestRefreshDiagnostics | null {
-  return _latest;
+export async function getLatestDiagnostics(): Promise<LatestRefreshDiagnostics | null> {
+  if (_latest) return _latest;
+  // In-memory is empty — this is a different serverless instance from the one
+  // that ran the refresh. Fall back to the Redis-persisted copy.
+  return getStoredDiagnostics<LatestRefreshDiagnostics>();
 }
 
 // ── Sample helpers ────────────────────────────────────────────────────────

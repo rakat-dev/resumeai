@@ -1366,7 +1366,7 @@ export async function POST(req: NextRequest) {
   if (run("amazon_v2"))            tasks.push(ingestSource("amazon_v2",            fetchAmazonSource,                                                "amazon_v2"           ).then(r => { results.amazon_v2            = r; }));
 
   await Promise.allSettled(tasks);
-  finishDiagnosticsRun();
+  await finishDiagnosticsRun();
   await deactivateStaleJobs();
 
   // AI enrichment is intentionally NOT run here. It lives at

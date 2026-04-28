@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 import { getLatestDiagnostics } from "@/lib/diagnostics";
 
 export async function GET() {
-  const diag = getLatestDiagnostics();
+  const diag = await getLatestDiagnostics();
   if (!diag) {
     return NextResponse.json({
       message: "No diagnostics available yet. Run refresh first.",

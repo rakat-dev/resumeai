@@ -88,6 +88,39 @@ export function isRedisConfigured(): boolean {
   return !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 }
 
+// ── Diagnostics persistence ───────────────────────────────────────────────
+// The latest refresh diagnostics blob. Kept for 24h so the /diagnostics UI
+// can show the last run even after the serverless instance that ran the
+// refresh has been recycled.
+
+const KEY_DIAGNOSTICS  = "rs:diagnostics:latest";
+const DIAGNOSTICS_TTL  = 60 * 60 * 24; // 24 hours
+
+/** Persist the completed diagnostics blob. No-op if Redis not configured. */
+export async function saveDiagnosticsToRedis(data: unknown): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.set(KEY_DIAGNOSTICS, JSON.stringify(data), { ex: DIAGNOSTICS_TTL });
+  } catch (e) {
+    console.error("[redis] saveDiagnostics failed:", e);
+  }
+}
+
+/** Load the latest diagnostics blob. Returns null if absent or Redis not configured. */
+export async function getStoredDiagnostics<T>(): Promise<T | null> {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const v = await r.get<string>(KEY_DIAGNOSTICS);
+    if (!v) return null;
+    return (typeof v === "string" ? JSON.parse(v) : v) as T;
+  } catch (e) {
+    console.error("[redis] getStoredDiagnostics failed:", e);
+    return null;
+  }
+}
+
 // ── Source cooldown (rate-limit backoff) ──────────────────────────────────
 // Use this to prevent re-hitting an upstream that just returned 429.
 // In-memory fallback so cooldown also works when Redis is not configured.
