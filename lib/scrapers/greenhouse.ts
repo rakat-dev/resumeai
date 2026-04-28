@@ -11,7 +11,7 @@
 // 427 → 48 funnel loss to happen at the pipeline stage instead of inside
 // the adapter where the per-tenant diagnostics could surface it.
 
-import { shouldIncludeTitle } from "../jobUtils";
+import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
 
 export interface ParsedGreenhouseJob {
   /** Stable adapter-prefixed ID. Format: `gh-{slug}-{jobId}`. */
@@ -51,31 +51,6 @@ const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
 const GREENHOUSE_MAX_AGE_DAYS    = 14;
 const GREENHOUSE_MIN_DESC_CHARS  = 200;
 const GREENHOUSE_REQUEST_TIMEOUT = 15_000;
-
-// ── Location filter ──────────────────────────────────────────────────────
-
-const US_STATE_NAMES_GH = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
-  "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
-  "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-  "new mexico", "new york", "north carolina", "north dakota", "ohio",
-  "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-  "washington", "west virginia", "wisconsin", "wyoming",
-  "district of columbia",
-];
-
-function isUsLocationGreenhouse(loc: string): boolean {
-  if (!loc) return false;
-  const ll = loc.toLowerCase();
-  if (ll.includes("united states")) return true;
-  if (ll.includes("remote")) return true;
-  if (/,\s*[A-Z]{2}\b/.test(loc)) return true;
-  for (const s of US_STATE_NAMES_GH) if (ll.includes(s)) return true;
-  return false;
-}
 
 // ── HTML → text helper ───────────────────────────────────────────────────
 
@@ -173,9 +148,11 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
           continue;
         }
 
-        // (b) Location
+        // (b) Location — use the same isUSLocation the pipeline uses (single
+        // source of truth, same shape as the title alignment with
+        // shouldIncludeTitle).
         const locName = j.location?.name ?? "";
-        if (!isUsLocationGreenhouse(locName)) {
+        if (!isUSLocation(locName)) {
           dropped_location++; tenantLoc++;
           continue;
         }
