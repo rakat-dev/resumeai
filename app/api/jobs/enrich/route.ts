@@ -15,8 +15,8 @@ export const maxDuration = 60;
 // excluded — Workday rows land with an empty description column, and
 // jsearch/lever have no active rows in the dataset.
 const ENRICH_ELIGIBLE_SOURCES = new Set([
-  "walmart_cxs",
-  "amazon_jobs",
+  "walmart_v2",
+  "amazon_v2",
   "google_v2",
   "greenhouse",
 ]);
@@ -159,7 +159,7 @@ export async function POST(req: NextRequest) {
 
     if (!sourceFilter) {
       return NextResponse.json(
-        { ok: false, error: "source query/body param required (e.g. walmart_cxs, amazon_jobs)" },
+        { ok: false, error: "source query/body param required (e.g. walmart_v2, amazon_v2)" },
         { status: 400 },
       );
     }

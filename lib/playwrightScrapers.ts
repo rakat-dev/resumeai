@@ -929,7 +929,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
       if (rawPage.length < PAGE_SIZE) { queryStopReason = "no_results"; stopReason = "no_results"; break; }
     }
 
-    console.log(`[amazon_jobs:query] q="${query}" pages=${queryPages} stop=${queryStopReason} candidates=${candidates.length}`);
+    console.log(`[amazon_v2_legacy:query] q="${query}" pages=${queryPages} stop=${queryStopReason} candidates=${candidates.length}`);
   }
 
   // Phase 2: fetch full JD, clean, sponsorship-filter; reject if no valid JD (>=500 chars)
@@ -949,7 +949,7 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
     out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
   }
 
-  console.log(`[amazon_jobs] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} phase2_cap=${phase2Candidates.length} kept=${amazonDiag.kept} early_stopped_queries=${amazonDiag.queries_early_stopped} stop=${stopReason}`);
+  console.log(`[amazon_v2_legacy] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} phase2_cap=${phase2Candidates.length} kept=${amazonDiag.kept} early_stopped_queries=${amazonDiag.queries_early_stopped} stop=${stopReason}`);
   console.log("[Amazon v2 diagnostics]", JSON.stringify({
     ...amazonDiag,
     rejectedSampleCount: amazonRejectedSamples.length,
@@ -1353,7 +1353,7 @@ async function fetchWalmartDetail(externalPath: string): Promise<string | null> 
     const ct = res.headers.get("content-type");
     if (!isJsonContentType(ct)) {
       const body = await res.text();
-      console.warn(`[walmart_cxs] detail non-json source=walmart_cxs company=Walmart status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`);
+      console.warn(`[walmart_v2] detail non-json source=walmart_v2 company=Walmart status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`);
       return null;
     }
     const data = await res.json() as Record<string, unknown>;
@@ -1430,25 +1430,25 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
       const ct = res.headers.get("content-type");
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        const msg = `walmart_cxs search HTTP ${res.status} page=${page} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
-        console.warn(`[walmart_cxs] ${msg}`);
+        const msg = `walmart_v2 search HTTP ${res.status} page=${page} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
+        console.warn(`[walmart_v2] ${msg}`);
         // Page 0 failure = upstream broken. Throw so ingestSource records the
         // error and SKIPS deactivation — otherwise existing Walmart jobs would
         // be wiped on every refresh whenever Workday CXS hiccups.
-        if (page === 0) throw new Error(`walmart_cxs upstream failure: ${msg}`);
+        if (page === 0) throw new Error(`walmart_v2 upstream failure: ${msg}`);
         break;
       }
       if (!isJsonContentType(ct)) {
         const body = await res.text();
-        const msg = `walmart_cxs search non-json page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
-        console.warn(`[walmart_cxs] ${msg}`);
-        if (page === 0) throw new Error(`walmart_cxs upstream returned non-JSON: ${msg}`);
+        const msg = `walmart_v2 search non-json page=${page} status=${res.status} contentType="${ct ?? ""}" bodyPreview="${body.slice(0, 200).replace(/\s+/g, " ")}"`;
+        console.warn(`[walmart_v2] ${msg}`);
+        if (page === 0) throw new Error(`walmart_v2 upstream returned non-JSON: ${msg}`);
         break;
       }
       data = (await res.json()) as Record<string, unknown>;
     } catch (e) {
       const msg = (e as Error).message;
-      console.warn(`[walmart_cxs] search error page=${page}: ${msg}`);
+      console.warn(`[walmart_v2] search error page=${page}: ${msg}`);
       // Same rule: a page-0 throw must propagate so ingestSource sees the
       // failure and does NOT deactivate existing Walmart rows.
       if (page === 0) throw e instanceof Error ? e : new Error(String(e));

@@ -8,8 +8,7 @@ import {
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
 import {
-  fetchAppleJobs,
-  fetchAmazonJobsV2, fetchJPMJobs,
+  fetchAppleJobs, fetchJPMJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs,
   fetchWalmartJobs,
   type ScrapedJob,
@@ -18,10 +17,12 @@ import { getWorkdayConfigs, getGreenhouseSlugs, isPhenomOnly, isMetaDirect } fro
 import { fetchAllPhenomTenants } from "@/lib/scrapers/phenom";
 import { fetchMetaSitemapJobs } from "@/lib/scrapers/meta";
 import { fetchGoogleV2Jobs } from "@/lib/scrapers/google";
-// API-based Microsoft adapter — replaces the legacy `fetchMicrosoftJobs` from
-// playwrightScrapers.ts. Source name remains "microsoft_v2" to keep
-// existing DB rows valid (no migration needed).
+// API-based Microsoft adapter — replaces the legacy fetchMicrosoftJobs from
+// playwrightScrapers.ts. Source name remains "microsoft_v2".
 import { fetchMicrosoftJobs } from "@/lib/scrapers/microsoft";
+// API-based Amazon adapter — replaces the legacy fetchAmazonJobsV2 in
+// playwrightScrapers.ts. Source name is "amazon_v2".
+import { fetchAmazonJobs } from "@/lib/scrapers/amazon";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -139,7 +140,7 @@ function parsePostedAt(raw: string | null): string | null {
 }
 
 // 14-day primary working set: jobs older than 14 days fall outside the
-// freshness window for v2 sources (google_v2, walmart_cxs, amazon_jobs) and
+// freshness window for v2 sources (google_v2, walmart_v2, amazon_v2) and
 // every other source that doesn't supply a SOURCE_HORIZON_OVERRIDES entry.
 // Tier-A no-date scrapers (playwright_*) keep their 180-day override below.
 const MAX_INGEST_DAYS  = 14;
@@ -282,8 +283,8 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   playwright_jpmorgan: 100,
   playwright_goldman: 100,
   playwright_openai: 50,
-  walmart_cxs: 400,
-  amazon_jobs: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
+  walmart_v2: 400,
+  amazon_v2: 400,         // Amazon v2 pipeline with 10-day date filter + JD fetch + sponsorship filter
   google_v2:    200,        // Google Careers hydration parser — replaces playwright_google
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
@@ -375,6 +376,11 @@ async function ingestSource(
       const msFull  = normalized.filter(j => !!j.full_description).length;
       const msDated = normalized.filter(j => !!j.posted_at).length;
       console.log(`[microsoft_v2] full_description=${msFull}/${normalized.length} posted_at=${msDated}/${normalized.length}`);
+    }
+    if (source === "amazon_v2") {
+      const amFull  = normalized.filter(j => !!j.full_description).length;
+      const amDated = normalized.filter(j => !!j.posted_at).length;
+      console.log(`[amazon_v2] full_description=${amFull}/${normalized.length} posted_at=${amDated}/${normalized.length}`);
     }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
@@ -1133,6 +1139,32 @@ async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number;
   }
 }
 
+// 1g-4. Amazon Careers (lib/scrapers/amazon.ts).
+// Public search.json API + per-job HTML detail fetch (≤7d only). Returns
+// ParsedAmazonJob with snake_case fields and full_description, mirroring
+// google_v2 / microsoft_v2. Strict 45s elapsed budget — adapter returns
+// partial results rather than letting Vercel timeout.
+async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const parsed = await fetchAmazonJobs();
+    const raw: RawJob[] = parsed.map(p => ({
+      id:          p.id,
+      source:      "amazon_v2",
+      company:     p.company,
+      title:       p.title,
+      location:    p.location,
+      description: p.full_description,   // pass FULL text — normalizeJobs derives both preview+full
+      applyUrl:    p.apply_url,
+      postedAt:    p.posted_at,
+      type:        "Full-time",
+    }));
+    return { raw, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
 // 1h. Meta sitemap+JSON-LD (lib/scrapers/meta.ts).
 // Replaces playwright_meta which broke when Meta added per-request anti-replay
 // tokens to its GraphQL endpoint. Sitemap exposes ~918 job URLs each with full
@@ -1218,8 +1250,8 @@ export async function POST(req: NextRequest) {
   if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
   if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));
   if (run("playwright_openai"))    tasks.push(ingestSource("playwright_openai",    makeTierAFetcher("playwright_openai",    fetchOpenAIJobs),       "playwright_openai"   ).then(r => { results.playwright_openai    = r; }));
-  if (run("walmart_cxs"))          tasks.push(ingestSource("walmart_cxs",          makeTierAFetcher("walmart_cxs",          fetchWalmartJobs),      "walmart_cxs"         ).then(r => { results.walmart_cxs          = r; }));
-  if (run("amazon_jobs"))          tasks.push(ingestSource("amazon_jobs",          makeTierAFetcher("amazon_jobs",          fetchAmazonJobsV2),     "amazon_jobs"         ).then(r => { results.amazon_jobs          = r; }));
+  if (run("walmart_v2"))          tasks.push(ingestSource("walmart_v2",          makeTierAFetcher("walmart_v2",          fetchWalmartJobs),      "walmart_v2"         ).then(r => { results.walmart_v2          = r; }));
+  if (run("amazon_v2"))            tasks.push(ingestSource("amazon_v2",            fetchAmazonSource,                                                "amazon_v2"           ).then(r => { results.amazon_v2            = r; }));
 
   await Promise.allSettled(tasks);
   await deactivateStaleJobs();

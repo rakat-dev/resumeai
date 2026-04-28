@@ -47,7 +47,7 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "Switched to direct Phenom scrape 2026-04-17 (jobs.cvshealth.com). Phenom returns 215 IT jobs (ground truth) vs Workday SWE-keyword search returning 53 with worse coverage. Apply URLs from Phenom point to the same cvshealth.wd1.myworkdayjobs.com tenant, so candidates land in the identical Workday application flow." },
   { company: "UnitedHealth",    ats: "workday", careersUrl: "https://uhg.wd5.myworkdayjobs.com/External",                       adapter: "workday", enabled: true  },
   { company: "Elevance Health", ats: "workday", careersUrl: "https://elevancehealth.wd1.myworkdayjobs.com/ANT",                 adapter: "workday", enabled: true  },
-  { company: "Walmart",         ats: "custom", careersUrl: "https://walmart.wd5.myworkdayjobs.com/WalmartExternal",            adapter: "walmart_cxs", enabled: true,
+  { company: "Walmart",         ats: "custom", careersUrl: "https://walmart.wd5.myworkdayjobs.com/WalmartExternal",            adapter: "walmart_v2", enabled: true,
     note: "Direct Workday CXS backend (2026-04-18). POST to /wday/cxs/walmart/WalmartExternal/jobs with Job_Profiles facet. 4 profiles: Senior SWE InfoSec, Senior SWE, SWE III, SWE II. 265 jobs total. ats=custom so getWorkdayConfigs() skips it. Apply URL: /details/{slug} from externalPath last segment." },
   { company: "Target",          ats: "workday", careersUrl: "https://target.wd5.myworkdayjobs.com/targetcareers",               adapter: "workday", enabled: true  },
   { company: "Home Depot",      ats: "workday", careersUrl: "https://homedepot.wd5.myworkdayjobs.com/External",                 adapter: "workday", enabled: false,
@@ -203,7 +203,7 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Apple",          ats: "custom", careersUrl: "https://jobs.apple.com/api/role/search",                adapter: "playwright_apple",     enabled: true },
   { company: "Meta",           ats: "custom", careersUrl: "https://www.metacareers.com/graphql",                   adapter: "playwright_meta",      enabled: false,
     note: "Disabled 2026-04-17 — Meta added per-request anti-replay tokens to its GraphQL endpoint, breaking server-side replay (returns HTTP 400 / noncoercible_variable_value). Replaced by the meta sitemap+JSON-LD adapter (above, adapter:'meta')." },
-  { company: "Amazon",         ats: "custom", careersUrl: "https://www.amazon.jobs/en/search.json",               adapter: "amazon_jobs",    enabled: true },
+  { company: "Amazon",         ats: "custom", careersUrl: "https://www.amazon.jobs/en/search.json",               adapter: "amazon_v2",    enabled: true },
 ];
 
 // ── Lookup helpers ─────────────────────────────────────────────────────────

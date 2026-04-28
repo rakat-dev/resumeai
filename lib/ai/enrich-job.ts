@@ -51,7 +51,7 @@ export interface JobInputForEnrichment {
   description: string;
   employmentType?: string;
   team?: string;
-  // Source tag (e.g. "amazon_jobs", "walmart_cxs") — surfaced in skip
+  // Source tag (e.g. "amazon_v2", "walmart_v2") — surfaced in skip
   // diagnostics so the operator can attribute insufficient_jd_content cases
   // to a specific scraper.
   source?: string;

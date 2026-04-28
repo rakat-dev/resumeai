@@ -28,8 +28,8 @@ export type RefreshSource =
   | "playwright_goldman"
   | "playwright_openai"
   | "playwright_meta"
-  | "amazon_jobs"
-  | "walmart_cxs"
+  | "amazon_v2"
+  | "walmart_v2"
   | "google_v2"                    // Google Careers SSR + AF_initDataCallback hydration parser (lib/scrapers/google.ts)
   // @deprecated — use company-specific playwright sources; source=playwright returns 400
   | "playwright";

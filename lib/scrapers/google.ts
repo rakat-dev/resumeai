@@ -379,10 +379,12 @@ function tupleToParsedJob(t: GoogleJobTuple): ParsedGoogleJob | null {
     location:         primary,
     description:      full_description.slice(0, GOOGLE_V2_DESCRIPTION_PREVIEW_CHARS),
     full_description,
-    // Prefer the embedded signin/apply URL — that's what Google's "Apply"
-    // button uses and it carries the encoded jobId. Falls back to the
-    // public detail URL if signin link is missing.
-    apply_url:        applySigninUrl || detailUrl,
+    // Always prefer the public listing URL. The embedded signin/apply URL
+    // sends the user to a Google login wall before they ever see the job
+    // posting; the detail URL is the canonical job page. Keep the signin
+    // URL only as a last-resort fallback (shouldn't happen in practice
+    // because detailUrl is built locally from id+slug).
+    apply_url:        detailUrl || applySigninUrl,
     posted_at:        createdAt ? createdAt.toISOString() : null,
     position_rank:    undefined,
     source_id:        numericId,

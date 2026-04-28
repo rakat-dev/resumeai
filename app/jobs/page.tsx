@@ -716,7 +716,7 @@ export default function JobsPage(){
   };
 
   // ── Trigger background refresh ────────────────────────────────────────
-  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","microsoft_v2","playwright_apple","playwright_jpmorgan","playwright_goldman","playwright_openai","walmart_cxs","amazon_jobs","google_v2"] as const;
+  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","microsoft_v2","playwright_apple","playwright_jpmorgan","playwright_goldman","playwright_openai","walmart_v2","amazon_v2","google_v2"] as const;
 
   const handleRefresh=async(source="all")=>{
     setRefreshing(true);setRefreshMsg("");
@@ -1285,6 +1285,15 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const bucket=(job as Job&{bucket?:string}).bucket;
   const [saved,setSaved]=useState(()=>isJobSaved(job.id));
   const [jdOpen,setJdOpen]=useState(false);
+  // Job ID display — strip the source-name prefix and the small set of legacy
+  // adapter prefixes (wmt-, amzn-, googv2-, msft-, gh-, wd-, az-, etc.) so the
+  // user sees just the requisition ID. "amazon_v2-12345" → "12345".
+  const displayJobId = (() => {
+    const raw = job.id;
+    if (!raw) return "Not available";
+    const stripped = raw.replace(/^(amazon_v2|microsoft_v2|google_v2|walmart_v2|playwright_microsoft|playwright_apple|playwright_jpmorgan|playwright_goldman|playwright_openai|playwright_google|googv2|wmt|amzn|msft|gh|wd|az|azt|jb|js|jbsh)-/, "");
+    return stripped || "Not available";
+  })();
   const bucketBadge = bucket==="hot" ? {label:"\ud83d\udd25 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
     : bucket==="strong" ? {label:"\u2b50 Strong",color:"#ff9500",bg:"rgba(255,149,0,0.1)"}
     : null;
@@ -1387,6 +1396,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
         {job.salary&&<span style={S.tag}>\ud83d\udcb0 {job.salary}</span>}
         {exp&&<span style={S.tag}>\u23f1 {exp}</span>}
         {sponsorship==="mentioned"&&<span style={{...S.tag,color:"#00c864",borderColor:"rgba(0,200,100,0.3)",background:"rgba(0,200,100,0.08)"}}>&#x2705; Visa mentioned</span>}
+        <span style={{...S.tag,color:"var(--muted)",fontFamily:"'DM Sans',sans-serif"}}>Job ID: {displayJobId}</span>
       </div>
       {job.description&&<div style={{marginTop:8}}>
         <div style={{fontSize:11,color:"var(--muted)",fontStyle:"italic",marginBottom:3,fontFamily:"'DM Sans',sans-serif"}}>Summary</div>

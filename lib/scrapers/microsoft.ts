@@ -67,18 +67,25 @@ const MS_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36";
 const MS_LISTING_URL    = "https://apply.careers.microsoft.com/api/pcsx/search";
 const MS_DETAIL_API_URL = "https://apply.careers.microsoft.com/api/apply/v2/jobs";
+// Apply URL base — used as fallback only. The canonical
+// jobs.careers.microsoft.com/global/en/job/{id} URL 301s to apply.careers.microsoft.com/
+// (the SPA root, not the job page) regardless of which numeric ID we plug in.
+// The actual public job page is on apply.careers.microsoft.com under the
+// `positionUrl` path returned by the search API. Always prefer that when present.
+const MS_APPLY_HOST     = "https://apply.careers.microsoft.com";
 const MS_APPLY_URL_BASE = "https://jobs.careers.microsoft.com/global/en/job";
 const MS_REJECT_SAMPLE_LIMIT      = 5;          // up to 5 examples per reject reason
 
 // ── Listing response types ───────────────────────────────────────────────
 
 interface MsListingPosition {
-  id?:                    number;          // numeric jobId
-  displayJobId?:          string;
+  id?:                    number;          // long numeric job ID (used in positionUrl)
+  displayJobId?:          string;          // short atsJobId surfaced in URL bar
   name?:                  string;          // title
   locations?:             string[];        // verbose, e.g. "United States, Washington, Redmond"
   standardizedLocations?: string[];        // shortform, e.g. "Redmond, WA, US"
   postedTs?:              number;          // unix seconds
+  positionUrl?:           string;          // path on apply.careers.microsoft.com — e.g. "/careers/job/1970393556753151"
 }
 
 interface MsListingResponse {
@@ -383,6 +390,13 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
     const displayId  = s.pos.displayJobId ?? numericId;
     const fetched    = fullText.get(numericId);
     const fullJd     = fetched ?? "";
+    // Prefer the API's positionUrl (a path like "/careers/job/197039...") on
+    // apply.careers.microsoft.com — that's the public job page that actually
+    // resolves. The /global/en/job/<id> form on jobs.careers.microsoft.com
+    // 301s to the SPA root, which is the bug the user reported.
+    const applyUrl = s.pos.positionUrl
+      ? `${MS_APPLY_HOST}${s.pos.positionUrl}`
+      : `${MS_APPLY_URL_BASE}/${displayId}`;
     return {
       id:               `microsoft_v2-${numericId}`,
       source:           "microsoft_v2",
@@ -391,7 +405,7 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
       location:         s.location,
       description:      fullJd.slice(0, MS_DESCRIPTION_PREVIEW_CHARS),
       full_description: fullJd,
-      apply_url:        `${MS_APPLY_URL_BASE}/${displayId}`,
+      apply_url:        applyUrl,
       posted_at:        typeof s.pos.postedTs === "number"
                           ? new Date(s.pos.postedTs * 1000).toISOString()
                           : null,
