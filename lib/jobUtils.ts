@@ -503,14 +503,14 @@ export const EXCLUDE_SUBSTRINGS = [
   // AI / ML specializations (not target roles for Rahul)
   "ai engineer", "artificial intelligence engineer",
   "ai developer", "artificial intelligence developer",
-  "generative ai", "genai", "llm", "large language model",
+  "generative ai", "genai", "large language model",
   "prompt engineer", "ai scientist", "applied scientist",
   "deep learning", "foundation model", "language model",
   "computer vision", "nlp engineer", "nlp scientist",
 ];
 
 // Whole-word excludes (regex \b...\b)
-export const EXCLUDE_WHOLE_WORDS = ["ml", "vp"];
+export const EXCLUDE_WHOLE_WORDS = ["ml", "vp", "llm"];
 
 export function shouldIncludeTitle(title: string): boolean {
   const tl = title.toLowerCase();
