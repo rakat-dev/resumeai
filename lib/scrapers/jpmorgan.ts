@@ -6,7 +6,11 @@
 //
 // US filter is mandatory inside the adapter — the listing's
 // locationId=300000000149325 (US) is leaky; Singapore / India / UK rows
-// surface even with the filter applied.
+// surface even with the filter applied. The country fast-path uses Oracle
+// HCM's PrimaryLocationCountry (ISO-2) before delegating to jobUtils for
+// the location-string canonical parse.
+
+import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
 
 export type JpmPriority = "high" | "medium" | "low" | "date_missing";
 
@@ -60,53 +64,20 @@ const JPM_QUERIES = [
   "cloud engineer",
 ];
 
-// ── Title filter — same shape as amazon_v2 / microsoft_v2 ────────────────
-
-const REJECT_TITLE_KEYWORDS = [
-  "manager", "director", "principal", "staff engineer", "distinguished",
-  "fellow", "intern", "apprentice", "data analyst", "data scientist",
-  "product manager", "ux", "designer", "sales", "marketing", "finance",
-  "recruiter", "support", "consultant", "attorney", "legal",
-  "program manager", "project manager",
-];
-const KEEP_TITLE_KEYWORDS = [
-  "engineer", "developer", "swe", "devops", "sre", "reliability",
-];
-
-function passesTitleFilter(title: string): boolean {
-  if (!title) return false;
-  const tl = title.toLowerCase();
-  for (const r of REJECT_TITLE_KEYWORDS) if (tl.includes(r)) return false;
-  for (const k of KEEP_TITLE_KEYWORDS) if (tl.includes(k)) return true;
-  return false;
-}
+// Title filter delegated to jobUtils.shouldIncludeTitle (single source of
+// truth — same canonical filter the pipeline runs).
 
 // ── Location filter ──────────────────────────────────────────────────────
 
-const US_STATE_NAMES = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
-  "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
-  "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-  "new mexico", "new york", "north carolina", "north dakota", "ohio",
-  "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-  "washington", "west virginia", "wisconsin", "wyoming",
-  "district of columbia",
-];
-
-function isUSLocation(loc: string, country: string | undefined): boolean {
-  // Trust PrimaryLocationCountry when present — Oracle HCM ships ISO-2.
+// Country fast-path: Oracle HCM's PrimaryLocationCountry is ISO-2 reliable.
+// `country === "US"` short-circuits acceptance; any non-US country
+// short-circuits rejection. Only when country is missing do we fall through
+// to the canonical jobUtils.isUSLocation parse on the location string.
+function isUSLocationJpm(loc: string, country: string | undefined): boolean {
   if (country === "US") return true;
   if (country && country !== "US") return false;
   if (!loc) return false;
-  const ll = loc.toLowerCase();
-  if (ll.includes("united states")) return true;
-  if (ll.includes("remote"))        return true;
-  if (/,\s*[A-Z]{2}\b/.test(loc))   return true;
-  for (const s of US_STATE_NAMES) if (ll.includes(s)) return true;
-  return false;
+  return isUSLocation(loc);
 }
 
 // ── Listing types ────────────────────────────────────────────────────────
@@ -337,13 +308,13 @@ export async function fetchJpmorganJobs(): Promise<ParsedJpmorganJob[]> {
           pageOutOfWindow++;
           continue;
         }
-        if (!passesTitleFilter(title)) {
+        if (!shouldIncludeTitle(title)) {
           discarded_title++;
           pushSample("discarded_title", title, "title rejected");
           continue;
         }
         const loc = r.PrimaryLocation ?? "United States";
-        if (!isUSLocation(loc, r.PrimaryLocationCountry)) {
+        if (!isUSLocationJpm(loc, r.PrimaryLocationCountry)) {
           discarded_location++;
           pushSample("discarded_location", title, `loc="${loc}" country=${r.PrimaryLocationCountry ?? ""}`);
           continue;
