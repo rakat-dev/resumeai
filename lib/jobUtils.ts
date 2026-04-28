@@ -679,3 +679,19 @@ export function computeJobScore(params: {
 
   return { score, bucket };
 }
+
+// ── isFullTime preprocessing ───────────────────────────────────────────────
+// Strips disclaimer sentences that match the "do not apply if intern/new grad"
+// pattern before the isFullTime regex runs, preventing false rejections of
+// full-time SWE roles whose JDs open with such language (e.g. Stripe).
+export function stripIsFullTimeDisclaimers(text: string): string {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .filter(sentence => {
+      const lc = sentence.toLowerCase();
+      const hasDontApply = lc.includes("do not apply") || lc.includes("please do not apply");
+      const hasInternRef = lc.includes("intern") || lc.includes("new grad") || lc.includes("internship");
+      return !(hasDontApply && hasInternRef);
+    })
+    .join(" ");
+}

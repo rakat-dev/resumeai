@@ -6,6 +6,7 @@ import {
   cleanDescription, classifySponsorship, isUSLocation,
   isRelevantTitleEarly, isWithinEarlyHorizon, EARLY_HORIZON_DAYS_PARTIAL,
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
+  stripIsFullTimeDisclaimers,
 } from "@/lib/jobUtils";
 import {
   fetchAppleJobs,
@@ -115,18 +116,6 @@ interface NormalizedJob {
 // gets wasted on titles the ingest pipeline drops downstream).
 // All keyword arrays (INCLUDE_KEYWORDS, INCLUDE_TECH_WORDS, EXCLUDE_SUBSTRINGS,
 // EXCLUDE_WHOLE_WORDS) are now defined and exported there too.
-
-function stripIsFullTimeDisclaimers(text: string): string {
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .filter(sentence => {
-      const lc = sentence.toLowerCase();
-      const hasDontApply = lc.includes("do not apply") || lc.includes("please do not apply");
-      const hasInternRef = lc.includes("intern") || lc.includes("new grad") || lc.includes("internship");
-      return !(hasDontApply && hasInternRef);
-    })
-    .join(" ");
-}
 
 function isFullTime(type: string, desc: string): boolean {
   return !/\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/
