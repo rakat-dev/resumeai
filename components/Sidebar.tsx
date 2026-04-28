@@ -4,11 +4,12 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 
 const NAV = [
-  { icon: "📊", label: "Dashboard",     href: "/dashboard" },
-  { icon: "✂️", label: "Tailor Resume", href: "/tailor"    },
-  { icon: "🔍", label: "Job Search",    href: "/jobs"      },
-  { icon: "💾", label: "Saved Jobs",    href: "/saved"     },
-  { icon: "📁", label: "History",        href: "/history"   },
+  { icon: "📊", label: "Dashboard",     href: "/dashboard"   },
+  { icon: "✂️", label: "Tailor Resume", href: "/tailor"      },
+  { icon: "🔍", label: "Job Search",    href: "/jobs"        },
+  { icon: "💾", label: "Saved Jobs",    href: "/saved"       },
+  { icon: "📁", label: "History",       href: "/history"     },
+  { icon: "🩺", label: "Diagnostics",   href: "/diagnostics" },
 ];
 
 const LS_KEY = "resumeai_sidebar_collapsed";
