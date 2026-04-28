@@ -19,6 +19,8 @@
 // name avoids a database migration for existing rows that already carry
 // source="microsoft_v2".
 
+import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+
 export type MicrosoftPriority = "high" | "medium" | "low" | "date_missing";
 
 export interface ParsedMicrosoftJob {
@@ -103,53 +105,8 @@ interface MsDetailResponse {
   t_update?:        number;          // unix seconds
 }
 
-// ── Title filter ─────────────────────────────────────────────────────────
-
-const MS_REJECT_KEYWORDS = [
-  "manager", "director", "principal", "staff engineer", "distinguished",
-  "fellow", "intern", "apprentice", "data analyst", "data scientist",
-  "product manager", "ux", "designer", "sales", "marketing", "finance",
-  "recruiter", "support", "consultant", "attorney", "legal",
-  "program manager", "project manager",
-];
-const MS_KEEP_KEYWORDS = [
-  "engineer", "developer", "swe", "devops", "sre", "reliability",
-];
-
-function passesTitleFilter(title: string): boolean {
-  if (!title) return false;
-  const tl = title.toLowerCase();
-  for (const r of MS_REJECT_KEYWORDS) if (tl.includes(r)) return false;
-  for (const k of MS_KEEP_KEYWORDS) if (tl.includes(k)) return true;
-  return false;
-}
-
-// ── Location filter ──────────────────────────────────────────────────────
-
-const US_STATE_NAMES = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
-  "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
-  "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-  "new mexico", "new york", "north carolina", "north dakota", "ohio",
-  "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-  "washington", "west virginia", "wisconsin", "wyoming",
-  "district of columbia",
-];
-
-function isUSLocationToken(loc: string): boolean {
-  if (!loc) return false;
-  const ll = loc.toLowerCase();
-  if (ll.includes("united states")) return true;
-  if (ll.includes("remote"))        return true;
-  if (ll.includes("multiple locations")) return true;     // accept (often US)
-  // Standardized "Redmond, WA, US" — explicit US suffix
-  if (/,\s*[A-Z]{2},\s*US\b/i.test(loc))                  return true;
-  for (const s of US_STATE_NAMES) if (ll.includes(s))     return true;
-  return false;
-}
+// Title + location filters delegated to lib/jobUtils.ts (single source of
+// truth — same shouldIncludeTitle / isUSLocation the pipeline runs).
 
 function pickUSLocation(p: MsListingPosition): string | null {
   // Prefer the cleaner standardized location ("City, ST, US"); fall back
@@ -158,7 +115,7 @@ function pickUSLocation(p: MsListingPosition): string | null {
     ...(p.standardizedLocations ?? []),
     ...(p.locations ?? []),
   ];
-  for (const l of candidates) if (isUSLocationToken(l)) return l;
+  for (const l of candidates) if (isUSLocation(l)) return l;
   return null;
 }
 
@@ -340,7 +297,7 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
       pushSample("rejected_old", title, `age=${ageDays.toFixed(1)}d`);
       continue;
     }
-    if (!passesTitleFilter(title)) {
+    if (!shouldIncludeTitle(title)) {
       rejected_title++;
       pushSample("rejected_title", title, "title rejected");
       continue;
