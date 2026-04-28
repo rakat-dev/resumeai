@@ -52,6 +52,31 @@ const GREENHOUSE_MAX_AGE_DAYS    = 14;
 const GREENHOUSE_MIN_DESC_CHARS  = 200;
 const GREENHOUSE_REQUEST_TIMEOUT = 15_000;
 
+// ── isFullTime rejection logging (P5 audit, no behavior change) ──────────
+// Mirrors isFullTime in app/api/jobs/refresh/route.ts so we can flag
+// adapter-survivors that the pipeline's P5 filter will catch downstream.
+// Logging only — these jobs still return from the adapter normally; the
+// pipeline drops them. The point is to surface which Greenhouse JD
+// preambles trip the contract/intern keyword check.
+const FULL_TIME_REJECT_RE = /\bcontract(or)?\b|\bpart.?time\b|\bintern(ship)?\b|\bfreelance\b|\btemporary\b|\btemp\b/;
+
+function wouldBeRejectedByPipelineIsFullTime(employmentType: string, descriptionPreview: string): boolean {
+  // Pipeline call shape: isFullTime(employment_type, description) where
+  // description is the 220-char preview slice produced by normalizeJobs.
+  // The pipeline regex slices its input to 300 chars internally; with our
+  // 220-char preview that's a no-op, so test against the full preview.
+  return FULL_TIME_REJECT_RE.test((employmentType + " " + descriptionPreview.slice(0, 300)).toLowerCase());
+}
+
+function findContractSnippet(description: string): string {
+  const text = description.slice(0, 300);
+  const match = text.toLowerCase().match(FULL_TIME_REJECT_RE);
+  if (!match || match.index === undefined) return "";
+  const start = Math.max(0, match.index - 60);
+  const end = Math.min(text.length, match.index + 120);
+  return text.slice(start, end).replace(/\s+/g, " ").replace(/"/g, "'").trim();
+}
+
 // ── HTML → text helper ───────────────────────────────────────────────────
 
 function stripHtml(html: string): string {
@@ -206,11 +231,30 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
     );
   }
 
+  // Logging-only audit pass for pipeline P5 (isFullTime). Surfaces adapter
+  // survivors whose 220-char description preview will be rejected by the
+  // pipeline's contract/intern keyword regex. Adapter does NOT drop these —
+  // they're returned normally; the pipeline catches them downstream.
+  let isFullTimeFlagged = 0;
+  for (const j of out) {
+    const preview = j.description.slice(0, 220);
+    if (wouldBeRejectedByPipelineIsFullTime("Full-time", preview)) {
+      isFullTimeFlagged++;
+      const snippet = findContractSnippet(j.description);
+      console.log(
+        `[greenhouse:isFullTime_rejected] ` +
+        `title="${j.title}" company="${j.company}" location="${j.location}" ` +
+        `snippet="${snippet}"`,
+      );
+    }
+  }
+
   console.log(`[greenhouse:summary] ${JSON.stringify({
     tenants_attempted, tenants_ok, tenants_failed,
     total_fetched, total_kept,
     dropped_old, dropped_no_date, dropped_location,
     dropped_title, dropped_no_desc, dropped_duplicate,
+    isFullTime_flagged_for_pipeline: isFullTimeFlagged,
   })}`);
 
   return out;
