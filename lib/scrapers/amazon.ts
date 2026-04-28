@@ -22,6 +22,12 @@
 //   Detail fetch only for HIGH+MEDIUM (≤7d).
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+import { type AdapterDropCounts } from "../diagnostics";
+
+export interface AmazonAdapterResult {
+  jobs:        ParsedAmazonJob[];
+  diagnostics: AdapterDropCounts;
+}
 
 export type AmazonPriority = "high" | "medium" | "low";
 
@@ -271,7 +277,7 @@ async function detailMapWithBudget<T, U>(
 
 // ── Top-level fetcher ────────────────────────────────────────────────────
 
-export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
+export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
   const startMs  = Date.now();
   const deadline = startMs + AMAZON_TIME_BUDGET_MS;
 
@@ -437,5 +443,25 @@ export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
     }
   }
 
-  return out;
+  const diagnostics: AdapterDropCounts = {
+    fetched_from_api:       candidates_count,
+    dropped_by_date:        rejected_old,
+    dropped_by_location:    rejected_location,
+    dropped_by_title:       rejected_title,
+    dropped_by_sponsorship: 0,
+    dropped_by_duplicate:   rejected_duplicate,
+    dropped_by_mapping:     0,
+    samples: [
+      ...rejectSamples.rejected_old.map(s => ({
+        title: s.title, source: "amazon_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+      ...rejectSamples.rejected_title.map(s => ({
+        title: s.title, source: "amazon_v2" as const, reason: "title" as const, stage: "adapter" as const,
+      })),
+      ...rejectSamples.rejected_location.map(s => ({
+        title: s.title, source: "amazon_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+    ],
+  };
+  return { jobs: out, diagnostics };
 }

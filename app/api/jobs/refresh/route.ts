@@ -9,6 +9,11 @@ import {
   stripIsFullTimeDisclaimers,
 } from "@/lib/jobUtils";
 import {
+  startDiagnosticsRun, upsertSourceDiagnostics, finishDiagnosticsRun,
+  buildWarnings, pushSample,
+  type SourceDiagnostics, type RejectedJobSample, type AdapterDropCounts,
+} from "@/lib/diagnostics";
+import {
   fetchAppleJobs,
   fetchWalmartJobs,
   type ScrapedJob,
@@ -28,7 +33,7 @@ import { fetchAmazonJobs } from "@/lib/scrapers/amazon";
 import { fetchJpmorganJobs } from "@/lib/scrapers/jpmorgan";
 // Greenhouse public boards-api adapter (10-tenant scope, per-tenant filters,
 // per-tenant + aggregate diagnostics). Source name stays "greenhouse".
-import { fetchGreenhouseJobs } from "@/lib/scrapers/greenhouse";
+import { fetchGreenhouseJobs, type GreenhouseAdapterResult } from "@/lib/scrapers/greenhouse";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -308,7 +313,7 @@ const SOURCE_HORIZON_OVERRIDES: Record<string, number> = {
 
 async function ingestSource(
   source: RefreshSource,
-  fetchFn: () => Promise<{ raw: RawJob[]; fetched: number; error: string | null }>,
+  fetchFn: () => Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts; http_errors?: GreenhouseAdapterResult["http_errors"] }>,
   label: string
 ): Promise<{ raw: number; kept: number; stored: number; error: string | null; filterStats?: FilterStats }> {
   const startedAt = markRunning(label, source);
@@ -321,10 +326,25 @@ async function ingestSource(
     return Date.now() - new Date(iso).getTime() <= horizonMs;
   }
   try {
-    const { raw: rawJobs, fetched, error: fetchErr } = await fetchFn();
+    const { raw: rawJobs, fetched, error: fetchErr, adapterDiagnostics, http_errors: adapterHttpErrors } = await fetchFn();
     if (fetchErr) {
       markDone(label, source, startedAt, 0, 0, fetchErr);
       logSourceSummary(label, { durationMs: Date.now() - startedAt, fetched: 0, stored: 0, health: classifyHealth(0, 0, fetchErr), reason: fetchErr });
+      // Record minimal diagnostics even for fetch errors
+      const errDiag: SourceDiagnostics = {
+        source: label, fetched: 0, mapped: 0,
+        dropped_by_date: 0, dropped_by_location: 0, dropped_by_title: 0,
+        dropped_by_sponsorship: 0, dropped_by_fulltime: 0, dropped_by_clearance: 0,
+        dropped_by_duplicate: 0, dropped_by_mapping: 0, dropped_by_http_error: 1,
+        adapter_kept: 0,
+        pipeline_title_drop: 0, pipeline_location_drop: 0, pipeline_date_drop: 0,
+        pipeline_sponsorship_drop: 0, pipeline_fulltime_drop: 0,
+        pipeline_clearance_drop: 0, pipeline_duplicate_drop: 0,
+        final_stored: 0,
+        rejected_samples: [], warnings: [`Fetch error: ${fetchErr}`],
+        http_errors: [{ message: fetchErr }],
+      };
+      upsertSourceDiagnostics(errDiag);
       return { raw: 0, kept: 0, stored: 0, error: fetchErr };
     }
     const normalized = normalizeJobs(rawJobs);
@@ -345,13 +365,25 @@ async function ingestSource(
     // Apply per-source horizon inside the filter pass
     let title_removed = 0, type_removed = 0, location_removed = 0,
         clearance_removed = 0, horizon_removed = 0, company_blocked = 0;
+    // ── Diagnostics: pipeline rejected samples ────────────────────────────
+    const pipelineSamples: RejectedJobSample[] = [];
+    const pipelineSampleCounts: Record<string, number> = {};
+    const addPipelineSample = (j: NormalizedJob, reason: RejectedJobSample["reason"]) => {
+      pushSample(pipelineSamples, pipelineSampleCounts, {
+        title: j.title, company: j.company, location: j.location,
+        posted_at: j.posted_at ?? undefined,
+        source: label, reason, stage: "pipeline",
+        snippet: j.description?.slice(0, 120) || undefined,
+        url: j.apply_url,
+      });
+    };
     const filtered = dated.filter(j => {
-      if (isBlockedCompany(j.company))                        { company_blocked++; return false; }
-      if (!shouldIncludeTitle(j.title))                       { title_removed++;    return false; }
-      if (!isFullTime(j.employment_type, j.description))     { type_removed++;     return false; }
-      if (!isUSLocation(j.location))                         { location_removed++; return false; }
-      if (requiresSecurityClearance(j.title, j.description)) { clearance_removed++;return false; }
-      if (!isWithinHorizon(j.posted_at))                     { horizon_removed++;  return false; }
+      if (isBlockedCompany(j.company))                        { company_blocked++; addPipelineSample(j, "unknown");    return false; }
+      if (!shouldIncludeTitle(j.title))                       { title_removed++;    addPipelineSample(j, "title");     return false; }
+      if (!isFullTime(j.employment_type, j.description))     { type_removed++;     addPipelineSample(j, "fulltime");  return false; }
+      if (!isUSLocation(j.location))                         { location_removed++; addPipelineSample(j, "location");  return false; }
+      if (requiresSecurityClearance(j.title, j.description)) { clearance_removed++;addPipelineSample(j, "clearance"); return false; }
+      if (!isWithinHorizon(j.posted_at))                     { horizon_removed++;  addPipelineSample(j, "date");      return false; }
       return true;
     });
     const stats: FilterStats = { input: normalized.length, title_removed, type_removed,
@@ -419,6 +451,56 @@ async function ingestSource(
     const durationMs = Date.now() - startedAt;
     console.log(`[refresh:${label}] horizonDays=${horizonDays} raw=${fetched} norm=${normalized.length} title_drop=${stats.title_removed} loc_drop=${stats.location_removed} type_drop=${stats.type_removed} clearance_drop=${stats.clearance_removed} horizon_drop=${stats.horizon_removed} filtered=${filtered.length} deduped=${deduped.length} capped=${capped.length} stored=${stored}`);
     logSourceSummary(label, { durationMs, fetched, stored, health: classifyHealth(stored, fetched, storeErr), reason: storeErr ?? undefined });
+
+    // ── Diagnostics store write ────────────────────────────────────────────
+    const adp = adapterDiagnostics;
+    const sponsorshipDrop = rawJobs.length - normalized.length; // dropped in normalizeJobs
+    const dedupeDrop      = filtered.length - deduped.length;
+    const allSamples: RejectedJobSample[] = [
+      ...(adp?.samples ?? []),
+      // Sponsorship drop samples (adapter stage, from normalizeJobs)
+      ...rawJobs
+        .filter(r => { const s = classifySponsorship(cleanDescription(r.description)); return s === "not_supported"; })
+        .slice(0, 5)
+        .map(r => ({
+          title: r.title, company: r.company, location: r.location,
+          source: label, reason: "sponsorship" as const, stage: "adapter" as const,
+        })),
+      ...pipelineSamples,
+    ];
+    const sourceDiag: SourceDiagnostics = {
+      source: label,
+      fetched,
+      mapped:                 normalized.length,
+      dropped_by_date:        adp?.dropped_by_date     ?? 0,
+      dropped_by_location:    adp?.dropped_by_location ?? 0,
+      dropped_by_title:       adp?.dropped_by_title    ?? 0,
+      dropped_by_sponsorship: sponsorshipDrop,
+      dropped_by_fulltime:    0,  // isFullTime is pipeline-only; adapters don't pre-check
+      dropped_by_clearance:   0,
+      dropped_by_duplicate:   adp?.dropped_by_duplicate ?? 0,
+      dropped_by_mapping:     adp?.dropped_by_mapping   ?? 0,
+      dropped_by_http_error:  (adapterHttpErrors?.filter(e => e.status >= 400).length ?? 0),
+      adapter_kept:           normalized.length - sponsorshipDrop,
+      pipeline_title_drop:       title_removed,
+      pipeline_location_drop:    location_removed,
+      pipeline_date_drop:        horizon_removed + rejected_no_date,
+      pipeline_sponsorship_drop: 0,
+      pipeline_fulltime_drop:    type_removed,
+      pipeline_clearance_drop:   clearance_removed,
+      pipeline_duplicate_drop:   dedupeDrop,
+      final_stored:           stored,
+      rejected_samples:       allSamples,
+      http_errors:            adapterHttpErrors?.map(e => ({ ...e })),
+      warnings: buildWarnings({
+        fetched,
+        adapter_kept: normalized.length - sponsorshipDrop,
+        final_stored: stored,
+        http_errors: adapterHttpErrors,
+      }),
+    };
+    upsertSourceDiagnostics(sourceDiag);
+
     return { raw: fetched, kept: capped.length, stored, error: storeErr, filterStats: stats };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -477,10 +559,10 @@ async function deactivateMissingJobsForSource(source: string, liveIds: string[])
 // per-tenant filters, dedupe, diagnostics). This wrapper just maps
 // ParsedGreenhouseJob[] → RawJob[] in the same shape as
 // fetchAmazonSource / fetchMicrosoftSource / fetchJpmorganSource.
-async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts; http_errors?: GreenhouseAdapterResult["http_errors"] }> {
   try {
-    const parsed = await fetchGreenhouseJobs();
-    const raw: RawJob[] = parsed.map(p => ({
+    const result = await fetchGreenhouseJobs();
+    const raw: RawJob[] = result.jobs.map(p => ({
       id:          p.id,
       source:      "greenhouse",
       company:     p.company,
@@ -491,7 +573,7 @@ async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number
       postedAt:    p.posted_at,
       type:        "Full-time",
     }));
-    return { raw, fetched: raw.length, error: null };
+    return { raw, fetched: result.diagnostics.fetched_from_api, error: null, adapterDiagnostics: result.diagnostics, http_errors: result.http_errors };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { raw: [], fetched: 0, error: msg };
@@ -1132,10 +1214,10 @@ async function fetchGoogleV2Source(): Promise<{ raw: RawJob[]; fetched: number; 
 // ParsedMicrosoftJob with snake_case fields and a separate full_description,
 // mirroring google_v2. Source name remains "microsoft_v2" for DB
 // continuity even though the implementation is API-based.
-async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts }> {
   try {
-    const parsed = await fetchMicrosoftJobs();
-    const raw: RawJob[] = parsed.map(p => ({
+    const result = await fetchMicrosoftJobs();
+    const raw: RawJob[] = result.jobs.map(p => ({
       id:          p.id,
       source:      "microsoft_v2",
       company:     p.company,
@@ -1146,7 +1228,7 @@ async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number;
       postedAt:    p.posted_at,
       type:        "Full-time",
     }));
-    return { raw, fetched: raw.length, error: null };
+    return { raw, fetched: result.diagnostics.fetched_from_api, error: null, adapterDiagnostics: result.diagnostics };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { raw: [], fetched: 0, error: msg };
@@ -1158,10 +1240,10 @@ async function fetchMicrosoftSource(): Promise<{ raw: RawJob[]; fetched: number;
 // ParsedAmazonJob with snake_case fields and full_description, mirroring
 // google_v2 / microsoft_v2. Strict 45s elapsed budget — adapter returns
 // partial results rather than letting Vercel timeout.
-async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts }> {
   try {
-    const parsed = await fetchAmazonJobs();
-    const raw: RawJob[] = parsed.map(p => ({
+    const result = await fetchAmazonJobs();
+    const raw: RawJob[] = result.jobs.map(p => ({
       id:          p.id,
       source:      "amazon_v2",
       company:     p.company,
@@ -1172,7 +1254,7 @@ async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; er
       postedAt:    p.posted_at,
       type:        "Full-time",
     }));
-    return { raw, fetched: raw.length, error: null };
+    return { raw, fetched: result.diagnostics.fetched_from_api, error: null, adapterDiagnostics: result.diagnostics };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { raw: [], fetched: 0, error: msg };
@@ -1183,10 +1265,10 @@ async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; er
 // Oracle HCM listing + per-job ExternalDescriptionStr detail. Listing
 // payload only ships ShortDescriptionStr (~120 chars) so the detail fetch
 // is mandatory for full_description. Source name "jpmorgan_v2".
-async function fetchJpmorganSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+async function fetchJpmorganSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts }> {
   try {
-    const parsed = await fetchJpmorganJobs();
-    const raw: RawJob[] = parsed.map(p => ({
+    const result = await fetchJpmorganJobs();
+    const raw: RawJob[] = result.jobs.map(p => ({
       id:          p.id,
       source:      "jpmorgan_v2",
       company:     p.company,
@@ -1197,7 +1279,7 @@ async function fetchJpmorganSource(): Promise<{ raw: RawJob[]; fetched: number; 
       postedAt:    p.posted_at,
       type:        "Full-time",
     }));
-    return { raw, fetched: raw.length, error: null };
+    return { raw, fetched: result.diagnostics.fetched_from_api, error: null, adapterDiagnostics: result.diagnostics };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { raw: [], fetched: 0, error: msg };
@@ -1256,6 +1338,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(`[refresh] triggered source=${sourceFilter}`);
+  startDiagnosticsRun();
   const startMs = Date.now();
   const results: Record<string, unknown> = {};
 
@@ -1283,6 +1366,7 @@ export async function POST(req: NextRequest) {
   if (run("amazon_v2"))            tasks.push(ingestSource("amazon_v2",            fetchAmazonSource,                                                "amazon_v2"           ).then(r => { results.amazon_v2            = r; }));
 
   await Promise.allSettled(tasks);
+  finishDiagnosticsRun();
   await deactivateStaleJobs();
 
   // AI enrichment is intentionally NOT run here. It lives at

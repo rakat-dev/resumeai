@@ -12,6 +12,13 @@
 // the adapter where the per-tenant diagnostics could surface it.
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+import { type AdapterDropCounts, type RejectedJobSample, pushSample, SAMPLE_LIMIT } from "../diagnostics";
+
+export interface GreenhouseAdapterResult {
+  jobs:        ParsedGreenhouseJob[];
+  diagnostics: AdapterDropCounts;
+  http_errors: { tenant: string; status: number; message: string }[];
+}
 
 export interface ParsedGreenhouseJob {
   /** Stable adapter-prefixed ID. Format: `gh-{slug}-{jobId}`. */
@@ -107,7 +114,7 @@ interface GhBoardResponse {
   jobs?: GhRawJob[];
 }
 
-export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
+export async function fetchGreenhouseJobs(): Promise<GreenhouseAdapterResult> {
   const out: ParsedGreenhouseJob[] = [];
   const seenJobIds = new Set<string>();
   const now = Date.now();
@@ -124,6 +131,10 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
   let dropped_title     = 0;
   let dropped_no_desc   = 0;
   let dropped_duplicate = 0;
+
+  const adapterSamples: RejectedJobSample[] = [];
+  const sampleCounts: Record<string, number> = {};
+  const httpErrors: { tenant: string; status: number; message: string }[] = [];
 
   // Sequential — don't trigger Greenhouse rate-limiting.
   for (const tenant of GREENHOUSE_TENANTS) {
@@ -143,7 +154,9 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
       );
       if (!res.ok) {
         tenants_failed++;
-        console.log(`[greenhouse:${tenant}] ERROR: HTTP ${res.status}`);
+        const msg = `HTTP ${res.status}`;
+        console.log(`[greenhouse:${tenant}] ERROR: ${msg}`);
+        httpErrors.push({ tenant, status: res.status, message: msg });
         continue;
       }
       const data = (await res.json()) as GhBoardResponse;
@@ -159,33 +172,40 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
         const updatedAt      = j.updated_at      ?? null;
         const firstPublished = j.first_published ?? null;
         const effectiveRaw   = updatedAt ?? firstPublished;
+        const title = j.title ?? "";
+        const locName = j.location?.name ?? "";
+        const applyUrl = j.absolute_url ?? "#";
+
         if (!effectiveRaw) {
           dropped_no_date++; tenantDate++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "date", stage: "adapter", url: applyUrl });
           continue;
         }
         const effectiveTs = Date.parse(effectiveRaw);
         if (!Number.isFinite(effectiveTs)) {
           dropped_no_date++; tenantDate++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "date", stage: "adapter", url: applyUrl });
           continue;
         }
         if (now - effectiveTs > maxAgeMs) {
           dropped_old++; tenantDate++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, posted_at: effectiveRaw, source: "greenhouse", reason: "date", stage: "adapter", url: applyUrl });
           continue;
         }
 
         // (b) Location — use the same isUSLocation the pipeline uses (single
         // source of truth, same shape as the title alignment with
         // shouldIncludeTitle).
-        const locName = j.location?.name ?? "";
         if (!isUSLocation(locName)) {
           dropped_location++; tenantLoc++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "location", stage: "adapter", url: applyUrl });
           continue;
         }
 
         // (c) Title — same function the pipeline uses, single source of truth.
-        const title = j.title ?? "";
         if (!shouldIncludeTitle(title)) {
           dropped_title++; tenantTitle++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "title", stage: "adapter", url: applyUrl });
           continue;
         }
 
@@ -193,12 +213,14 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
         const cleaned = stripHtml(j.content ?? "");
         if (cleaned.length < GREENHOUSE_MIN_DESC_CHARS) {
           dropped_no_desc++; tenantNoDesc++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "mapping", stage: "adapter", snippet: `desc_len=${cleaned.length}`, url: applyUrl });
           continue;
         }
 
         // (e) Global dedupe by Greenhouse job ID
         if (jobIdStr && seenJobIds.has(jobIdStr)) {
           dropped_duplicate++;
+          pushSample(adapterSamples, sampleCounts, { title, company, location: locName, source: "greenhouse", reason: "duplicate", stage: "adapter", url: applyUrl });
           continue;
         }
         if (jobIdStr) seenJobIds.add(jobIdStr);
@@ -210,7 +232,7 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
           company,
           location:    locName,
           description: cleaned,
-          apply_url:   j.absolute_url ?? "#",
+          apply_url:   applyUrl,
           posted_at:   new Date(effectiveTs).toISOString(),
         });
         tenantKept++;
@@ -257,5 +279,20 @@ export async function fetchGreenhouseJobs(): Promise<ParsedGreenhouseJob[]> {
     isFullTime_flagged_for_pipeline: isFullTimeFlagged,
   })}`);
 
-  return out;
+  const diagnostics: AdapterDropCounts = {
+    fetched_from_api:       total_fetched,
+    dropped_by_date:        dropped_old + dropped_no_date,
+    dropped_by_location:    dropped_location,
+    dropped_by_title:       dropped_title,
+    dropped_by_sponsorship: 0,
+    dropped_by_duplicate:   dropped_duplicate,
+    dropped_by_mapping:     dropped_no_desc,
+    samples:                adapterSamples,
+  };
+  return { jobs: out, diagnostics, http_errors: httpErrors };
+}
+
+/** @deprecated Use fetchGreenhouseJobs().then(r => r.jobs) */
+export async function fetchGreenhouseJobsLegacy(): Promise<ParsedGreenhouseJob[]> {
+  return (await fetchGreenhouseJobs()).jobs;
 }

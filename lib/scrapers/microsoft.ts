@@ -20,6 +20,12 @@
 // source="microsoft_v2".
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+import { type AdapterDropCounts } from "../diagnostics";
+
+export interface MicrosoftAdapterResult {
+  jobs:        ParsedMicrosoftJob[];
+  diagnostics: AdapterDropCounts;
+}
 
 export type MicrosoftPriority = "high" | "medium" | "low" | "date_missing";
 
@@ -226,7 +232,7 @@ function priorityForAge(ageDays: number | null): MicrosoftPriority {
 
 // ── Top-level fetcher ────────────────────────────────────────────────────
 
-export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
+export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
   const startMs   = Date.now();
   const deadline  = startMs + MS_TOTAL_RUN_BUDGET_MS;
   const seenIds   = new Set<string>();
@@ -393,5 +399,25 @@ export async function fetchMicrosoftJobs(): Promise<ParsedMicrosoftJob[]> {
     }
   }
 
-  return enriched;
+  const diagnostics: AdapterDropCounts = {
+    fetched_from_api:       totalFetched,
+    dropped_by_date:        rejected_old,
+    dropped_by_location:    rejected_location,
+    dropped_by_title:       rejected_title,
+    dropped_by_sponsorship: 0,
+    dropped_by_duplicate:   0,
+    dropped_by_mapping:     0,
+    samples: [
+      ...rejectSamples.rejected_old.map(s => ({
+        title: s.title, source: "microsoft_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+      ...rejectSamples.rejected_title.map(s => ({
+        title: s.title, source: "microsoft_v2" as const, reason: "title" as const, stage: "adapter" as const,
+      })),
+      ...rejectSamples.rejected_location.map(s => ({
+        title: s.title, source: "microsoft_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+    ],
+  };
+  return { jobs: enriched, diagnostics };
 }

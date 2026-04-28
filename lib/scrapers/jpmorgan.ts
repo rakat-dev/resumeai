@@ -11,6 +11,12 @@
 // the location-string canonical parse.
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+import { type AdapterDropCounts } from "../diagnostics";
+
+export interface JpmorganAdapterResult {
+  jobs:        ParsedJpmorganJob[];
+  diagnostics: AdapterDropCounts;
+}
 
 export type JpmPriority = "high" | "medium" | "low" | "date_missing";
 
@@ -239,7 +245,7 @@ async function detailMapWithBudget<T, U>(
 
 // ── Top-level fetcher ────────────────────────────────────────────────────
 
-export async function fetchJpmorganJobs(): Promise<ParsedJpmorganJob[]> {
+export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
   const startMs   = Date.now();
   const deadline  = startMs + JPM_TIME_BUDGET_MS;
 
@@ -409,5 +415,28 @@ export async function fetchJpmorganJobs(): Promise<ParsedJpmorganJob[]> {
     }
   }
 
-  return out;
+  const diagnostics: AdapterDropCounts = {
+    fetched_from_api:       totalFetched,
+    dropped_by_date:        discarded_old_date + discarded_no_date,
+    dropped_by_location:    discarded_location,
+    dropped_by_title:       discarded_title,
+    dropped_by_sponsorship: 0,
+    dropped_by_duplicate:   discarded_duplicate,
+    dropped_by_mapping:     0,
+    samples: [
+      ...rejectSamples.discarded_old_date.map(s => ({
+        title: s.title, source: "jpmorgan_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+      ...rejectSamples.discarded_no_date.map(s => ({
+        title: s.title, source: "jpmorgan_v2" as const, reason: "date" as const, stage: "adapter" as const,
+      })),
+      ...rejectSamples.discarded_title.map(s => ({
+        title: s.title, source: "jpmorgan_v2" as const, reason: "title" as const, stage: "adapter" as const,
+      })),
+      ...rejectSamples.discarded_location.map(s => ({
+        title: s.title, source: "jpmorgan_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
+      })),
+    ],
+  };
+  return { jobs: out, diagnostics };
 }
