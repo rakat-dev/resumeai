@@ -18,6 +18,7 @@ const ENRICH_ELIGIBLE_SOURCES = new Set([
   "walmart_v2",
   "amazon_v2",
   "google_v2",
+  "jpmorgan_v2",
   "greenhouse",
 ]);
 

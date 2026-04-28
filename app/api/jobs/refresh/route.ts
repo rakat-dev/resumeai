@@ -8,7 +8,7 @@ import {
   normalizeCompany, shouldIncludeTitle, isBlockedCompany,
 } from "@/lib/jobUtils";
 import {
-  fetchAppleJobs, fetchJPMJobs,
+  fetchAppleJobs,
   fetchGoldmanSachsJobs, fetchOpenAIJobs,
   fetchWalmartJobs,
   type ScrapedJob,
@@ -23,6 +23,9 @@ import { fetchMicrosoftJobs } from "@/lib/scrapers/microsoft";
 // API-based Amazon adapter — replaces the legacy fetchAmazonJobsV2 in
 // playwrightScrapers.ts. Source name is "amazon_v2".
 import { fetchAmazonJobs } from "@/lib/scrapers/amazon";
+// API-based JPMorgan adapter — Oracle HCM listing + per-job detail.
+// Source name is "jpmorgan_v2".
+import { fetchJpmorganJobs } from "@/lib/scrapers/jpmorgan";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -279,12 +282,12 @@ const SOURCE_STORE_CAPS: Record<string, number> = {
   meta: 1000,               // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
   microsoft_v2: 150,
   playwright_apple: 100,
-  playwright_jpmorgan: 100,
   playwright_goldman: 100,
   playwright_openai: 50,
   walmart_v2: 400,
   amazon_v2: 400,           // Amazon v2 pipeline — 14-day window, per-job JD detail, sponsorship filter
   google_v2: 200,           // Google Careers SSR hydration parser
+  jpmorgan_v2: 200,         // JPMorgan Oracle HCM listing + per-job detail (full JD)
 };
 function applySourceCap(jobs: NormalizedJob[], source: string): NormalizedJob[] {
   return jobs.slice(0, SOURCE_STORE_CAPS[source] ?? 1000);
@@ -380,6 +383,11 @@ async function ingestSource(
       const amFull  = normalized.filter(j => !!j.full_description).length;
       const amDated = normalized.filter(j => !!j.posted_at).length;
       console.log(`[amazon_v2] full_description=${amFull}/${normalized.length} posted_at=${amDated}/${normalized.length}`);
+    }
+    if (source === "jpmorgan_v2") {
+      const jpFull  = normalized.filter(j => !!j.full_description).length;
+      const jpDated = normalized.filter(j => !!j.posted_at).length;
+      console.log(`[jpmorgan_v2] full_description=${jpFull}/${normalized.length} posted_at=${jpDated}/${normalized.length}`);
     }
     // Deactivate previously active rows for this source not in the current live set.
     // Runs after storeJobs so upserted survivors are already marked is_active=true.
@@ -1163,6 +1171,32 @@ async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; er
   }
 }
 
+// 1g-5. JPMorgan Chase v2 (lib/scrapers/jpmorgan.ts).
+// Oracle HCM listing + per-job ExternalDescriptionStr detail. Listing
+// payload only ships ShortDescriptionStr (~120 chars) so the detail fetch
+// is mandatory for full_description. Source name "jpmorgan_v2" — replaces
+// the legacy fetchJPMJobs in lib/playwrightScrapers.ts.
+async function fetchJpmorganSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+  try {
+    const parsed = await fetchJpmorganJobs();
+    const raw: RawJob[] = parsed.map(p => ({
+      id:          p.id,
+      source:      "jpmorgan_v2",
+      company:     p.company,
+      title:       p.title,
+      location:    p.location,
+      description: p.full_description,   // pass FULL text — normalizeJobs derives both preview+full
+      applyUrl:    p.apply_url,
+      postedAt:    p.posted_at,
+      type:        "Full-time",
+    }));
+    return { raw, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
 // 1h. Meta sitemap+JSON-LD (lib/scrapers/meta.ts).
 // Replaces playwright_meta which broke when Meta added per-request anti-replay
 // tokens to its GraphQL endpoint. Sitemap exposes ~918 job URLs each with full
@@ -1210,7 +1244,7 @@ export async function POST(req: NextRequest) {
   if (sourceFilter === "playwright") {
     return NextResponse.json({
       ok: false,
-      error: "source=playwright is deprecated; use company-specific sources (microsoft_v2, google_v2, playwright_apple, playwright_jpmorgan, playwright_goldman, playwright_openai)",
+      error: "source=playwright is deprecated; use company-specific sources (microsoft_v2, google_v2, jpmorgan_v2, playwright_apple, playwright_goldman, playwright_openai)",
     }, { status: 400 });
   }
 
@@ -1237,7 +1271,7 @@ export async function POST(req: NextRequest) {
   if (run("microsoft_v2")) tasks.push(ingestSource("microsoft_v2", fetchMicrosoftSource,                                             "microsoft_v2").then(r => { results.microsoft_v2 = r; }));
   if (run("google_v2"))            tasks.push(ingestSource("google_v2",            fetchGoogleV2Source,                                              "google_v2"           ).then(r => { results.google_v2            = r; }));
   if (run("playwright_apple"))     tasks.push(ingestSource("playwright_apple",     makeTierAFetcher("playwright_apple",     fetchAppleJobs),        "playwright_apple"    ).then(r => { results.playwright_apple     = r; }));
-  if (run("playwright_jpmorgan"))  tasks.push(ingestSource("playwright_jpmorgan",  makeTierAFetcher("playwright_jpmorgan",  fetchJPMJobs),          "playwright_jpmorgan" ).then(r => { results.playwright_jpmorgan  = r; }));
+  if (run("jpmorgan_v2"))          tasks.push(ingestSource("jpmorgan_v2",          fetchJpmorganSource,                                              "jpmorgan_v2"         ).then(r => { results.jpmorgan_v2          = r; }));
   if (run("playwright_goldman"))   tasks.push(ingestSource("playwright_goldman",   makeTierAFetcher("playwright_goldman",   fetchGoldmanSachsJobs), "playwright_goldman"  ).then(r => { results.playwright_goldman   = r; }));
   if (run("playwright_openai"))    tasks.push(ingestSource("playwright_openai",    makeTierAFetcher("playwright_openai",    fetchOpenAIJobs),       "playwright_openai"   ).then(r => { results.playwright_openai    = r; }));
   if (run("walmart_v2"))          tasks.push(ingestSource("walmart_v2",          makeTierAFetcher("walmart_v2",          fetchWalmartJobs),      "walmart_v2"         ).then(r => { results.walmart_v2          = r; }));

@@ -23,13 +23,13 @@ export type RefreshSource =
   | "meta"                         // Meta sitemap-based scrape (replaces broken playwright_meta)
   | "microsoft_v2"
   | "playwright_apple"
-  | "playwright_jpmorgan"
   | "playwright_goldman"
   | "playwright_openai"
   | "playwright_meta"
   | "amazon_v2"
   | "walmart_v2"
   | "google_v2"                    // Google Careers SSR + AF_initDataCallback hydration parser (lib/scrapers/google.ts)
+  | "jpmorgan_v2"                  // JPMorgan Oracle HCM listing + per-job detail (lib/scrapers/jpmorgan.ts)
   // @deprecated — use company-specific playwright sources; source=playwright returns 400
   | "playwright";
 

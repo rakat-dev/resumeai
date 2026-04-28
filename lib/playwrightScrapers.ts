@@ -958,55 +958,10 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
   return out;
 }
 
-// ── JPMorgan Chase ────────────────────────────────────────────────────────
-// Uses Oracle HCM REST API (JPMC careers)
-export async function fetchJPMJobs(): Promise<ScrapedJob[]> {
-  const results: ScrapedJob[] = [];
-  const MAX_PAGES = 15;
-  const PAGE_SIZE = 25;
-
-  for (let page = 0; page < MAX_PAGES; page++) {
-    try {
-      const offset = page * PAGE_SIZE;
-      const res = await fetch(
-        `https://jpmc.fa.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&expand=requisitionList.secondaryLocations,flexFieldsFacet.values&finder=findReqs;siteNumber=CX_1001,facetsList=LOCATIONS%3BWORK_LOCATIONS%3BWORKPLACE_TYPES%3BTITLES%3BCATEGORIES%3BORGANIZATIONS%3BPOSTING_DATES%3BFLEX_FIELDS,limit=${PAGE_SIZE},offset=${offset},sortBy=POSTING_DATES_DESC,keyword=software%20engineer,locationId=300000000149325`,
-        {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-          },
-          signal: AbortSignal.timeout(12_000),
-        }
-      );
-      if (!res.ok) break;
-      const data = await res.json();
-      const items = (data.items ?? []) as Record<string, unknown>[];
-      const reqs  = items.flatMap(i =>
-        ((i.requisitionList ?? []) as Record<string, unknown>[])
-      );
-      if (reqs.length === 0) break;
-
-      for (const j of reqs) {
-        const jobId = (j.Id as string) ?? (j.requisitionId as string) ?? String(Math.random());
-        const locObj = (j.primaryLocation as Record<string, unknown>) ?? {};
-        results.push({
-          id:          `jpm-${jobId}`,
-          company:     "JPMorgan Chase",
-          title:       (j.Title as string) ?? "",
-          location:    (locObj.Name as string) ?? "United States",
-          description: (j.ExternalDescriptionStr as string) ?? "",
-          applyUrl:    `https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/${jobId}`,
-          postedAt:    (j.PostedDate as string) ?? null,
-          type:        "Full-time",
-        });
-      }
-      if (reqs.length < PAGE_SIZE) break;
-    } catch { break; }
-  }
-
-  console.log(`[playwright] JPMorgan: ${results.length} raw`);
-  return results;
-}
+// JPMorgan Chase scraper moved to lib/scrapers/jpmorgan.ts (jpmorgan_v2).
+// The legacy fetchJPMJobs that used to live here only fetched the listing
+// payload and missed ExternalDescriptionStr; the v2 adapter does both
+// listing and per-job detail and ships full JD text.
 
 // ── Goldman Sachs (Oracle HCM) ─────────────────────────────────────────────
 export async function fetchGoldmanSachsJobs(): Promise<ScrapedJob[]> {

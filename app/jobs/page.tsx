@@ -716,7 +716,7 @@ export default function JobsPage(){
   };
 
   // ── Trigger background refresh ────────────────────────────────────────
-  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","microsoft_v2","playwright_apple","playwright_jpmorgan","playwright_goldman","playwright_openai","walmart_v2","amazon_v2","google_v2"] as const;
+  const REFRESH_SOURCES = ["greenhouse","jooble","phenom","meta","adzuna","jsearch","workday","microsoft_v2","playwright_apple","playwright_goldman","playwright_openai","walmart_v2","amazon_v2","google_v2","jpmorgan_v2"] as const;
 
   const handleRefresh=async(source="all")=>{
     setRefreshing(true);setRefreshMsg("");
@@ -1291,7 +1291,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
   const displayJobId = (() => {
     const raw = job.id;
     if (!raw) return "Not available";
-    const stripped = raw.replace(/^(amazon_v2|microsoft_v2|google_v2|walmart_v2|playwright_apple|playwright_jpmorgan|playwright_goldman|playwright_openai|googv2|wmt|amzn|msft|gh|wd|az|azt|jb|js|jbsh)-/, "");
+    const stripped = raw.replace(/^(amazon_v2|microsoft_v2|google_v2|walmart_v2|jpmorgan_v2|playwright_apple|playwright_goldman|playwright_openai|googv2|wmt|amzn|msft|gh|wd|jpm|az|azt|jb|js|jbsh)-/, "");
     return stripped || "Not available";
   })();
   const bucketBadge = bucket==="hot" ? {label:"\ud83d\udd25 Hot",color:"#ff6b6b",bg:"rgba(255,107,107,0.1)"}
