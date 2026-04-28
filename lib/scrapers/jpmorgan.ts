@@ -1,10 +1,8 @@
 // JPMorgan Chase v2 — Oracle HCM REST API adapter
-// (jpmc.fa.oraclecloud.com). Replaces the legacy fetchJPMJobs in
-// lib/playwrightScrapers.ts which fetched the listing only and never
-// hydrated the per-job description. Listing rows include just
-// ShortDescriptionStr (~120 chars); the real JD body lives in
-// ExternalDescriptionStr on the per-job DETAIL endpoint at
-// /recruitingCEJobRequisitionDetails?finder=ById;Id={id},siteNumber=CX_1001
+// (jpmc.fa.oraclecloud.com). Listing rows include just ShortDescriptionStr
+// (~120 chars); the real JD body lives in ExternalDescriptionStr on the
+// per-job DETAIL endpoint at:
+//   /recruitingCEJobRequisitionDetails?finder=ById;Id={id},siteNumber=CX_1001
 //
 // US filter is mandatory inside the adapter — the listing's
 // locationId=300000000149325 (US) is leaky; Singapore / India / UK rows

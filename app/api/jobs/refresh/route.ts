@@ -1174,8 +1174,7 @@ async function fetchAmazonSource(): Promise<{ raw: RawJob[]; fetched: number; er
 // 1g-5. JPMorgan Chase v2 (lib/scrapers/jpmorgan.ts).
 // Oracle HCM listing + per-job ExternalDescriptionStr detail. Listing
 // payload only ships ShortDescriptionStr (~120 chars) so the detail fetch
-// is mandatory for full_description. Source name "jpmorgan_v2" — replaces
-// the legacy fetchJPMJobs in lib/playwrightScrapers.ts.
+// is mandatory for full_description. Source name "jpmorgan_v2".
 async function fetchJpmorganSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
   try {
     const parsed = await fetchJpmorganJobs();

@@ -959,9 +959,6 @@ export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
 }
 
 // JPMorgan Chase scraper moved to lib/scrapers/jpmorgan.ts (jpmorgan_v2).
-// The legacy fetchJPMJobs that used to live here only fetched the listing
-// payload and missed ExternalDescriptionStr; the v2 adapter does both
-// listing and per-job detail and ships full JD text.
 
 // ── Goldman Sachs (Oracle HCM) ─────────────────────────────────────────────
 export async function fetchGoldmanSachsJobs(): Promise<ScrapedJob[]> {
