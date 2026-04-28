@@ -21,6 +21,8 @@
 //     8–14  → LOW
 //   Detail fetch only for HIGH+MEDIUM (≤7d).
 
+import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
+
 export type AmazonPriority = "high" | "medium" | "low";
 
 export interface ParsedAmazonJob {
@@ -63,50 +65,8 @@ const AMAZON_QUERIES = [
   "cloud engineer",
 ];
 
-// Title filter — keep engineer/developer/swe/devops/sre + reject managers,
-// directors, principals, interns etc. Same shape as Microsoft adapter.
-const REJECT_TITLE_KEYWORDS = [
-  "manager", "director", "principal", "staff engineer", "distinguished",
-  "fellow", "intern", "apprentice", "data analyst", "data scientist",
-  "product manager", "ux", "designer", "sales", "marketing", "finance",
-  "recruiter", "support", "consultant", "attorney", "legal",
-  "program manager", "project manager",
-];
-const KEEP_TITLE_KEYWORDS = [
-  "engineer", "developer", "swe", "devops", "sre", "reliability",
-];
-
-function passesTitleFilter(title: string): boolean {
-  if (!title) return false;
-  const tl = title.toLowerCase();
-  for (const r of REJECT_TITLE_KEYWORDS) if (tl.includes(r)) return false;
-  for (const k of KEEP_TITLE_KEYWORDS) if (tl.includes(k)) return true;
-  return false;
-}
-
-// Locations — Amazon's search is already scoped to the US via loc_query, so
-// this is mostly defensive against the occasional non-US row Amazon mixes in.
-const US_STATE_NAMES = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
-  "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
-  "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-  "new mexico", "new york", "north carolina", "north dakota", "ohio",
-  "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-  "washington", "west virginia", "wisconsin", "wyoming",
-  "district of columbia",
-];
-function isUSLocationToken(loc: string): boolean {
-  if (!loc) return false;
-  const ll = loc.toLowerCase();
-  if (ll.includes("united states")) return true;
-  if (ll.includes("remote")) return true;
-  if (/,\s*[A-Z]{2}(,|$)/.test(loc)) return true;
-  for (const s of US_STATE_NAMES) if (ll.includes(s)) return true;
-  return false;
-}
+// Title + location filters delegated to lib/jobUtils.ts (single source of
+// truth — same shouldIncludeTitle / isUSLocation the pipeline runs).
 
 // ── Listing types ────────────────────────────────────────────────────────
 
@@ -282,25 +242,8 @@ async function fetchAmazonDetail(jobId: string): Promise<string | null> {
   return combined.length >= 200 ? combined : null;
 }
 
-// ── Sponsorship classifier (kept verbatim from legacy adapter) ───────────
-
-function classifyAmazonSponsorship(cleanedJD: string): "not_supported" | "supported" | "unknown" {
-  const text = cleanedJD.toLowerCase();
-  const noSponsorPhrases = [
-    "will not sponsor", "unable to sponsor", "cannot sponsor", "does not sponsor",
-    "not able to sponsor", "sponsorship is not available", "sponsorship not available",
-    "no sponsorship", "not provide sponsorship", "not offer sponsorship",
-    "not support visa", "will not provide immigration", "not provide immigration",
-  ];
-  for (const phrase of noSponsorPhrases) if (text.includes(phrase)) return "not_supported";
-  const yesSponsorPhrases = [
-    "will sponsor", "able to sponsor", "visa sponsorship available",
-    "sponsorship available", "sponsorship provided", "we sponsor",
-    "offers sponsorship", "provide sponsorship", "immigration assistance",
-  ];
-  for (const phrase of yesSponsorPhrases) if (text.includes(phrase)) return "supported";
-  return "unknown";
-}
+// Sponsorship classification removed — pipeline runs jobUtils.classifySponsorship
+// in normalizeJobs on every row, making any local Amazon classifier redundant.
 
 // ── Concurrency helper with elapsed-time abort ───────────────────────────
 
@@ -398,13 +341,13 @@ export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
           pageOutOfWindow++;
           continue;
         }
-        if (!passesTitleFilter(title)) {
+        if (!shouldIncludeTitle(title)) {
           rejected_title++;
           pushSample("rejected_title", title, "title rejected");
           continue;
         }
         const loc = raw.normalized_location ?? raw.city ?? "United States";
-        if (!isUSLocationToken(loc)) {
+        if (!isUSLocation(loc)) {
           rejected_location++;
           pushSample("rejected_location", title, `loc="${loc}"`);
           continue;
@@ -436,7 +379,6 @@ export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
   let detail_attempted = 0;
   let detail_success   = 0;
   let detail_fail      = 0;
-  let rejected_sponsorship = 0;
   const fullText = new Map<string, string>();         // id → cleaned JD
 
   await detailMapWithBudget(detailEligible, DETAIL_CONCURRENCY, deadline, async (s) => {
@@ -446,10 +388,6 @@ export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
     if (!raw) { detail_fail++; return; }
     const cleaned = cleanAmazonJD(raw);
     if (cleaned.length < 200) { detail_fail++; return; }
-    if (classifyAmazonSponsorship(cleaned) === "not_supported") {
-      rejected_sponsorship++;
-      return;
-    }
     detail_success++;
     fullText.set(id, cleaned);
   });
@@ -486,7 +424,7 @@ export async function fetchAmazonJobs(): Promise<ParsedAmazonJob[]> {
     `rejected_old=${rejected_old} rejected_title=${rejected_title} ` +
     `rejected_location=${rejected_location} rejected_duplicate=${rejected_duplicate} ` +
     `detail_attempted=${detail_attempted} detail_success=${detail_success} ` +
-    `detail_fail=${detail_fail} rejected_sponsorship=${rejected_sponsorship} ` +
+    `detail_fail=${detail_fail} ` +
     `kept=${out.length} ` +
     `tier_high=${tierCounts.high ?? 0} tier_medium=${tierCounts.medium ?? 0} ` +
     `tier_low=${tierCounts.low ?? 0} ` +
