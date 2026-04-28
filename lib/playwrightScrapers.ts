@@ -641,322 +641,10 @@ export async function fetchMetaJobs(): Promise<ScrapedJob[]> {
   return results;
 }
 
-// ── Amazon v2 ─────────────────────────────────────────────────────────────
-// Standalone pipeline — does NOT use runFullWorkflow.
-// Queries: 12 broad candidate queries (see AMAZON_QUERIES below)
-// Native filters: loc_query=United States, sort=recent
-// Pagination: up to 15 pages × 10 results per page
-// Early filters + 25-day horizon applied in-loop (same logic as runFullWorkflow).
-// Extension mode: if 80-job cap hit with oldest < 14 days, extends to 120 / 20d.
-function buildAmazonCanonicalUrl(jobId: string): string {
-  return `https://www.amazon.jobs/en/jobs/${jobId}`;
-}
-
-function cleanAmazonJD(rawText: string): string {
-  const text = rawText
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
-    .replace(/&#?\w+;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return trimAtSimilarJobs(text);
-}
-
-function classifyAmazonSponsorship(cleanedJD: string): "not_supported" | "supported" | "unknown" {
-  const text = cleanedJD.toLowerCase();
-  const noSponsorPhrases = [
-    "will not sponsor", "unable to sponsor", "cannot sponsor", "does not sponsor",
-    "not able to sponsor", "sponsorship is not available", "sponsorship not available",
-    "no sponsorship", "not provide sponsorship", "not offer sponsorship",
-    "not support visa", "will not provide immigration", "not provide immigration",
-  ];
-  for (const phrase of noSponsorPhrases) {
-    if (text.includes(phrase)) return "not_supported";
-  }
-  const yesSponsorPhrases = [
-    "will sponsor", "able to sponsor", "visa sponsorship available",
-    "sponsorship available", "sponsorship provided", "we sponsor",
-    "offers sponsorship", "provide sponsorship", "immigration assistance",
-  ];
-  for (const phrase of yesSponsorPhrases) {
-    if (text.includes(phrase)) return "supported";
-  }
-  return "unknown";
-}
-
-export async function fetchAmazonJobsV2(): Promise<ScrapedJob[]> {
-  const MAX_PAGES = 15;
-  const PAGE_SIZE = 10;
-  const AMAZON_MAX_AGE_DAYS = 14;
-  const MAX_CANDIDATES = 500;
-  const AMAZON_JD_FETCH_CAP = 80;  // hard cap on Phase 2 detail fetches to stay under Vercel 60s
-  const now = Date.now();
-
-  type AmznJob = {
-    id_icims?:            string;
-    title?:               string;
-    normalized_location?: string;
-    city?:                string;
-    description?:         string;
-    description_short?:   string;
-    posted_date?:         string;
-    job_schedule_type?:   string;
-    employment_type?:     string;
-  };
-
-  const fetchPage = async (query: string, page: number): Promise<AmznJob[]> => {
-    const params = new URLSearchParams({
-      base_query:   query,
-      loc_query:    "United States",
-      type:         "FULL_TIME",
-      sort:         "recent",
-      this_week:    "0",
-      offset:       String(page * PAGE_SIZE),
-      result_limit: String(PAGE_SIZE),
-      format:       "json",
-    });
-    const res = await fetch(
-      `https://www.amazon.jobs/en/search.json?${params}`,
-      {
-        headers: {
-          "Accept":     "application/json",
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        },
-        signal: AbortSignal.timeout(12_000),
-      }
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (data.jobs ?? []) as AmznJob[];
-  };
-
-  const toScrapedJob = (j: AmznJob, postedAtISO: string, jd: string): ScrapedJob => {
-    const jobId = j.id_icims ?? String(Math.random());
-    return {
-      id:          `amzn-${jobId}`,
-      company:     "Amazon",
-      title:       j.title ?? "",
-      location:    j.normalized_location ?? j.city ?? "United States",
-      description: jd,
-      applyUrl:    buildAmazonCanonicalUrl(jobId),
-      postedAt:    postedAtISO,
-      type:        "Full-time",
-    };
-  };
-
-  const fetchAmazonDetail = async (jobId: string): Promise<string | null> => {
-    const url = buildAmazonCanonicalUrl(jobId);
-    let html: string;
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "Accept":     "text/html,application/xhtml+xml",
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) return null;
-      html = await res.text();
-    } catch {
-      return null;
-    }
-
-    // Amazon job pages put the real JD inside:
-    //   <div id="job-detail-body">
-    //     <div class="content">
-    //       <div class="section"><h2>Description</h2><p>...</p></div>
-    //       <div class="section"><h2>Key job responsibilities</h2><p>...</p></div>
-    //       <div class="section"><h2>About the team</h2><p>...</p></div>
-    //       <div class="section"><h2>Basic Qualifications</h2><p>...</p></div>
-    //       <div class="section"><h2>Preferred Qualifications</h2><p>...</p></div>
-    //     </div>
-    //   </div>
-    // The previous extractor's `htmlLower.indexOf("description")` matched the
-    // <meta name="description"> at the top of the page and sliced page chrome
-    // (Boomerang / analytics / nav) instead of the JD body, producing 0/47
-    // useful descriptions in production.
-    const bodyIdx = html.indexOf('id="job-detail-body"');
-    if (bodyIdx === -1) return null;
-    const contentStart = html.indexOf('<div class="content">', bodyIdx);
-    if (contentStart === -1) return null;
-    // Content body ends just before the `addCriticalFeatureMarker` script
-    // that separates content from the sidebar. Cap to 30KB defensively.
-    let contentEnd = html.indexOf('addCriticalFeatureMarker', contentStart);
-    if (contentEnd === -1 || contentEnd - contentStart > 30000) {
-      contentEnd = contentStart + 30000;
-    }
-    const contentHtml = html.slice(contentStart, contentEnd);
-
-    const decode = (s: string): string =>
-      s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-       .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
-       .replace(/&#?\w+;/g, " ");
-
-    const sectionRe = /<div class="section"[^>]*>\s*<h2[^>]*>([^<]+)<\/h2>([\s\S]*?)<\/div>(?=\s*<div|\s*<\/div>|\s*<script>)/gi;
-    const parts: string[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = sectionRe.exec(contentHtml)) !== null) {
-      const heading = decode(m[1].trim());
-      const body = decode(
-        m[2]
-          .replace(/<br\s*\/?>/gi, " ")
-          .replace(/<\/p>\s*<p[^>]*>/gi, " ")
-          .replace(/<[^>]+>/g, " ")
-      ).replace(/\s+/g, " ").trim();
-      if (body.length < 20) continue;
-      parts.push(`${heading}\n${body}`);
-    }
-    if (parts.length === 0) return null;
-    const combined = parts.join("\n\n").trim();
-    return combined.length >= 200 ? combined : null;
-  };
-
-  const AMAZON_QUERIES = [
-    "software engineer",
-    "software development engineer",
-    "software developer",
-    "backend engineer",
-    "frontend engineer",
-    "full stack engineer",
-    "full stack developer",
-    "platform engineer",
-    "devops engineer",
-    "site reliability engineer",
-    "cloud engineer",
-    "application engineer",
-  ];
-  const amazonDiag = {
-    totalFetched:             0,
-    discarded_no_jobid:       0,
-    discarded_duplicate:      0,
-    discarded_title:          0,
-    discarded_non_us:         0,
-    discarded_non_full_time:  0,
-    discarded_no_date:        0,
-    discarded_old_date:       0,
-    discarded_no_desc:        0,
-    discarded_sponsorship:    0,
-    kept:                     0,
-    queries_early_stopped:    0,  // queries terminated by freshness_boundary early-stop
-  };
-  const amazonRejectedSamples: Array<{
-    jobId: string;
-    title: string;
-    location: string;
-    postedDateRaw: string;
-    reason: string;
-  }> = [];
-  const addSample = (jobId: string, raw: AmznJob, reason: string) => {
-    if (amazonRejectedSamples.length >= 50) return;
-    amazonRejectedSamples.push({
-      jobId,
-      title:         raw.title ?? "",
-      location:      raw.normalized_location ?? raw.city ?? "",
-      postedDateRaw: raw.posted_date ?? "",
-      reason,
-    });
-  };
-
-  const seen = new Set<string>();
-  const candidates: Array<{ raw: AmznJob; postedAtISO: string }> = [];
-  let pagesFetched = 0;
-  let stopReason = "page_limit";
-
-  // Phase 1: collect candidates passing early + date filters
-  // Early-stop per query: Amazon sorts by 'recent', so once any job on a page has a
-  // resolved age > AMAZON_MAX_AGE_DAYS, all deeper pages will be older — break that query.
-  queryLoop: for (const query of AMAZON_QUERIES) {
-    let queryPages = 0;
-    let queryStopReason: "no_results" | "freshness_boundary" | "max_pages" | "cap_reached" | "error" = "max_pages";
-
-    for (let page = 0; page < MAX_PAGES; page++) {
-      if (candidates.length >= MAX_CANDIDATES) {
-        stopReason = "cap_reached";
-        queryStopReason = "cap_reached";
-        break queryLoop;
-      }
-      let rawPage: AmznJob[];
-      try {
-        rawPage = await fetchPage(query, page);
-      } catch {
-        stopReason = "error"; queryStopReason = "error"; break queryLoop;
-      }
-      if (!rawPage || rawPage.length === 0) { stopReason = "no_results"; queryStopReason = "no_results"; break; }
-      pagesFetched++;
-      queryPages++;
-      amazonDiag.totalFetched += rawPage.length;
-
-      // Track whether any job on this page has a stale-but-parseable date.
-      // We process the full page first (keeping fresh jobs), then decide whether to stop.
-      let hitFreshnessBoundary = false;
-      for (const raw of rawPage) {
-        if (candidates.length >= MAX_CANDIDATES) break;
-        // Filter 1: valid job ID
-        if (!raw.id_icims) { amazonDiag.discarded_no_jobid++; addSample("", raw, "no_jobid"); continue; }
-        // Filter 2: dedupe
-        if (seen.has(raw.id_icims)) { amazonDiag.discarded_duplicate++; addSample(raw.id_icims, raw, "duplicate"); continue; }
-        seen.add(raw.id_icims);
-        // Filter 3: title
-        if (!shouldIncludeTitle(raw.title ?? "")) { amazonDiag.discarded_title++; addSample(raw.id_icims, raw, "title"); continue; }
-        // Filter 4: US location
-        const loc = raw.normalized_location ?? raw.city ?? "United States";
-        if (!isUSLocation(loc)) { amazonDiag.discarded_non_us++; addSample(raw.id_icims, raw, "non_us"); continue; }
-        // Filter 5: full time
-        const empType = (raw.job_schedule_type ?? raw.employment_type ?? "").toLowerCase();
-        if (empType && !empType.includes("full")) { amazonDiag.discarded_non_full_time++; addSample(raw.id_icims, raw, "non_full_time"); continue; }
-        // Filter 6: date — reject missing/invalid or older than AMAZON_MAX_AGE_DAYS
-        const postedDateRaw = raw.posted_date ?? "";
-        const postedDate = postedDateRaw ? new Date(postedDateRaw) : null;
-        if (!postedDate || isNaN(postedDate.getTime())) { amazonDiag.discarded_no_date++; addSample(raw.id_icims, raw, "date_missing"); continue; }
-        const ageDays = Math.floor((now - postedDate.getTime()) / 86400000);
-        if (ageDays > AMAZON_MAX_AGE_DAYS) {
-          amazonDiag.discarded_old_date++;
-          addSample(raw.id_icims, raw, "date_older_than_5_days");
-          hitFreshnessBoundary = true;  // stale job seen — deeper pages will be older
-          continue;
-        }
-        candidates.push({ raw, postedAtISO: postedDate.toISOString() });
-      }
-
-      // After processing the full page: if a stale job was found, stop this query.
-      // Fresh jobs from this page are already in candidates.
-      if (hitFreshnessBoundary) {
-        queryStopReason = "freshness_boundary";
-        amazonDiag.queries_early_stopped++;
-        break;
-      }
-      if (rawPage.length < PAGE_SIZE) { queryStopReason = "no_results"; stopReason = "no_results"; break; }
-    }
-
-    console.log(`[amazon_v2_legacy:query] q="${query}" pages=${queryPages} stop=${queryStopReason} candidates=${candidates.length}`);
-  }
-
-  // Phase 2: fetch full JD, clean, sponsorship-filter; reject if no valid JD (>=500 chars)
-  // Cap candidates before detail fetches — each fetch is ~150ms throttle + network,
-  // so 80 candidates ≈ 12s throttle + fetch time, well within Vercel 60s.
-  const phase2Candidates = candidates.slice(0, AMAZON_JD_FETCH_CAP);
-  const out: ScrapedJob[] = [];
-  for (const c of phase2Candidates) {
-    await new Promise(r => setTimeout(r, 150));
-    const jd = await fetchAmazonDetail(c.raw.id_icims!);
-    if (!jd) { amazonDiag.discarded_no_desc++; addSample(c.raw.id_icims!, c.raw, "no_description"); continue; }
-    const fullDesc = cleanAmazonJD(jd);
-    if (classifyAmazonSponsorship(fullDesc) === "not_supported") {
-      amazonDiag.discarded_sponsorship++; addSample(c.raw.id_icims!, c.raw, "explicit_no_sponsorship"); continue;
-    }
-    amazonDiag.kept++;
-    out.push(toScrapedJob(c.raw, c.postedAtISO, fullDesc));
-  }
-
-  console.log(`[amazon_v2_legacy] pages=${pagesFetched} total=${amazonDiag.totalFetched} candidates=${candidates.length} phase2_cap=${phase2Candidates.length} kept=${amazonDiag.kept} early_stopped_queries=${amazonDiag.queries_early_stopped} stop=${stopReason}`);
-  console.log("[Amazon v2 diagnostics]", JSON.stringify({
-    ...amazonDiag,
-    rejectedSampleCount: amazonRejectedSamples.length,
-    rejectedSamples:     amazonRejectedSamples,
-  }, null, 2));
-  return out;
-}
+// Amazon v2 scraper moved to lib/scrapers/amazon.ts (amazon_v2). The
+// legacy fetchAmazonJobsV2 + buildAmazonCanonicalUrl + cleanAmazonJD +
+// classifyAmazonSponsorship that lived here had no global elapsed budget
+// and were tripping Vercel's 60s function timeout.
 
 // JPMorgan Chase scraper moved to lib/scrapers/jpmorgan.ts (jpmorgan_v2).
 
@@ -1022,8 +710,8 @@ export async function fetchNetflixJobs(): Promise<ScrapedJob[]> {
 //     - reject if no JD returned
 //     - cleanWalmartJD(): strip HTML, decode entities, normalize whitespace,
 //       trim at "Similar Jobs", preserve readable casing
-//     - classifyWalmartSponsorship(): reject only explicit no-sponsor language;
-//       unknown kept
+//     - sponsorship rejection now happens in the global pipeline
+//       (normalizeJobs → jobUtils.classifySponsorship); no local check
 //   Phase 3: store surviving jobs — full cleaned JD in description field;
 //     normalizeJobs() in refresh/route.ts derives:
 //       description      = cleanedJD.slice(0, 220)  [card preview]
@@ -1161,47 +849,8 @@ function cleanWalmartJD(rawHtml: string): string {
   return trimAtSimilarJobs(text);
 }
 
-type SponsorshipStatus = "not_supported" | "supported" | "unknown";
-
-function classifyWalmartSponsorship(cleanedJD: string): SponsorshipStatus {
-  const text = cleanedJD.toLowerCase();
-
-  const noSponsorPhrases = [
-    "will not sponsor",
-    "unable to sponsor",
-    "cannot sponsor",
-    "does not sponsor",
-    "not able to sponsor",
-    "sponsorship is not available",
-    "sponsorship not available",
-    "no sponsorship",
-    "not provide sponsorship",
-    "not offer sponsorship",
-    "not support visa",
-    "will not provide immigration",
-    "not provide immigration",
-  ];
-  for (const phrase of noSponsorPhrases) {
-    if (text.includes(phrase)) return "not_supported";
-  }
-
-  const yesSponsorPhrases = [
-    "will sponsor",
-    "able to sponsor",
-    "visa sponsorship available",
-    "sponsorship available",
-    "sponsorship provided",
-    "we sponsor",
-    "offers sponsorship",
-    "provide sponsorship",
-    "immigration assistance",
-  ];
-  for (const phrase of yesSponsorPhrases) {
-    if (text.includes(phrase)) return "supported";
-  }
-
-  return "unknown";
-}
+// classifyWalmartSponsorship removed — pipeline runs jobUtils.classifySponsorship
+// in normalizeJobs on every row, making the local Walmart classifier redundant.
 
 function isJsonContentType(ct: string | null): boolean {
   return !!ct && ct.toLowerCase().includes("application/json");
@@ -1254,7 +903,6 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
     discarded_no_date:    0,
     discarded_old_date:   0,
     discarded_no_desc:    0,
-    discarded_sponsorship: 0,
     discarded_clearance:  0,
     kept:                 0,
   };
@@ -1391,13 +1039,8 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
         }
 
         const cleanedJD = cleanWalmartJD(descHtml);
-
-        const sponsorStatus = classifyWalmartSponsorship(cleanedJD);
-        if (sponsorStatus === "not_supported") {
-          walmartDiag.discarded_sponsorship++;
-          addRejectedSample({ reqId: c.reqId, title: c.title, location: c.location, postedOnRaw: c.postedAtIso, externalPath: c.externalPath, reason: "explicit_no_sponsorship" });
-          return null;
-        }
+        // Sponsorship rejection now happens in the global pipeline
+        // (normalizeJobs → jobUtils.classifySponsorship). No local check.
 
         return {
           id:          `wmt-${c.reqId}`,
@@ -1419,7 +1062,7 @@ export async function fetchWalmartJobs(): Promise<ScrapedJob[]> {
 
   console.log(
     `[playwright:Walmart] phase2 candidates=${candidates.length} kept=${kept.length}` +
-    ` discarded_sponsorship=${walmartDiag.discarded_sponsorship} discarded_no_desc=${walmartDiag.discarded_no_desc}`
+    ` discarded_no_desc=${walmartDiag.discarded_no_desc}`
   );
   console.log("[Walmart v2 diagnostics]", JSON.stringify({
     ...walmartDiag,
