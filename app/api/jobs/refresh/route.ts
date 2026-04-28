@@ -25,6 +25,9 @@ import { fetchAmazonJobs } from "@/lib/scrapers/amazon";
 // API-based JPMorgan adapter — Oracle HCM listing + per-job detail.
 // Source name is "jpmorgan_v2".
 import { fetchJpmorganJobs } from "@/lib/scrapers/jpmorgan";
+// Greenhouse public boards-api adapter (10-tenant scope, per-tenant filters,
+// per-tenant + aggregate diagnostics). Source name stays "greenhouse".
+import { fetchGreenhouseJobs } from "@/lib/scrapers/greenhouse";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -360,6 +363,29 @@ async function ingestSource(
     }
     const capped              = applySourceCap(deduped, source);
     const { stored, error: storeErr } = await storeJobs(capped);
+    if (source === "greenhouse") {
+      // Greenhouse pipeline-stage funnel — surfaces how the adapter survivors
+      // fare against the global pipeline filter. Adapter is now aligned with
+      // shouldIncludeTitle so post-fix the per-stage drops should be near 0.
+      const sponsorshipDropped = rawJobs.length - normalized.length;
+      const dedupDropped       = filtered.length - deduped.length;
+      const cappedDropped      = deduped.length - capped.length;
+      console.log(
+        `[greenhouse:funnel] ` +
+        `fetched=${rawJobs.length} ` +
+        `sponsorship_dropped=${sponsorshipDropped} ` +
+        `passed_adapter=${dated.length} ` +
+        `dropped_by_pipeline_title=${title_removed} ` +
+        `dropped_by_pipeline_location=${location_removed} ` +
+        `dropped_by_pipeline_date=${horizon_removed} ` +
+        `dropped_by_pipeline_type=${type_removed} ` +
+        `dropped_by_pipeline_clearance=${clearance_removed} ` +
+        `dropped_by_pipeline_company_blocked=${company_blocked} ` +
+        `dropped_by_pipeline_duplicate=${dedupDropped} ` +
+        `cap_dropped=${cappedDropped} ` +
+        `final_stored=${capped.length}`,
+      );
+    }
     // google_v2-specific health probe: confirm full_description + posted_at
     // populated counts on the normalized set (post-clean, pre-cap). Helps
     // detect a hydration parser regression where Google ships data but our
@@ -446,199 +472,29 @@ async function deactivateMissingJobsForSource(source: string, liveIds: string[])
 }
 
 // ── 1a. Greenhouse ─────────────────────────────────────────────────────────
-// Hardcoded 10-tenant scope (no longer registry-driven). Per-tenant filters
-// for date / location / title / description, plus global dedupe by Greenhouse
-// job ID (which is globally unique). Sequential fetch to avoid rate limits.
-const GREENHOUSE_TENANTS = [
-  "stripe", "airbnb", "robinhood", "coinbase", "datadog",
-  "plaid", "notion", "figma", "affirm", "flexport",
-] as const;
-const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
-  stripe:    "Stripe",
-  airbnb:    "Airbnb",
-  robinhood: "Robinhood",
-  coinbase:  "Coinbase",
-  datadog:   "Datadog",
-  plaid:     "Plaid",
-  notion:    "Notion",
-  figma:     "Figma",
-  affirm:    "Affirm",
-  flexport:  "Flexport",
-};
-const GREENHOUSE_MAX_AGE_DAYS = 14;
-const GREENHOUSE_MIN_DESC_CHARS = 200;
-const GREENHOUSE_TITLE_REJECT = ["director", "manager", "principal", "staff"];
-
-const US_STATE_NAMES_GH = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
-  "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
-  "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
-  "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
-  "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-  "new mexico", "new york", "north carolina", "north dakota", "ohio",
-  "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-  "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
-  "washington", "west virginia", "wisconsin", "wyoming",
-  "district of columbia",
-];
-
-function isUsLocationGreenhouse(loc: string): boolean {
-  if (!loc) return false;
-  const ll = loc.toLowerCase();
-  if (ll.includes("united states")) return true;
-  if (ll.includes("remote")) return true;
-  // Common state-abbreviation pattern: "City, ST" — two-letter all-caps token
-  if (/,\s*[A-Z]{2}\b/.test(loc)) return true;
-  for (const s of US_STATE_NAMES_GH) if (ll.includes(s)) return true;
-  return false;
-}
-
-function stripHtmlForLength(html: string): string {
-  // Approximate the cleanDescription stripping that runs downstream so the
-  // 200-char threshold is measured against user-visible text, not raw HTML.
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
+// Adapter logic lives in lib/scrapers/greenhouse.ts (10-tenant scope,
+// per-tenant filters, dedupe, diagnostics). This wrapper just maps
+// ParsedGreenhouseJob[] → RawJob[] in the same shape as
+// fetchAmazonSource / fetchMicrosoftSource / fetchJpmorganSource.
 async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
-  const results: RawJob[] = [];
-  const seenJobIds = new Set<string>();
-  const now = Date.now();
-  const maxAgeMs = GREENHOUSE_MAX_AGE_DAYS * 86_400_000;
-
-  let tenants_attempted = 0;
-  let tenants_ok        = 0;
-  let tenants_failed    = 0;
-  let total_fetched     = 0;
-  let total_kept        = 0;
-  let dropped_old       = 0;
-  let dropped_no_date   = 0;
-  let dropped_location  = 0;
-  let dropped_title     = 0;
-  let dropped_no_desc   = 0;
-  let dropped_duplicate = 0;
-
-  // Sequential — don't trigger Greenhouse rate-limiting.
-  for (const tenant of GREENHOUSE_TENANTS) {
-    tenants_attempted++;
-    const company = GREENHOUSE_DISPLAY_NAMES[tenant] ?? tenant;
-    let tenantFetched = 0;
-    let tenantKept    = 0;
-    let tenantDate    = 0;
-    let tenantLoc     = 0;
-    let tenantTitle   = 0;
-    let tenantNoDesc  = 0;
-    try {
-      const res = await fetch(
-        `https://boards-api.greenhouse.io/v1/boards/${tenant}/jobs?content=true`,
-        { signal: AbortSignal.timeout(15_000) },
-      );
-      if (!res.ok) {
-        tenants_failed++;
-        console.log(`[greenhouse:${tenant}] ERROR: HTTP ${res.status}`);
-        continue;
-      }
-      const data = await res.json();
-      const jobs = (data.jobs ?? []) as Record<string, unknown>[];
-      tenantFetched = jobs.length;
-      total_fetched += tenantFetched;
-
-      for (const j of jobs) {
-        const jobIdRaw = j.id;
-        const jobIdStr = jobIdRaw != null ? String(jobIdRaw) : "";
-
-        // (a) Date filter — effective_date = updated_at ?? posted_at
-        const updatedAt = (j.updated_at as string | undefined) ?? null;
-        const firstPublished = (j.first_published as string | undefined) ?? null;   // Greenhouse's posted_at-equivalent
-        const effectiveRaw = updatedAt ?? firstPublished;
-        if (!effectiveRaw) {
-          dropped_no_date++; tenantDate++;
-          continue;
-        }
-        const effectiveTs = Date.parse(effectiveRaw);
-        if (!Number.isFinite(effectiveTs)) {
-          dropped_no_date++; tenantDate++;
-          continue;
-        }
-        if (now - effectiveTs > maxAgeMs) {
-          dropped_old++; tenantDate++;
-          continue;
-        }
-
-        // (b) Location filter
-        const locObj = j.location as Record<string, unknown> | null;
-        const locName = (locObj?.name as string) ?? "";
-        if (!isUsLocationGreenhouse(locName)) {
-          dropped_location++; tenantLoc++;
-          continue;
-        }
-
-        // (c) Title filter
-        const title = (j.title as string) ?? "";
-        const titleLower = title.toLowerCase();
-        if (GREENHOUSE_TITLE_REJECT.some(kw => titleLower.includes(kw))) {
-          dropped_title++; tenantTitle++;
-          continue;
-        }
-
-        // (d) Description length filter — measure stripped text, not HTML
-        const contentHtml = (j.content as string) ?? "";
-        const stripped = stripHtmlForLength(contentHtml);
-        if (stripped.length < GREENHOUSE_MIN_DESC_CHARS) {
-          dropped_no_desc++; tenantNoDesc++;
-          continue;
-        }
-
-        // (e) Global dedupe by Greenhouse job ID
-        if (jobIdStr && seenJobIds.has(jobIdStr)) {
-          dropped_duplicate++;
-          continue;
-        }
-        if (jobIdStr) seenJobIds.add(jobIdStr);
-
-        results.push({
-          id:          `gh-${tenant}-${jobIdStr || Math.random().toString(36).slice(2)}`,
-          source:      "greenhouse",
-          company,
-          title,
-          location:    locName,
-          description: contentHtml,            // raw HTML — normalizeJobs cleans it
-          applyUrl:    (j.absolute_url as string) ?? "#",
-          postedAt:    new Date(effectiveTs).toISOString(),
-          type:        "Full-time",
-        });
-        tenantKept++;
-        total_kept++;
-      }
-      tenants_ok++;
-    } catch (e: unknown) {
-      tenants_failed++;
-      const msg = e instanceof Error ? e.message : String(e);
-      console.log(`[greenhouse:${tenant}] ERROR: ${msg}`);
-      continue;
-    }
-    console.log(
-      `[greenhouse:${tenant}] fetched=${tenantFetched} ` +
-      `dropped_date=${tenantDate} dropped_location=${tenantLoc} ` +
-      `dropped_title=${tenantTitle} dropped_no_desc=${tenantNoDesc} kept=${tenantKept}`,
-    );
+  try {
+    const parsed = await fetchGreenhouseJobs();
+    const raw: RawJob[] = parsed.map(p => ({
+      id:          p.id,
+      source:      "greenhouse",
+      company:     p.company,
+      title:       p.title,
+      location:    p.location,
+      description: p.description,    // already cleaned plain text — normalizeJobs is idempotent on clean text
+      applyUrl:    p.apply_url,
+      postedAt:    p.posted_at,
+      type:        "Full-time",
+    }));
+    return { raw, fetched: raw.length, error: null };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
   }
-
-  console.log(`[greenhouse:summary] ${JSON.stringify({
-    tenants_attempted, tenants_ok, tenants_failed,
-    total_fetched, total_kept,
-    dropped_old, dropped_no_date, dropped_location,
-    dropped_title, dropped_no_desc, dropped_duplicate,
-  })}`);
-
-  return { raw: results, fetched: total_fetched, error: null };
 }
 
 // ── 1b. Workday ─────────────────────────────────────────────────────────────

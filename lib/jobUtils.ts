@@ -315,6 +315,22 @@ export function isUSLocation(location: string): boolean {
   if (lc === "remote" || lc === "anywhere" || lc === "worldwide" || lc === "multiple locations") return true;
   if (/^\d+\s+locations?$/i.test(trimmed)) return true;
 
+  // 1b. Explicit US-remote phrasings — common in Greenhouse / Stripe-style
+  // multi-city listings ("San Francisco, Seattle, Remote in US"). Match
+  // BEFORE the reject-list so we don't fall through to the ambiguous
+  // last-segment analysis. Use \b around "us" to avoid false positives on
+  // words like "russia" or country codes ending in s.
+  const remoteUsPatterns = [
+    /\bremote\s+in\s+us\b/,
+    /\bremote\s*,\s*us\b/,
+    /\bremote\s*-\s*us\b/,
+    /\bremote\s*–\s*us\b/,    // en dash
+    /\bus\s+remote\b/,
+  ];
+  for (const rx of remoteUsPatterns) {
+    if (rx.test(lc)) return true;
+  }
+
   // 2. Explicit US markers → allow
   if (/\bunited states\b/.test(lc)) return true;
   if (/\busa\b/.test(lc) || /\(usa\)/.test(lc)) return true;
