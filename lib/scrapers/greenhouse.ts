@@ -38,8 +38,11 @@ export interface ParsedGreenhouseJob {
 // ── Tunables ─────────────────────────────────────────────────────────────
 
 export const GREENHOUSE_TENANTS = [
+  // Batch 1 (original)
   "stripe", "airbnb", "robinhood", "coinbase", "datadog",
   "plaid", "notion", "figma", "affirm", "flexport",
+  // Batch 2 (2026-04-30)
+  "brex", "asana", "instacart", "reddit", "lyft",
 ] as const;
 
 const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
@@ -53,6 +56,12 @@ const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
   figma:     "Figma",
   affirm:    "Affirm",
   flexport:  "Flexport",
+  // Batch 2
+  brex:      "Brex",
+  asana:     "Asana",
+  instacart: "Instacart",
+  reddit:    "Reddit",
+  lyft:      "Lyft",
 };
 
 const GREENHOUSE_MAX_AGE_DAYS    = 14;
