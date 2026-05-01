@@ -45,27 +45,34 @@ export const GREENHOUSE_TENANTS = [
   "brex", "asana", "instacart", "reddit", "lyft",
   // Batch 3 (2026-04-30)
   "dropbox",
+  // Batch 4 (2026-05-01) — probed 2026-04-30, all confirmed 200
+  "scaleai", "andurilindustries", "mercury", "verkada",
 ] as const;
 
 const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
-  stripe:    "Stripe",
-  airbnb:    "Airbnb",
-  robinhood: "Robinhood",
-  coinbase:  "Coinbase",
-  datadog:   "Datadog",
-  plaid:     "Plaid",
-  notion:    "Notion",
-  figma:     "Figma",
-  affirm:    "Affirm",
-  flexport:  "Flexport",
+  stripe:             "Stripe",
+  airbnb:             "Airbnb",
+  robinhood:          "Robinhood",
+  coinbase:           "Coinbase",
+  datadog:            "Datadog",
+  plaid:              "Plaid",
+  notion:             "Notion",
+  figma:              "Figma",
+  affirm:             "Affirm",
+  flexport:           "Flexport",
   // Batch 2
-  brex:      "Brex",
-  asana:     "Asana",
-  instacart: "Instacart",
-  reddit:    "Reddit",
-  lyft:      "Lyft",
+  brex:               "Brex",
+  asana:              "Asana",
+  instacart:          "Instacart",
+  reddit:             "Reddit",
+  lyft:               "Lyft",
   // Batch 3
-  dropbox:   "Dropbox",
+  dropbox:            "Dropbox",
+  // Batch 4
+  scaleai:            "Scale AI",
+  andurilindustries:  "Anduril",
+  mercury:            "Mercury",
+  verkada:            "Verkada",
 };
 
 const GREENHOUSE_MAX_AGE_DAYS    = 14;
