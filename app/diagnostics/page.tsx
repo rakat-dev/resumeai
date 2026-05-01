@@ -37,7 +37,7 @@ function fmtDuration(startIso?: string, endIso?: string): string {
 // drop cells render as "—" instead of "0" — a misleading zero would imply the
 // adapter measured those jobs and decided to keep them.
 const NO_ADAPTER_DIAG_SOURCES = new Set<string>([
-  "workday", "jsearch", "adzuna", "adzuna_targeted", "jooble",
+  "workday", "jsearch", "adzuna", "jooble",
   "phenom", "google_v2", "meta", "playwright_apple", "walmart_v2",
 ]);
 

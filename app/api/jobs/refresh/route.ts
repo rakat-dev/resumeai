@@ -1047,7 +1047,7 @@ const ADZUNA_TARGETED_COMPANIES = [
 // filter, 30-day horizon, MAX_JOBS_PER_COMPANY = 60 cap.
 const ADZUNA_TARGETED_MAX_PER_COMPANY = 60;
 
-async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null }> {
+async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts; http_errors?: GreenhouseAdapterResult["http_errors"] }> {
   const appId  = process.env.ADZUNA_APP_ID;
   const appKey = process.env.ADZUNA_APP_KEY;
   if (!appId || !appKey) return { raw: [], fetched: 0, error: "ADZUNA keys not set" };
@@ -1095,6 +1095,10 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
   }> = {};
   const seenIds = new Set<string>();
 
+  // ── Diagnostics: adapter rejected samples ──────────────────────────────
+  const adapterSamples: RejectedJobSample[] = [];
+  const adapterSampleCounts: Record<string, number> = {};
+
   for (const { companyName, raw } of fulfilled) {
     totalFetched += raw.length;
     const s = perCompany[companyName] = { raw: raw.length, keptEarly: 0, dropTitle: 0, dropLoc: 0, dropDate: 0, dropDup: 0 };
@@ -1113,24 +1117,52 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
       const title     = (j.title as string) ?? "";
       const id        = `azt-${j.id ?? Math.random()}`;
 
-      // EARLY DEDUPE (step 7)
-      if (seenIds.has(id)) { s.dropDup += 1; continue; }
-
-      // EARLY TITLE FILTER (step 5) — lightweight, NOT the full filter
-      if (!isRelevantTitleEarly(title)) { s.dropTitle += 1; continue; }
-
-      // Build the location string (same logic as before — must pass full
-      // isUSLocation downstream)
+      // Build the location string (hoisted before drop sites so all samples
+      // have full location data — filter order is unchanged)
       const area = Array.isArray(locObj.area) ? (locObj.area as string[]) : [];
       const city   = area[area.length - 1] ?? "";
       const state  = area[1] ?? "";
       const location = [city, state, "United States"].filter(Boolean).join(", ") || (locObj.display_name as string) || "United States";
 
+      // EARLY DEDUPE (step 7)
+      if (seenIds.has(id)) {
+        s.dropDup += 1;
+        pushSample(adapterSamples, adapterSampleCounts, {
+          title, company, location, posted_at: createdAt ?? undefined,
+          source: "adzuna_targeted", reason: "duplicate", stage: "adapter",
+        });
+        continue;
+      }
+
+      // EARLY TITLE FILTER (step 5) — lightweight, NOT the full filter
+      if (!isRelevantTitleEarly(title)) {
+        s.dropTitle += 1;
+        pushSample(adapterSamples, adapterSampleCounts, {
+          title, company, location, posted_at: createdAt ?? undefined,
+          source: "adzuna_targeted", reason: "title", stage: "adapter",
+        });
+        continue;
+      }
+
       // EARLY LOCATION FILTER (step 6)
-      if (!isUSLocation(location)) { s.dropLoc += 1; continue; }
+      if (!isUSLocation(location)) {
+        s.dropLoc += 1;
+        pushSample(adapterSamples, adapterSampleCounts, {
+          title, company, location, posted_at: createdAt ?? undefined,
+          source: "adzuna_targeted", reason: "location", stage: "adapter",
+        });
+        continue;
+      }
 
       // EARLY DATE FILTER (step 4) — 30-day horizon preserved for partial workflow
-      if (!isWithinEarlyHorizon(createdAt, EARLY_HORIZON_DAYS_PARTIAL)) { s.dropDate += 1; continue; }
+      if (!isWithinEarlyHorizon(createdAt, EARLY_HORIZON_DAYS_PARTIAL)) {
+        s.dropDate += 1;
+        pushSample(adapterSamples, adapterSampleCounts, {
+          title, company, location, posted_at: createdAt ?? undefined,
+          source: "adzuna_targeted", reason: "date", stage: "adapter",
+        });
+        continue;
+      }
 
       seenIds.add(id);
       results.push({
@@ -1146,6 +1178,30 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
     }
   }
 
+  // Aggregate adapter-level drop totals across all companies.
+  let totalDropDate = 0, totalDropLoc = 0, totalDropTitle = 0, totalDropDup = 0;
+  for (const s of Object.values(perCompany)) {
+    totalDropDate  += s.dropDate;
+    totalDropLoc   += s.dropLoc;
+    totalDropTitle += s.dropTitle;
+    totalDropDup   += s.dropDup;
+  }
+  const adapterDiagnostics: AdapterDropCounts = {
+    fetched_from_api:       totalFetched,
+    dropped_by_date:        totalDropDate,
+    dropped_by_location:    totalDropLoc,
+    dropped_by_title:       totalDropTitle,
+    dropped_by_sponsorship: 0,   // sponsorship filtered in route normalizeJobs
+    dropped_by_duplicate:   totalDropDup,
+    dropped_by_mapping:     0,
+    samples:                adapterSamples,
+  };
+  const httpErrors: GreenhouseAdapterResult["http_errors"] = failed.map(f => ({
+    tenant:  f.companyName,
+    status:  f.httpStatus ?? 0,
+    message: f.errorMsg,
+  }));
+
   // Per-company log line — visibility into the partial workflow funnel.
   for (const [co, s] of Object.entries(perCompany)) {
     console.log(`[adzuna_targeted:${co}] raw=${s.raw} early_title_drop=${s.dropTitle} loc_drop=${s.dropLoc} date_drop=${s.dropDate} dup_drop=${s.dropDup} keptEarly=${s.keptEarly}`);
@@ -1154,7 +1210,7 @@ async function fetchAdzunaTargetedSource(): Promise<{ raw: RawJob[]; fetched: nu
     console.warn(`[adzuna_targeted] company="${f.companyName}" status=failed http=${f.httpStatus ?? "network_error"} error="${f.errorMsg}"`);
   }
   console.log(`[adzuna_targeted] companies_total=${ADZUNA_TARGETED_COMPANIES.length} success=${fulfilled.length} failed=${failed.length} raw=${totalFetched} kept=${results.length} maxPerCompany=${ADZUNA_TARGETED_MAX_PER_COMPANY}`);
-  return { raw: results, fetched: totalFetched, error: null };
+  return { raw: results, fetched: totalFetched, error: null, adapterDiagnostics, http_errors: httpErrors };
 }
 
 // ── 1e. Jooble ─────────────────────────────────────────────────────────────
