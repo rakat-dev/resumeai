@@ -327,6 +327,7 @@ export function isUSLocation(location: string): boolean {
     /\bremote\s*–\s*us\b/,    // en dash
     /\bus\s+remote\b/,
     /\bremote\s+us\b/i,       // Affirm-style "Remote US" — bare whitespace separator
+    /\bremote\s*\([^)]*,\s*(us|usa|united\s+states)\s*\)/i,  // Remote (State, US/USA/United States)
   ];
   for (const rx of remoteUsPatterns) {
     if (rx.test(lc)) return true;
