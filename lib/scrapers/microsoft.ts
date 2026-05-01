@@ -20,7 +20,7 @@
 // source="microsoft_v2".
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
-import { type AdapterDropCounts } from "../diagnostics";
+import { type AdapterDropCounts, type RejectedJobSample, pushSample, SAMPLE_LIMIT } from "../diagnostics";
 
 export interface MicrosoftAdapterResult {
   jobs:        ParsedMicrosoftJob[];
@@ -82,7 +82,6 @@ const MS_DETAIL_API_URL = "https://apply.careers.microsoft.com/api/apply/v2/jobs
 // `positionUrl` path returned by the search API. Always prefer that when present.
 const MS_APPLY_HOST     = "https://apply.careers.microsoft.com";
 const MS_APPLY_URL_BASE = "https://jobs.careers.microsoft.com/global/en/job";
-const MS_REJECT_SAMPLE_LIMIT      = 5;          // up to 5 examples per reject reason
 
 // ── Listing response types ───────────────────────────────────────────────
 
@@ -238,6 +237,25 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
   const seenIds   = new Set<string>();
   const candidates: MsListingPosition[] = [];
   let totalFetched = 0;
+  // Adapter-level diagnostics — populated at every drop site so the UI
+  // can render full sample cards (title/company/location/url/posted_at).
+  const adapterSamples: RejectedJobSample[] = [];
+  const sampleCounts: Record<string, number> = {};
+  let discarded_duplicate = 0;
+
+  // Apply-URL builder shared by Phase 1 (duplicate samples) and Phase 4
+  // (final ParsedMicrosoftJob assembly) so duplicate-drop sample cards
+  // carry a real link.
+  const buildApplyUrl = (p: MsListingPosition): string => {
+    if (p.positionUrl) return `${MS_APPLY_HOST}${p.positionUrl}`;
+    const idStr = String(p.id ?? "");
+    return `${MS_APPLY_URL_BASE}/${p.displayJobId ?? idStr}`;
+  };
+  // Sample-friendly location: prefer the standardized "City, ST, US" form,
+  // fall back to the verbose listing string. Used only for reject samples,
+  // never for surviving rows (those go through pickUSLocation).
+  const sampleLocation = (p: MsListingPosition): string =>
+    p.standardizedLocations?.[0] ?? p.locations?.[0] ?? "United States";
 
   // ── Phase 1: paginated search across all queries ────────────────────
   for (const query of MS_QUERIES) {
@@ -258,7 +276,19 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
           allOld = false;
         }
         const id = String(p.id ?? "");
-        if (!id || seenIds.has(id)) continue;
+        if (!id || seenIds.has(id)) {
+          discarded_duplicate++;
+          pushSample(adapterSamples, sampleCounts, {
+            title: p.name ?? "",
+            company: "Microsoft",
+            location: sampleLocation(p),
+            source: "microsoft_v2",
+            reason: "duplicate",
+            stage: "adapter",
+            url: buildApplyUrl(p),
+          });
+          continue;
+        }
         seenIds.add(id);
         candidates.push(p);
       }
@@ -274,15 +304,6 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
   let rejected_old      = 0;
   let rejected_title    = 0;
   let rejected_location = 0;
-  const rejectSamples: Record<string, Array<{ title: string; reason: string }>> = {
-    rejected_old:      [],
-    rejected_title:    [],
-    rejected_location: [],
-  };
-  function pushSample(bucket: string, title: string, reason: string): void {
-    const arr = rejectSamples[bucket];
-    if (arr && arr.length < MS_REJECT_SAMPLE_LIMIT) arr.push({ title, reason });
-  }
 
   interface Survivor {
     pos:      MsListingPosition;
@@ -293,26 +314,43 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
   const survivors: Survivor[] = [];
 
   for (const p of candidates) {
-    const title = p.name ?? "";
+    const title     = p.name ?? "";
+    const company   = "Microsoft";
+    const sampleLoc = sampleLocation(p);
+    const apply_url = buildApplyUrl(p);
     let ageDays: number | null = null;
     if (typeof p.postedTs === "number") {
       ageDays = (Date.now() - p.postedTs * 1000) / 86_400_000;
     }
+    const posted_at = typeof p.postedTs === "number"
+      ? new Date(p.postedTs * 1000).toISOString()
+      : undefined;
     if (ageDays !== null && ageDays > MS_MAX_AGE_DAYS) {
       rejected_old++;
-      pushSample("rejected_old", title, `age=${ageDays.toFixed(1)}d`);
+      pushSample(adapterSamples, sampleCounts, {
+        title, company, location: sampleLoc, posted_at,
+        source: "microsoft_v2", reason: "date", stage: "adapter",
+        url: apply_url,
+      });
       continue;
     }
     if (!shouldIncludeTitle(title)) {
       rejected_title++;
-      pushSample("rejected_title", title, "title rejected");
+      pushSample(adapterSamples, sampleCounts, {
+        title, company, location: sampleLoc, posted_at,
+        source: "microsoft_v2", reason: "title", stage: "adapter",
+        url: apply_url,
+      });
       continue;
     }
     const loc = pickUSLocation(p);
     if (!loc) {
       rejected_location++;
-      pushSample("rejected_location", title,
-        `locs=${(p.standardizedLocations ?? p.locations ?? []).join("|")}`);
+      pushSample(adapterSamples, sampleCounts, {
+        title, company, location: sampleLoc, posted_at,
+        source: "microsoft_v2", reason: "location", stage: "adapter",
+        url: apply_url,
+      });
       continue;
     }
     if (ageDays === null) date_missing++;
@@ -392,12 +430,6 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
     `tier_low=${tierCounts.low ?? 0} tier_date_missing=${tierCounts.date_missing ?? 0} ` +
     `elapsed_ms=${Date.now() - startMs}`,
   );
-  for (const [bucket, samples] of Object.entries(rejectSamples)) {
-    if (samples.length === 0) continue;
-    for (const s of samples) {
-      console.log(`[microsoft_v2:${bucket}] title="${s.title}" reason="${s.reason}"`);
-    }
-  }
 
   const diagnostics: AdapterDropCounts = {
     fetched_from_api:       totalFetched,
@@ -405,19 +437,9 @@ export async function fetchMicrosoftJobs(): Promise<MicrosoftAdapterResult> {
     dropped_by_location:    rejected_location,
     dropped_by_title:       rejected_title,
     dropped_by_sponsorship: 0,
-    dropped_by_duplicate:   0,
+    dropped_by_duplicate:   discarded_duplicate,
     dropped_by_mapping:     0,
-    samples: [
-      ...rejectSamples.rejected_old.map(s => ({
-        title: s.title, source: "microsoft_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-      ...rejectSamples.rejected_title.map(s => ({
-        title: s.title, source: "microsoft_v2" as const, reason: "title" as const, stage: "adapter" as const,
-      })),
-      ...rejectSamples.rejected_location.map(s => ({
-        title: s.title, source: "microsoft_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-    ],
+    samples:                adapterSamples,
   };
   return { jobs: enriched, diagnostics };
 }

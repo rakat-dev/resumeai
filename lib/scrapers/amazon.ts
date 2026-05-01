@@ -22,7 +22,7 @@
 //   Detail fetch only for HIGH+MEDIUM (≤7d).
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
-import { type AdapterDropCounts } from "../diagnostics";
+import { type AdapterDropCounts, type RejectedJobSample, pushSample, SAMPLE_LIMIT } from "../diagnostics";
 
 export interface AmazonAdapterResult {
   jobs:        ParsedAmazonJob[];
@@ -58,7 +58,6 @@ const AMAZON_MAX_AGE_DAYS        = 14;
 const AMAZON_HIGH_PRIORITY_DAYS  = 3;
 const AMAZON_MEDIUM_PRIORITY_DAYS = 7;
 const DESCRIPTION_PREVIEW_CHARS  = 500;
-const REJECT_SAMPLE_LIMIT        = 5;
 const PAGE_FRESHNESS_STOP_RATIO  = 0.5;   // ≥50% of page outside window → stop paging this query
 const AMAZON_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36";
@@ -299,15 +298,8 @@ export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
   let rejected_duplicate    = 0;
   let queries_used          = 0;
   let stoppedReason: "normal" | "budget_exceeded" = "normal";
-  const rejectSamples: Record<string, Array<{ title: string; reason: string }>> = {
-    rejected_old:      [],
-    rejected_title:    [],
-    rejected_location: [],
-  };
-  const pushSample = (bucket: string, title: string, reason: string) => {
-    const arr = rejectSamples[bucket];
-    if (arr && arr.length < REJECT_SAMPLE_LIMIT) arr.push({ title, reason });
-  };
+  const adapterSamples: RejectedJobSample[] = [];
+  const sampleCounts: Record<string, number> = {};
 
   // Phase 1 — collect survivors via paginated search.
   queryLoop: for (const query of AMAZON_QUERIES.slice(0, MAX_QUERIES)) {
@@ -322,10 +314,31 @@ export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
 
       for (const raw of rawPage) {
         candidates_count++;
-        const id = raw.id_icims;
-        if (!id) { rejected_duplicate++; continue; }
-        if (seen.has(id)) { rejected_duplicate++; continue; }
-        const title = raw.title ?? "";
+        const id        = raw.id_icims;
+        const title     = raw.title ?? "";
+        const company   = "Amazon";
+        const loc       = raw.normalized_location ?? raw.city ?? "United States";
+        // apply_url is the canonical amazon.jobs URL when id_icims is set;
+        // "#" only for the (rare) no-id duplicate branch.
+        const apply_url = id ? buildAmazonCanonicalUrl(id) : "#";
+        if (!id) {
+          rejected_duplicate++;
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "amazon_v2", reason: "duplicate", stage: "adapter",
+            url: apply_url,
+          });
+          continue;
+        }
+        if (seen.has(id)) {
+          rejected_duplicate++;
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "amazon_v2", reason: "duplicate", stage: "adapter",
+            url: apply_url,
+          });
+          continue;
+        }
         const now = Date.now();
         const postedTs  = parsePostedDate(raw.posted_date);
         const updatedTs = parseUpdatedTime(raw.updated_time, now);
@@ -336,26 +349,44 @@ export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
         // OR if the most-recent date is outside the 14-day window.
         if (bestTs === null) {
           rejected_old++;
-          pushSample("rejected_old", title, "no_parseable_date");
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "amazon_v2", reason: "date", stage: "adapter",
+            url: apply_url,
+          });
           pageOutOfWindow++;
           continue;
         }
         const ageDays = (now - bestTs) / 86_400_000;
         if (ageDays > AMAZON_MAX_AGE_DAYS) {
           rejected_old++;
-          pushSample("rejected_old", title, `age=${ageDays.toFixed(1)}d`);
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            posted_at: new Date(bestTs).toISOString(),
+            source: "amazon_v2", reason: "date", stage: "adapter",
+            url: apply_url,
+          });
           pageOutOfWindow++;
           continue;
         }
         if (!shouldIncludeTitle(title)) {
           rejected_title++;
-          pushSample("rejected_title", title, "title rejected");
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            posted_at: new Date(bestTs).toISOString(),
+            source: "amazon_v2", reason: "title", stage: "adapter",
+            url: apply_url,
+          });
           continue;
         }
-        const loc = raw.normalized_location ?? raw.city ?? "United States";
         if (!isUSLocation(loc)) {
           rejected_location++;
-          pushSample("rejected_location", title, `loc="${loc}"`);
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            posted_at: new Date(bestTs).toISOString(),
+            source: "amazon_v2", reason: "location", stage: "adapter",
+            url: apply_url,
+          });
           continue;
         }
         seen.add(id);
@@ -436,12 +467,6 @@ export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
     `tier_low=${tierCounts.low ?? 0} ` +
     `elapsed_ms=${Date.now() - startMs} stoppedReason=${stoppedReason}`,
   );
-  for (const [bucket, samples] of Object.entries(rejectSamples)) {
-    if (samples.length === 0) continue;
-    for (const s of samples) {
-      console.log(`[amazon_v2:${bucket}] title="${s.title}" reason="${s.reason}"`);
-    }
-  }
 
   const diagnostics: AdapterDropCounts = {
     fetched_from_api:       candidates_count,
@@ -451,17 +476,7 @@ export async function fetchAmazonJobs(): Promise<AmazonAdapterResult> {
     dropped_by_sponsorship: 0,
     dropped_by_duplicate:   rejected_duplicate,
     dropped_by_mapping:     0,
-    samples: [
-      ...rejectSamples.rejected_old.map(s => ({
-        title: s.title, source: "amazon_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-      ...rejectSamples.rejected_title.map(s => ({
-        title: s.title, source: "amazon_v2" as const, reason: "title" as const, stage: "adapter" as const,
-      })),
-      ...rejectSamples.rejected_location.map(s => ({
-        title: s.title, source: "amazon_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-    ],
+    samples:                adapterSamples,
   };
   return { jobs: out, diagnostics };
 }
