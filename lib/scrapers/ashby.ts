@@ -86,6 +86,8 @@ interface AshbyRawJob {
   descriptionPlain?: string;
   descriptionHtml?:  string;
   jobPostingUrl?:    string;
+  jobUrl?:           string;
+  applyUrl?:         string;
   publishedAt?:      string;
 }
 
@@ -208,7 +210,7 @@ export async function fetchAshbyJobs(): Promise<AshbyAdapterResult> {
           company,
           location:    locName,
           description: cleaned,
-          apply_url:   applyUrl,
+          apply_url: j.jobUrl ?? j.applyUrl ?? "#",
           posted_at:   new Date(publishedTs).toISOString(),
         });
         tenantKept++;
