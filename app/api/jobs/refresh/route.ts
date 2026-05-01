@@ -355,20 +355,10 @@ async function ingestSource(
     // is the only source approved to publish dateless rows (its sitemap+JSON-LD
     // adapter has no postedAt anchor). Every other source must carry a real
     // date so the global 14-day horizon means what it says.
-    let rejected_no_date = 0;
-    const dated = source === "meta"
-      ? normalized
-      : normalized.filter(j => {
-          if (!j.posted_at) { rejected_no_date++; return false; }
-          return true;
-        });
-    if (rejected_no_date > 0) {
-      console.log(`[${source}] rejected_no_date=${rejected_no_date}`);
-    }
-    // Apply per-source horizon inside the filter pass
-    let title_removed = 0, type_removed = 0, location_removed = 0,
-        clearance_removed = 0, horizon_removed = 0, company_blocked = 0;
     // ── Diagnostics: pipeline rejected samples ────────────────────────────
+    // Declared above the no-date filter so that branch can push samples too;
+    // pipeline_date_drop = horizon_removed + rejected_no_date already lumps
+    // both, so they share reason="date" for grouping in the UI.
     const pipelineSamples: RejectedJobSample[] = [];
     const pipelineSampleCounts: Record<string, number> = {};
     const addPipelineSample = (j: NormalizedJob, reason: RejectedJobSample["reason"]) => {
@@ -380,6 +370,23 @@ async function ingestSource(
         url: j.apply_url,
       });
     };
+    let rejected_no_date = 0;
+    const dated = source === "meta"
+      ? normalized
+      : normalized.filter(j => {
+          if (!j.posted_at) {
+            rejected_no_date++;
+            addPipelineSample(j, "date");
+            return false;
+          }
+          return true;
+        });
+    if (rejected_no_date > 0) {
+      console.log(`[${source}] rejected_no_date=${rejected_no_date}`);
+    }
+    // Apply per-source horizon inside the filter pass
+    let title_removed = 0, type_removed = 0, location_removed = 0,
+        clearance_removed = 0, horizon_removed = 0, company_blocked = 0;
     const filtered = dated.filter(j => {
       if (isBlockedCompany(j.company))                        { company_blocked++; addPipelineSample(j, "unknown");    return false; }
       if (!shouldIncludeTitle(j.title))                       { title_removed++;    addPipelineSample(j, "title");     return false; }
