@@ -89,14 +89,60 @@ export function isRedisConfigured(): boolean {
 }
 
 // ── Diagnostics persistence ───────────────────────────────────────────────
-// The latest refresh diagnostics blob. Kept for 24h so the /diagnostics UI
-// can show the last run even after the serverless instance that ran the
-// refresh has been recycled.
+// Per-source keys so parallel refreshes can't overwrite each other.
+// Each source writes to rs:diagnostics:source:{source}.
+// The GET /api/jobs/diagnostics endpoint scans all per-source keys and
+// reassembles them into a single LatestRefreshDiagnostics response.
+// Kept for 24h (same TTL as before).
 
-const KEY_DIAGNOSTICS  = "rs:diagnostics:latest";
-const DIAGNOSTICS_TTL  = 60 * 60 * 24; // 24 hours
+const DIAGNOSTICS_TTL    = 60 * 60 * 24; // 24 hours
+const KEY_DIAG_SOURCE    = (source: string) => `rs:diagnostics:source:${source}`;
 
-/** Persist the completed diagnostics blob. No-op if Redis not configured. */
+/** Persist diagnostics for a single source. No-op if Redis not configured. */
+export async function saveSourceDiagToRedis(source: string, data: unknown): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.set(KEY_DIAG_SOURCE(source), JSON.stringify(data), { ex: DIAGNOSTICS_TTL });
+  } catch (e) {
+    console.error(`[redis] saveSourceDiagToRedis failed for ${source}:`, e);
+  }
+}
+
+/**
+ * Load all per-source diagnostics blobs.
+ * Returns null if none exist or Redis not configured.
+ */
+export async function getAllSourceDiagsFromRedis(): Promise<unknown[] | null> {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const keys: string[] = [];
+    let cursor = 0;
+    do {
+      const [nextCursor, batch] = await r.scan(cursor, {
+        match: "rs:diagnostics:source:*",
+        count: 100,
+      });
+      keys.push(...(batch as string[]));
+      cursor = Number(nextCursor);
+    } while (cursor !== 0);
+
+    if (keys.length === 0) return null;
+    const values = await r.mget<string[]>(...keys);
+    return values
+      .filter((v): v is string => v !== null && v !== undefined)
+      .map(v => (typeof v === "string" ? JSON.parse(v) : v));
+  } catch (e) {
+    console.error("[redis] getAllSourceDiagsFromRedis failed:", e);
+    return null;
+  }
+}
+
+// ── Legacy single-key helpers (kept for backward compatibility) ───────────
+const KEY_DIAGNOSTICS = "rs:diagnostics:latest";
+
+/** @deprecated Use saveSourceDiagToRedis instead. */
 export async function saveDiagnosticsToRedis(data: unknown): Promise<void> {
   const r = getRedis();
   if (!r) return;
@@ -107,7 +153,7 @@ export async function saveDiagnosticsToRedis(data: unknown): Promise<void> {
   }
 }
 
-/** Load the latest diagnostics blob. Returns null if absent or Redis not configured. */
+/** @deprecated Use getAllSourceDiagsFromRedis instead. */
 export async function getStoredDiagnostics<T>(): Promise<T | null> {
   const r = getRedis();
   if (!r) return null;

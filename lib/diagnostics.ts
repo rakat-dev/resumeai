@@ -5,8 +5,9 @@
 //
 // In-memory singleton = fast within-run upserts.
 // Redis = survives serverless instance recycling; 24h TTL.
-// Only the LATEST refresh is kept.
-import { saveDiagnosticsToRedis, getStoredDiagnostics } from "@/lib/redis";
+// Each source writes to its own key (rs:diagnostics:source:{source}) so
+// parallel refreshes never overwrite each other.
+import { saveSourceDiagToRedis, getAllSourceDiagsFromRedis } from "@/lib/redis";
 
 export type DropReason =
   | "date"
@@ -100,17 +101,50 @@ export function upsertSourceDiagnostics(d: SourceDiagnostics): void {
 }
 
 export async function finishDiagnosticsRun(): Promise<void> {
-  if (_latest) {
-    _latest.refresh_finished_at = new Date().toISOString();
-    await saveDiagnosticsToRedis(_latest);
-  }
+  if (!_latest) return;
+  _latest.refresh_finished_at = new Date().toISOString();
+  // Write each source to its own Redis key so parallel refreshes
+  // (one serverless invocation per source) never overwrite each other.
+  await Promise.all(
+    _latest.sources.map(s =>
+      saveSourceDiagToRedis(s.source, {
+        refresh_started_at:  _latest!.refresh_started_at,
+        refresh_finished_at: _latest!.refresh_finished_at,
+        source_diag:         s,
+      }),
+    ),
+  );
 }
 
 export async function getLatestDiagnostics(): Promise<LatestRefreshDiagnostics | null> {
   if (_latest) return _latest;
-  // In-memory is empty — this is a different serverless instance from the one
-  // that ran the refresh. Fall back to the Redis-persisted copy.
-  return getStoredDiagnostics<LatestRefreshDiagnostics>();
+  // In-memory is empty — different serverless instance from the one that ran
+  // the refresh. Reassemble from per-source Redis keys.
+  const entries = await getAllSourceDiagsFromRedis();
+  if (!entries || entries.length === 0) return null;
+
+  type PerSourceEntry = {
+    refresh_started_at:  string;
+    refresh_finished_at?: string;
+    source_diag:         SourceDiagnostics;
+  };
+
+  const parsed = entries as PerSourceEntry[];
+  const startedAt = parsed.reduce(
+    (min, e) => (e.refresh_started_at < min ? e.refresh_started_at : min),
+    parsed[0].refresh_started_at,
+  );
+  const finishedAt = parsed.reduce<string | undefined>((max, e) => {
+    if (!e.refresh_finished_at) return max;
+    return !max || e.refresh_finished_at > max ? e.refresh_finished_at : max;
+  }, undefined);
+
+  return {
+    refresh_started_at:  startedAt,
+    refresh_finished_at: finishedAt,
+    sources:             parsed.map(e => e.source_diag),
+    global_warnings:     [],
+  };
 }
 
 // ── Sample helpers ────────────────────────────────────────────────────────
