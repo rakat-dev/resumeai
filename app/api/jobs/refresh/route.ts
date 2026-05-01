@@ -34,6 +34,9 @@ import { fetchJpmorganJobs } from "@/lib/scrapers/jpmorgan";
 // Greenhouse public boards-api adapter (10-tenant scope, per-tenant filters,
 // per-tenant + aggregate diagnostics). Source name stays "greenhouse".
 import { fetchGreenhouseJobs, type GreenhouseAdapterResult } from "@/lib/scrapers/greenhouse";
+// Ashby posting-api adapter (3-tenant scope: Ramp, Benchling, Quora). Same
+// per-tenant filter parity as greenhouse.ts. Source name is "ashby".
+import { fetchAshbyJobs } from "@/lib/scrapers/ashby";
 import { getSourceCooldownMs, setSourceCooldown } from "@/lib/redis";
 
 const JSEARCH_COOLDOWN_SECONDS = 15 * 60; // 15 min after a 429
@@ -284,7 +287,7 @@ function markDone(company: string, source: RefreshSource,
 
 // ── Source caps ────────────────────────────────────────────────────────────
 const SOURCE_STORE_CAPS: Record<string, number> = {
-  greenhouse: 3000, workday: 1500, jsearch: 500,
+  greenhouse: 3000, ashby: 1000, workday: 1500, jsearch: 500,
   adzuna: 1000, jooble: 1000,
   phenom: 800,              // CVS Health alone returns ~215 IT jobs; cap at 800 leaves headroom for future Phenom tenants
   meta: 1000,               // Meta sitemap exposes ~918 jobs, ~711 of those US; after title filter expect 150-250
@@ -569,6 +572,31 @@ async function fetchGreenhouseSource(): Promise<{ raw: RawJob[]; fetched: number
       title:       p.title,
       location:    p.location,
       description: p.description,    // already cleaned plain text — normalizeJobs is idempotent on clean text
+      applyUrl:    p.apply_url,
+      postedAt:    p.posted_at,
+      type:        "Full-time",
+    }));
+    return { raw, fetched: result.diagnostics.fetched_from_api, error: null, adapterDiagnostics: result.diagnostics, http_errors: result.http_errors };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { raw: [], fetched: 0, error: msg };
+  }
+}
+
+// ── 1a-bis. Ashby ──────────────────────────────────────────────────────────
+// Adapter logic lives in lib/scrapers/ashby.ts (3-tenant scope: Ramp,
+// Benchling, Quora). Mirrors fetchGreenhouseSource exactly — maps
+// ParsedAshbyJob[] → RawJob[].
+async function fetchAshbySource(): Promise<{ raw: RawJob[]; fetched: number; error: string | null; adapterDiagnostics?: AdapterDropCounts; http_errors?: GreenhouseAdapterResult["http_errors"] }> {
+  try {
+    const result = await fetchAshbyJobs();
+    const raw: RawJob[] = result.jobs.map(p => ({
+      id:          p.id,
+      source:      "ashby",
+      company:     p.company,
+      title:       p.title,
+      location:    p.location,
+      description: p.description,
       applyUrl:    p.apply_url,
       postedAt:    p.posted_at,
       type:        "Full-time",
@@ -1346,6 +1374,7 @@ export async function POST(req: NextRequest) {
   const tasks: Promise<void>[] = [];
 
   if (run("greenhouse")) tasks.push(ingestSource("greenhouse", fetchGreenhouseSource, "greenhouse").then(r => { results.greenhouse = r; }));
+  if (run("ashby"))      tasks.push(ingestSource("ashby",      fetchAshbySource,      "ashby"     ).then(r => { results.ashby      = r; }));
   if (run("workday"))    tasks.push(ingestSource("workday",    fetchWorkdaySource,    "workday"   ).then(r => { results.workday    = r; }));
   if (run("jsearch"))    tasks.push(ingestSource("jsearch",    fetchJSearchSource,    "jsearch"   ).then(r => { results.jsearch    = r; }));
   if (run("adzuna"))     tasks.push(ingestSource("adzuna",     fetchAdzunaSource,     "adzuna"    ).then(r => { results.adzuna     = r; }));

@@ -15,6 +15,7 @@ export type RefreshStatus =
 
 export type RefreshSource =
   | "greenhouse"
+  | "ashby"                        // Ashby posting-api adapter (lib/scrapers/ashby.ts)
   | "workday"
   | "jsearch"
   | "adzuna"
