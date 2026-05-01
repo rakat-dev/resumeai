@@ -70,6 +70,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
     note: "HTTP 422 on aexp.wd5/globalcareers, aexp.wd1/External, americanexpress.wd1/External (2026-04-16 probe). Cloudflare bot protection. No direct source currently working; Adzuna also returns 0. TODO: try Oracle HCM (may require careersUrl like careers.americanexpress.com exposed via browser)." },
   { company: "Deloitte",        ats: "workday", careersUrl: "https://deloitte.wd5.myworkdayjobs.com/DTUSCareers",               adapter: "workday", enabled: true  },
   { company: "Lockheed Martin", ats: "workday", careersUrl: "https://lmcocareers.wd5.myworkdayjobs.com/LMCareers",              adapter: "workday", enabled: true  },
+  { company: "Zoom",          ats: "workday", careersUrl: "https://zoom.wd5.myworkdayjobs.com/Zoom",                          adapter: "workday", enabled: true,
+    note: "Probed 2026-04-30: HTTP 200, 28 total, 24 adapter_kept. Clean city/state locations (Seattle WA, San Jose CA, Remote US). Site path is 'Zoom' not 'External'." },
 
   // ── ORACLE HCM ────────────────────────────────────────────────────────────
   {
@@ -94,7 +96,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
 
   // ── GREENHOUSE ────────────────────────────────────────────────────────────
   { company: "Databricks",   ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/databricks",   adapter: "greenhouse", enabled: true },
-  { company: "Snowflake",    ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/snowflake",    adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s — Snowflake is not on Greenhouse. Sourced via Adzuna targeted." },
+  { company: "Snowflake",    ats: "workday", careersUrl: "https://snowflake.wd1.myworkdayjobs.com/External", adapter: "workday", enabled: false,
+    note: "Workday confirmed. HTTP 422/401 on all slug variants (wd1/External, wd5/External, wd1/Snowflake) — Cloudflare bot protection blocks serverless fetches. Not on Greenhouse (404). Re-enable if bypass available." },
   { company: "HashiCorp",    ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/hashicorp",    adapter: "greenhouse", enabled: false, note: "Greenhouse slug 404s — HashiCorp not on Greenhouse. Adzuna has no real matches either. TODO: find real ATS." },
   { company: "Cloudflare",   ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/cloudflare",   adapter: "greenhouse", enabled: true },
   { company: "MongoDB",      ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/mongodb",      adapter: "greenhouse", enabled: true },
@@ -109,7 +112,8 @@ export const COMPANY_ATS_REGISTRY: CompanyAtsConfig[] = [
   { company: "Ramp",         ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/ramp",         adapter: "greenhouse", enabled: true },
   { company: "Plaid",        ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/plaid",        adapter: "greenhouse", enabled: true },
   { company: "Airbnb",       ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/airbnb",       adapter: "greenhouse", enabled: true },
-  { company: "DoorDash",     ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/doordash",     adapter: "greenhouse", enabled: true },
+  { company: "DoorDash",     ats: "workday", careersUrl: "https://doordash.wd5.myworkdayjobs.com/External", adapter: "workday", enabled: false,
+    note: "Workday confirmed. HTTP 422 on all slug variants (wd5/External, wd1/External, wd5/DoorDash) — Cloudflare bot protection blocks serverless fetches. Re-enable if Cloudflare bypass is available." },
   { company: "Coinbase",     ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/coinbase",     adapter: "greenhouse", enabled: true },
   { company: "Robinhood",    ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/robinhood",    adapter: "greenhouse", enabled: true },
   { company: "Amplitude",    ats: "greenhouse", careersUrl: "https://boards.greenhouse.io/amplitude",    adapter: "greenhouse", enabled: true },
