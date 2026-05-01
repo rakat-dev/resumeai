@@ -43,6 +43,8 @@ export const GREENHOUSE_TENANTS = [
   "plaid", "notion", "figma", "affirm", "flexport",
   // Batch 2 (2026-04-30)
   "brex", "asana", "instacart", "reddit", "lyft",
+  // Batch 3 (2026-04-30)
+  "dropbox",
 ] as const;
 
 const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
@@ -62,6 +64,8 @@ const GREENHOUSE_DISPLAY_NAMES: Record<string, string> = {
   instacart: "Instacart",
   reddit:    "Reddit",
   lyft:      "Lyft",
+  // Batch 3
+  dropbox:   "Dropbox",
 };
 
 const GREENHOUSE_MAX_AGE_DAYS    = 14;
