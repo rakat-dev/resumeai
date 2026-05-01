@@ -6,6 +6,13 @@ import type {
   SourceDiagnostics,
   RejectedJobSample,
 } from "@/lib/diagnostics";
+import {
+  ATS_PROBE_RESULTS,
+  groupProbesByBucket,
+  BUCKET_META,
+  type FailureBucket,
+  type AtsProbeResult,
+} from "@/lib/atsProbeResults";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function pct(n: number, d: number): string {
@@ -203,6 +210,120 @@ function DriftWarnings({ diag }: { diag: LatestRefreshDiagnostics }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// ── ATS Probe Log ─────────────────────────────────────────────────────────────
+const BUCKET_STYLES: Record<FailureBucket, { bg: string; text: string; border: string }> = {
+  viable:             { bg: "bg-green-50",  text: "text-green-700",  border: "border-green-200" },
+  cloudflare_blocked: { bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-200" },
+  location_unusable:  { bg: "bg-yellow-50", text: "text-yellow-700", border: "border-yellow-200" },
+  date_unparseable:   { bg: "bg-yellow-50", text: "text-yellow-700", border: "border-yellow-200" },
+  not_on_ats:         { bg: "bg-gray-50",   text: "text-gray-500",   border: "border-gray-200" },
+  endpoint_unknown:   { bg: "bg-gray-50",   text: "text-gray-400",   border: "border-gray-200" },
+};
+
+function BucketPill({ bucket }: { bucket: FailureBucket }) {
+  const s = BUCKET_STYLES[bucket];
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold border ${s.bg} ${s.text} ${s.border} whitespace-nowrap`}>
+      {BUCKET_META[bucket].label}
+    </span>
+  );
+}
+
+function ProbeRow({ r }: { r: AtsProbeResult }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <tr className="border-t border-gray-100 hover:bg-gray-50 cursor-pointer" onClick={() => setOpen(o => !o)}>
+        <td className="px-3 py-2 text-xs font-medium text-gray-800 whitespace-nowrap">{r.company}</td>
+        <td className="px-3 py-2 text-xs text-gray-500 uppercase tracking-wide">{r.ats}</td>
+        <td className="px-3 py-2 font-mono text-[10px] text-gray-400 max-w-[180px] truncate">{r.endpoint.split("/wday/")[0]}</td>
+        <td className="px-3 py-2 text-center">
+          <span className={`font-mono text-xs font-semibold ${r.http_status === 200 ? "text-green-600" : "text-red-500"}`}>
+            {r.http_status}
+          </span>
+        </td>
+        <td className="px-3 py-2 text-right font-mono text-xs">{r.fetched || "—"}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs text-amber-600">{r.dropped_by_date || "—"}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs text-amber-600">{r.dropped_by_location || "—"}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs text-amber-600">{r.dropped_by_title || "—"}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs font-semibold text-green-700">{r.adapter_kept || "—"}</td>
+        <td className="px-3 py-2"><BucketPill bucket={r.failure_bucket} /></td>
+        <td className="px-3 py-2 text-gray-400 text-xs">{open ? "▾" : "▸"}</td>
+      </tr>
+      {open && (
+        <tr className="bg-gray-50 border-t border-gray-100">
+          <td colSpan={11} className="px-4 py-3">
+            <div className="space-y-1 text-xs">
+              <div><span className="font-medium text-gray-600">Endpoint:</span> <code className="bg-gray-100 px-1 rounded">{r.endpoint}</code></div>
+              <div><span className="font-medium text-gray-600">Reason:</span> <span className="text-gray-700">{r.reason}</span></div>
+              <div><span className="font-medium text-gray-600">Next action:</span> <span className="text-blue-700">{r.recommended_next_action}</span></div>
+              <div><span className="font-medium text-gray-600">Probed:</span> <span className="text-gray-400">{r.probed_at}</span></div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function AtsProbelog() {
+  const grouped = groupProbesByBucket(ATS_PROBE_RESULTS);
+  const bucketOrder: FailureBucket[] = [
+    "viable", "cloudflare_blocked", "location_unusable", "date_unparseable", "not_on_ats", "endpoint_unknown",
+  ];
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold text-gray-700 mb-1">ATS Expansion Probe Log</h2>
+      <p className="text-xs text-gray-400 mb-3">
+        Classification of every candidate source probed. Static — updated after each expansion batch.
+        No sources here are active unless explicitly added to the registry.
+      </p>
+
+      {/* Bucket summary pills */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        {bucketOrder.map(bucket => {
+          const count = grouped[bucket].length;
+          if (count === 0) return null;
+          const s = BUCKET_STYLES[bucket];
+          return (
+            <div key={bucket} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs ${s.bg} ${s.text} ${s.border}`}>
+              <span className="font-semibold">{count}</span>
+              <span>{BUCKET_META[bucket].label}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Full probe table */}
+      <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <table className="min-w-full text-xs">
+          <thead>
+            <tr className="bg-gray-50 text-left text-gray-500 uppercase tracking-wide text-[10px]">
+              <th className="px-3 py-2 font-medium">Company</th>
+              <th className="px-3 py-2 font-medium">ATS</th>
+              <th className="px-3 py-2 font-medium">Endpoint</th>
+              <th className="px-3 py-2 text-center font-medium">HTTP</th>
+              <th className="px-3 py-2 text-right font-medium">Fetched</th>
+              <th className="px-3 py-2 text-right font-medium">−Date</th>
+              <th className="px-3 py-2 text-right font-medium">−Loc</th>
+              <th className="px-3 py-2 text-right font-medium">−Title</th>
+              <th className="px-3 py-2 text-right font-medium">Kept</th>
+              <th className="px-3 py-2 font-medium">Bucket</th>
+              <th className="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y-0">
+            {bucketOrder.map(bucket =>
+              grouped[bucket].map(r => <ProbeRow key={`${r.company}-${r.ats}`} r={r} />)
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -409,6 +530,9 @@ export default function DiagnosticsPage() {
                 </table>
               </div>
             </section>
+
+            {/* ── Section F: ATS Probe Log ─────────────────────────────── */}
+            <AtsProbelog />
 
             {/* ── Section D: Rejected samples ──────────────────────────── */}
             <section>
