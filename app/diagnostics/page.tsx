@@ -313,9 +313,20 @@ function AdapterFunnelRow({ src }: { src: SourceDiagnostics }) {
 
 // ── Pipeline funnel row ───────────────────────────────────────────────────────
 function PipelineFunnelRow({ src }: { src: SourceDiagnostics }) {
+  const noTelemetry = NO_ADAPTER_DIAG_SOURCES.has(src.source);
   return (
     <tr className="border-t border-gray-100 hover:bg-gray-50">
-      <td className="px-3 py-2 font-mono text-xs text-gray-700 whitespace-nowrap">{src.source}</td>
+      <td className="px-3 py-2 font-mono text-xs text-gray-700 whitespace-nowrap">
+        {src.source}
+        {noTelemetry && (
+          <span
+            className="ml-1.5 inline-block text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-sans tracking-wide"
+            title="Adapter does not emit per-job diagnostics — adapter-stage drop counts not captured"
+          >
+            no telemetry
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 text-right font-mono text-xs">{src.adapter_kept}</td>
       <td className="px-3 py-2 text-right font-mono text-xs">
         <Badge n={src.pipeline_title_drop} warn={src.pipeline_title_drop > 0} />
