@@ -11,7 +11,7 @@
 // the location-string canonical parse.
 
 import { shouldIncludeTitle, isUSLocation } from "../jobUtils";
-import { type AdapterDropCounts } from "../diagnostics";
+import { type AdapterDropCounts, type RejectedJobSample, pushSample, SAMPLE_LIMIT } from "../diagnostics";
 
 export interface JpmorganAdapterResult {
   jobs:        ParsedJpmorganJob[];
@@ -50,7 +50,6 @@ const DETAIL_CONCURRENCY         = 6;
 // At concurrency 6 × ~400ms per call, 200 detail fetches finish in ~14s.
 const MAX_DETAIL_FETCHES         = 200;
 const DESCRIPTION_PREVIEW_CHARS  = 500;
-const REJECT_SAMPLE_LIMIT        = 5;
 const PAGE_FRESHNESS_STOP_RATIO  = 0.5;
 
 const JPM_USER_AGENT =
@@ -268,16 +267,8 @@ export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
   let discarded_location    = 0;
   let discarded_duplicate   = 0;
   let stoppedReason: "normal" | "budget_exceeded" = "normal";
-  const rejectSamples: Record<string, Array<{ title: string; reason: string }>> = {
-    discarded_old_date:  [],
-    discarded_no_date:   [],
-    discarded_title:     [],
-    discarded_location:  [],
-  };
-  const pushSample = (bucket: string, title: string, reason: string) => {
-    const arr = rejectSamples[bucket];
-    if (arr && arr.length < REJECT_SAMPLE_LIMIT) arr.push({ title, reason });
-  };
+  const adapterSamples: RejectedJobSample[] = [];
+  const sampleCounts: Record<string, number> = {};
 
   // ── Phase 1: paginated listing across all queries ───────────────────
   queryLoop: for (const query of JPM_QUERIES.slice(0, MAX_QUERIES)) {
@@ -292,10 +283,32 @@ export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
       let pageOutOfWindow = 0;
 
       for (const r of rawPage) {
-        const reqId = r.Id;
-        if (!reqId) { discarded_duplicate++; continue; }
-        if (seen.has(reqId)) { discarded_duplicate++; continue; }
-        const title = r.Title ?? "";
+        const reqId    = r.Id;
+        const title    = r.Title ?? "";
+        const loc      = r.PrimaryLocation ?? "United States";
+        const company  = "JPMorgan Chase";
+        // apply_url derivable from reqId; "#" only when the row has no Id
+        // at all (the no-Id branch below — also the only case where a real
+        // candidate URL can't be built).
+        const apply_url = reqId ? `${JPM_APPLY_URL_BASE}/${reqId}` : "#";
+        if (!reqId) {
+          discarded_duplicate++;
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "jpmorgan_v2", reason: "duplicate", stage: "adapter",
+            url: apply_url,
+          });
+          continue;
+        }
+        if (seen.has(reqId)) {
+          discarded_duplicate++;
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "jpmorgan_v2", reason: "duplicate", stage: "adapter",
+            url: apply_url,
+          });
+          continue;
+        }
         const listingTs = r.PostedDate ? Date.parse(r.PostedDate) : NaN;
         const ageDays = Number.isFinite(listingTs)
           ? (Date.now() - listingTs) / 86_400_000
@@ -304,25 +317,40 @@ export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
         // route's null-date filter — meta is the only allowed exception).
         if (ageDays === null) {
           discarded_no_date++;
-          pushSample("discarded_no_date", title, `raw="${r.PostedDate ?? ""}"`);
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc,
+            source: "jpmorgan_v2", reason: "date", stage: "adapter",
+            url: apply_url,
+          });
           pageOutOfWindow++;
           continue;
         }
         if (ageDays > JPM_MAX_AGE_DAYS) {
           discarded_old_date++;
-          pushSample("discarded_old_date", title, `age=${ageDays.toFixed(1)}d`);
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc, posted_at: r.PostedDate,
+            source: "jpmorgan_v2", reason: "date", stage: "adapter",
+            url: apply_url,
+          });
           pageOutOfWindow++;
           continue;
         }
         if (!shouldIncludeTitle(title)) {
           discarded_title++;
-          pushSample("discarded_title", title, "title rejected");
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc, posted_at: r.PostedDate,
+            source: "jpmorgan_v2", reason: "title", stage: "adapter",
+            url: apply_url,
+          });
           continue;
         }
-        const loc = r.PrimaryLocation ?? "United States";
         if (!isUSLocationJpm(loc, r.PrimaryLocationCountry)) {
           discarded_location++;
-          pushSample("discarded_location", title, `loc="${loc}" country=${r.PrimaryLocationCountry ?? ""}`);
+          pushSample(adapterSamples, sampleCounts, {
+            title, company, location: loc, posted_at: r.PostedDate,
+            source: "jpmorgan_v2", reason: "location", stage: "adapter",
+            url: apply_url,
+          });
           continue;
         }
         seen.add(reqId);
@@ -408,12 +436,6 @@ export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
     `tier_low=${tierCounts.low ?? 0} tier_date_missing=${tierCounts.date_missing ?? 0} ` +
     `elapsed_ms=${Date.now() - startMs} stoppedReason=${stoppedReason}`,
   );
-  for (const [bucket, samples] of Object.entries(rejectSamples)) {
-    if (samples.length === 0) continue;
-    for (const s of samples) {
-      console.log(`[jpmorgan_v2:${bucket}] title="${s.title}" reason="${s.reason}"`);
-    }
-  }
 
   const diagnostics: AdapterDropCounts = {
     fetched_from_api:       totalFetched,
@@ -423,20 +445,7 @@ export async function fetchJpmorganJobs(): Promise<JpmorganAdapterResult> {
     dropped_by_sponsorship: 0,
     dropped_by_duplicate:   discarded_duplicate,
     dropped_by_mapping:     0,
-    samples: [
-      ...rejectSamples.discarded_old_date.map(s => ({
-        title: s.title, source: "jpmorgan_v2" as const, reason: "date" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-      ...rejectSamples.discarded_no_date.map(s => ({
-        title: s.title, source: "jpmorgan_v2" as const, reason: "date" as const, stage: "adapter" as const,
-      })),
-      ...rejectSamples.discarded_title.map(s => ({
-        title: s.title, source: "jpmorgan_v2" as const, reason: "title" as const, stage: "adapter" as const,
-      })),
-      ...rejectSamples.discarded_location.map(s => ({
-        title: s.title, source: "jpmorgan_v2" as const, reason: "location" as const, stage: "adapter" as const, snippet: s.reason,
-      })),
-    ],
+    samples:                adapterSamples,
   };
   return { jobs: out, diagnostics };
 }
