@@ -33,6 +33,71 @@ function fmtDuration(startIso?: string, endIso?: string): string {
   return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
 }
 
+// Sources whose adapter doesn't emit per-job drop counts. Their adapter-stage
+// drop cells render as "—" instead of "0" — a misleading zero would imply the
+// adapter measured those jobs and decided to keep them.
+const NO_ADAPTER_DIAG_SOURCES = new Set<string>([
+  "workday", "jsearch", "adzuna", "adzuna_targeted", "jooble",
+  "phenom", "google_v2", "meta", "playwright_apple", "walmart_v2",
+]);
+
+function NotCapturedCell() {
+  return (
+    <span
+      title="Adapter does not emit per-job diagnostics for this source — count not captured"
+      className="text-gray-300 font-mono"
+    >
+      —
+    </span>
+  );
+}
+
+type DropReason = RejectedJobSample["reason"];
+
+const ADAPTER_REASONS: { reason: DropReason; label: string }[] = [
+  { reason: "date",        label: "Date" },
+  { reason: "location",    label: "Location" },
+  { reason: "title",       label: "Title" },
+  { reason: "sponsorship", label: "Sponsorship" },
+  { reason: "duplicate",   label: "Duplicate" },
+  { reason: "mapping",     label: "Mapping / description" },
+];
+
+const PIPELINE_REASONS: { reason: DropReason; label: string }[] = [
+  { reason: "title",       label: "Title" },
+  { reason: "location",    label: "Location" },
+  { reason: "date",        label: "Date / horizon" },
+  { reason: "sponsorship", label: "Sponsorship" },
+  { reason: "fulltime",    label: "Full-time" },
+  { reason: "clearance",   label: "Clearance" },
+  { reason: "duplicate",   label: "Duplicate" },
+];
+
+function adapterDropCount(src: SourceDiagnostics, reason: DropReason): number {
+  switch (reason) {
+    case "date":        return src.dropped_by_date;
+    case "location":    return src.dropped_by_location;
+    case "title":       return src.dropped_by_title;
+    case "sponsorship": return src.dropped_by_sponsorship;
+    case "duplicate":   return src.dropped_by_duplicate;
+    case "mapping":     return src.dropped_by_mapping;
+    default: return 0;
+  }
+}
+
+function pipelineDropCount(src: SourceDiagnostics, reason: DropReason): number {
+  switch (reason) {
+    case "title":       return src.pipeline_title_drop;
+    case "location":    return src.pipeline_location_drop;
+    case "date":        return src.pipeline_date_drop;
+    case "sponsorship": return src.pipeline_sponsorship_drop;
+    case "fulltime":    return src.pipeline_fulltime_drop;
+    case "clearance":   return src.pipeline_clearance_drop;
+    case "duplicate":   return src.pipeline_duplicate_drop;
+    default: return 0;
+  }
+}
+
 function Badge({ n, warn, danger }: { n: number; warn?: boolean; danger?: boolean }) {
   const base = "inline-block px-1.5 py-0.5 rounded text-xs font-mono font-semibold";
   if (danger && n > 0) return <span className={`${base} bg-red-100 text-red-700`}>{n}</span>;
@@ -66,17 +131,29 @@ function SampleCard({ s }: { s: RejectedJobSample }) {
 }
 
 // ── Per-source samples panel ──────────────────────────────────────────────────
-function SourceSamples({ src }: { src: SourceDiagnostics }) {
-  const [open, setOpen] = useState(false);
-  const samples = src.rejected_samples ?? [];
-  if (samples.length === 0) return <span className="text-gray-400 text-xs">none</span>;
+// Groups by stage (adapter vs pipeline), then by reason. For each (stage,
+// reason) where a drop count exists, shows the captured samples — or
+// "Drops counted but no samples captured" when the count is non-zero but
+// no sample rows reached the diagnostics row. Sample collection is
+// adapter-side, not synthesised here, so a missing-samples state is real
+// signal: it means the adapter counted but didn't keep an example.
+function ReasonGroup({ label, count, samples }: {
+  label: string;
+  count: number;
+  samples: RejectedJobSample[];
+}) {
   return (
-    <div>
-      <button onClick={() => setOpen(o => !o)}
-        className="text-xs text-blue-600 hover:underline">
-        {open ? "▾ hide" : `▸ show ${samples.length}`}
-      </button>
-      {open && (
+    <div className="ml-4 mb-3">
+      <div className="text-xs">
+        <span className="font-medium text-gray-700">{label}</span>
+        <span className="text-gray-400 ml-2">
+          {count} drop{count !== 1 ? "s" : ""}
+          {samples.length > 0 && ` · ${samples.length} sample${samples.length !== 1 ? "s" : ""} captured`}
+        </span>
+      </div>
+      {samples.length === 0 ? (
+        <div className="text-xs text-gray-400 italic mt-0.5">Drops counted but no samples captured</div>
+      ) : (
         <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
           {samples.map((s, i) => <SampleCard key={i} s={s} />)}
         </div>
@@ -85,36 +162,143 @@ function SourceSamples({ src }: { src: SourceDiagnostics }) {
   );
 }
 
-// ── Funnel row (adapter stage) ────────────────────────────────────────────────
-function AdapterFunnelRow({ src }: { src: SourceDiagnostics }) {
-  const hasAdapterDrops =
-    src.dropped_by_date > 0 || src.dropped_by_location > 0 ||
-    src.dropped_by_title > 0 || src.dropped_by_sponsorship > 0 ||
-    src.dropped_by_duplicate > 0 || src.dropped_by_mapping > 0 ||
-    src.dropped_by_http_error > 0;
+function SourceSamples({ src }: { src: SourceDiagnostics }) {
+  const [open, setOpen] = useState(false);
+  const samples = src.rejected_samples ?? [];
+  const noTelemetry = NO_ADAPTER_DIAG_SOURCES.has(src.source);
+
+  // Bucket samples by stage:reason for display.
+  const samplesByKey = new Map<string, RejectedJobSample[]>();
+  for (const s of samples) {
+    const k = `${s.stage}:${s.reason}`;
+    const arr = samplesByKey.get(k) ?? [];
+    arr.push(s);
+    samplesByKey.set(k, arr);
+  }
+
+  const adapterGroups = ADAPTER_REASONS
+    .map(r => ({
+      ...r,
+      count: adapterDropCount(src, r.reason),
+      samples: samplesByKey.get(`adapter:${r.reason}`) ?? [],
+    }))
+    .filter(g => g.count > 0 || g.samples.length > 0);
+
+  const pipelineGroups = PIPELINE_REASONS
+    .map(r => ({
+      ...r,
+      count: pipelineDropCount(src, r.reason),
+      samples: samplesByKey.get(`pipeline:${r.reason}`) ?? [],
+    }))
+    .filter(g => g.count > 0 || g.samples.length > 0);
+
+  // Source has nothing to show at all — let the parent skip rendering.
+  if (
+    samples.length === 0 &&
+    adapterGroups.length === 0 &&
+    pipelineGroups.length === 0 &&
+    !noTelemetry
+  ) {
+    return null;
+  }
 
   return (
+    <div className="border border-gray-200 rounded-lg p-3">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between text-left"
+      >
+        <span className="font-mono text-sm font-semibold text-gray-700">
+          {src.source}
+          {noTelemetry && (
+            <span
+              className="ml-2 inline-block text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-sans tracking-wide"
+              title="Adapter does not emit per-job diagnostics for this source"
+            >
+              no telemetry
+            </span>
+          )}
+        </span>
+        <span className="text-xs text-gray-400">
+          {samples.length} sample{samples.length !== 1 ? "s" : ""} · {open ? "▾ hide" : "▸ show"}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-3 space-y-4">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-blue-700 mb-2">
+              Adapter drops
+            </div>
+            {noTelemetry ? (
+              <div className="ml-4 text-xs italic text-gray-400">
+                Adapter telemetry not captured for this source — no per-reason breakdown available.
+              </div>
+            ) : adapterGroups.length === 0 ? (
+              <div className="ml-4 text-xs text-gray-400">No adapter drops in this run.</div>
+            ) : (
+              adapterGroups.map(g => (
+                <ReasonGroup key={g.reason} label={g.label} count={g.count} samples={g.samples} />
+              ))
+            )}
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-purple-700 mb-2">
+              Pipeline drops
+            </div>
+            {pipelineGroups.length === 0 ? (
+              <div className="ml-4 text-xs text-gray-400">No pipeline drops in this run.</div>
+            ) : (
+              pipelineGroups.map(g => (
+                <ReasonGroup key={g.reason} label={g.label} count={g.count} samples={g.samples} />
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Funnel row (adapter stage) ────────────────────────────────────────────────
+// Sources in NO_ADAPTER_DIAG_SOURCES don't emit per-job drop counts; their
+// adapter-only columns render "—" so a reader can't mistake "untelemetered"
+// for "the adapter measured zero drops." Sponsorship and HTTP errors are
+// route-computed (sponsorship from normalizeJobs, HTTP from fetch errors)
+// so those remain real numbers for every source.
+function AdapterFunnelRow({ src }: { src: SourceDiagnostics }) {
+  const noTelemetry = NO_ADAPTER_DIAG_SOURCES.has(src.source);
+  return (
     <tr className="border-t border-gray-100 hover:bg-gray-50">
-      <td className="px-3 py-2 font-mono text-xs text-gray-700 whitespace-nowrap">{src.source}</td>
+      <td className="px-3 py-2 font-mono text-xs text-gray-700 whitespace-nowrap">
+        {src.source}
+        {noTelemetry && (
+          <span
+            className="ml-1.5 inline-block text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-sans tracking-wide"
+            title="Adapter does not emit per-job diagnostics — adapter-stage drop counts not captured"
+          >
+            no telemetry
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 text-right font-mono text-xs">{src.fetched}</td>
       <td className="px-3 py-2 text-right font-mono text-xs">{src.mapped}</td>
       <td className="px-3 py-2 text-right font-mono text-xs">
-        <Badge n={src.dropped_by_date} warn={src.dropped_by_date > 0} />
+        {noTelemetry ? <NotCapturedCell /> : <Badge n={src.dropped_by_date} warn={src.dropped_by_date > 0} />}
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
-        <Badge n={src.dropped_by_location} warn={src.dropped_by_location > 0} />
+        {noTelemetry ? <NotCapturedCell /> : <Badge n={src.dropped_by_location} warn={src.dropped_by_location > 0} />}
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
-        <Badge n={src.dropped_by_title} warn={src.dropped_by_title > 0} />
+        {noTelemetry ? <NotCapturedCell /> : <Badge n={src.dropped_by_title} warn={src.dropped_by_title > 0} />}
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
         <Badge n={src.dropped_by_sponsorship} warn={src.dropped_by_sponsorship > 0} />
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
-        <Badge n={src.dropped_by_duplicate} />
+        {noTelemetry ? <NotCapturedCell /> : <Badge n={src.dropped_by_duplicate} />}
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
-        <Badge n={src.dropped_by_mapping} warn={src.dropped_by_mapping > 0} />
+        {noTelemetry ? <NotCapturedCell /> : <Badge n={src.dropped_by_mapping} warn={src.dropped_by_mapping > 0} />}
       </td>
       <td className="px-3 py-2 text-right font-mono text-xs">
         <Badge n={src.dropped_by_http_error} danger={src.dropped_by_http_error > 0} />
@@ -439,25 +623,34 @@ export default function DiagnosticsPage() {
 
             {/* ── Section B: Adapter funnel ─────────────────────────────── */}
             <section>
-              <h2 className="text-base font-semibold text-gray-700 mb-1">Adapter Stage</h2>
-              <p className="text-xs text-gray-400 mb-3">
-                What the adapter dropped before handing jobs to the pipeline.
-                Amber = expected signal. Red = HTTP / mapping errors to investigate.
-              </p>
+              <div className="border-l-4 border-blue-500 bg-blue-50 px-3 py-2 mb-3 rounded">
+                <div className="text-[10px] uppercase tracking-widest text-blue-600 font-semibold">
+                  Stage 1 of 2 · Adapter
+                </div>
+                <h2 className="text-base font-semibold text-blue-900">
+                  What the source returned, before pipeline filters
+                </h2>
+                <p className="text-xs text-blue-800/70 mt-0.5">
+                  Drop columns count individual jobs the adapter rejected. Amber = expected signal.
+                  The HTTP errors column counts upstream/request failures, not job drops.
+                  Sources marked <em>no telemetry</em> don&rsquo;t emit per-job adapter counts —
+                  drop cells render as &mdash; rather than 0.
+                </p>
+              </div>
               <div className="overflow-x-auto rounded-lg border border-gray-200">
                 <table className="min-w-full text-xs">
                   <thead>
                     <tr className="bg-gray-50 text-left text-gray-500 uppercase tracking-wide text-[10px]">
                       <th className="px-3 py-2 font-medium">Source</th>
-                      <th className="px-3 py-2 text-right font-medium">Fetched</th>
-                      <th className="px-3 py-2 text-right font-medium">Mapped</th>
-                      <th className="px-3 py-2 text-right font-medium">−Date</th>
-                      <th className="px-3 py-2 text-right font-medium">−Loc</th>
-                      <th className="px-3 py-2 text-right font-medium">−Title</th>
-                      <th className="px-3 py-2 text-right font-medium">−Sponsor</th>
-                      <th className="px-3 py-2 text-right font-medium">−Dup</th>
-                      <th className="px-3 py-2 text-right font-medium">−Map</th>
-                      <th className="px-3 py-2 text-right font-medium">−HTTP</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Raw row count returned by the adapter's upstream API">Fetched</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Rows that survived adapter mapping/normalization">Mapped</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped because of date / horizon">−Date</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped because of non-US or unparseable location">−Loc</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped because the title didn't match SWE-IC criteria">−Title</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped because sponsorship was classified as not-supported">−Sponsor</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped as duplicates within this run">−Dup</th>
+                      <th className="px-3 py-2 text-right font-medium" title="Individual jobs dropped due to mapping or description issues">−Map</th>
+                      <th className="px-3 py-2 text-right font-medium text-red-500" title="Upstream HTTP / request failures contacting the source — NOT individual job drops">HTTP errors</th>
                       <th className="px-3 py-2 text-right font-medium">Kept</th>
                     </tr>
                   </thead>
@@ -487,11 +680,18 @@ export default function DiagnosticsPage() {
 
             {/* ── Section C: Pipeline safety-net ───────────────────────── */}
             <section>
-              <h2 className="text-base font-semibold text-gray-700 mb-1">Pipeline Stage</h2>
-              <p className="text-xs text-gray-400 mb-3">
-                Safety-net filters applied after adapter. High numbers here mean the adapter
-                isn't pre-filtering something it should be.
-              </p>
+              <div className="border-l-4 border-purple-500 bg-purple-50 px-3 py-2 mb-3 rounded">
+                <div className="text-[10px] uppercase tracking-widest text-purple-600 font-semibold">
+                  Stage 2 of 2 · Pipeline
+                </div>
+                <h2 className="text-base font-semibold text-purple-900">
+                  Safety-net filters applied after the adapter
+                </h2>
+                <p className="text-xs text-purple-800/70 mt-0.5">
+                  Drop columns count individual jobs the pipeline rejected.
+                  High numbers here mean the adapter isn&rsquo;t pre-filtering something it should be.
+                </p>
+              </div>
               <div className="overflow-x-auto rounded-lg border border-gray-200">
                 <table className="min-w-full text-xs">
                   <thead>
@@ -538,23 +738,19 @@ export default function DiagnosticsPage() {
             <section>
               <h2 className="text-base font-semibold text-gray-700 mb-3">Rejected Job Samples</h2>
               <p className="text-xs text-gray-400 mb-3">
+                Grouped by stage (adapter vs pipeline), then by reason.
                 Up to 10 samples per reason per stage. Use these to spot false positives.
+                A reason that shows &ldquo;Drops counted but no samples captured&rdquo; means the
+                adapter counted the drop but didn&rsquo;t retain an example row.
               </p>
               <div className="space-y-4">
-                {diag.sources
-                  .filter(src => (src.rejected_samples ?? []).length > 0)
-                  .map(src => (
-                    <div key={src.source} className="border border-gray-200 rounded-lg p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-mono text-sm font-semibold text-gray-700">{src.source}</span>
-                        <span className="text-xs text-gray-400">
-                          {src.rejected_samples.length} sample{src.rejected_samples.length !== 1 ? "s" : ""}
-                        </span>
-                      </div>
-                      <SourceSamples src={src} />
-                    </div>
-                  ))}
-                {diag.sources.every(src => (src.rejected_samples ?? []).length === 0) && (
+                {diag.sources.map(src => <SourceSamples key={src.source} src={src} />)}
+                {diag.sources.every(src =>
+                  (src.rejected_samples?.length ?? 0) === 0 &&
+                  ADAPTER_REASONS.every(r => adapterDropCount(src, r.reason) === 0) &&
+                  PIPELINE_REASONS.every(r => pipelineDropCount(src, r.reason) === 0) &&
+                  !NO_ADAPTER_DIAG_SOURCES.has(src.source)
+                ) && (
                   <div className="text-gray-400 text-sm">No rejected samples recorded for this run.</div>
                 )}
               </div>
