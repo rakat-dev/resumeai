@@ -484,7 +484,7 @@ async function ingestSource(
       dropped_by_duplicate:   adp?.dropped_by_duplicate ?? 0,
       dropped_by_mapping:     adp?.dropped_by_mapping   ?? 0,
       dropped_by_http_error:  (adapterHttpErrors?.filter(e => e.status >= 400).length ?? 0),
-      adapter_kept:           normalized.length - sponsorshipDrop,
+      adapter_kept:           normalized.length,
       pipeline_title_drop:       title_removed,
       pipeline_location_drop:    location_removed,
       pipeline_date_drop:        horizon_removed + rejected_no_date,
