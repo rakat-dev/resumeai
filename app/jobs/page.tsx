@@ -757,13 +757,17 @@ export default function JobsPage(){
       setV2Ats(panel.v2ats as ATSResult|null);setStep(panel.step as 0|1|2);
     }
     (async()=>{
+      // Guard against empty-state flicker: set loading=true before the async IDB
+      // read so the spinner shows instead of "No jobs in DB yet" during the await.
+      setLoading(true);
       const CACHE_TTL_MS=5*60*1000;
       const cached=await loadJobCache();
       if(cached && cached.jobs.length>0 && (Date.now()-cached.savedAt)<CACHE_TTL_MS){
         // Cache hit: full jobs (incl. fullDescription) restored — JD available for all jobs
         setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);
+        setLoading(false); // loadJobs not called; clear the guard manually
       } else {
-        // Cache miss or expired: fetch fresh from DB then persist to IDB
+        // Cache miss or expired: loadJobs manages loading state from here
         loadJobs(filters.datePosted,sort);
       }
     })();
