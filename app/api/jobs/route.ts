@@ -45,6 +45,11 @@ export interface Job {
     confidence?: "low" | "normal";
     reason?: string;
   };
+  // ── User state (from job_user_state table) ──
+  // Null = never happened. Undefined = table not queried (shouldn't occur in normal flow).
+  viewedAt?:    string | null;  // ISO timestamp of first view
+  tailoredAt?:  string | null;  // ISO timestamp of first tailor
+  dismissedAt?: string | null;  // ISO timestamp of dismiss; null = not dismissed
 }
 
 export interface SourceStatus {
@@ -218,9 +223,38 @@ export async function GET(req: NextRequest) {
     const batch2Count = rows.filter(r => batch2Companies.includes(r.company)).length;
     console.log(`[/api/jobs] rows=${rows.length} adzuna=${adzCount} batch2=${batch2Count} filter=${filter} sort=${sort}`);
 
-    // Map -> score -> sort -> diversity cap -> paginate
-    const jobs      = rows.map(rowToJob);
-    const scored    = jobs.map(scoreJob);
+    // ── Fetch user state ────────────────────────────────────────────────────
+    // Fetch ALL rows from job_user_state (only jobs the user has interacted
+    // with are present — typically a small set, so no need to filter by job_id).
+    // We do NOT filter dismissed at the DB query level. Dismissed jobs are
+    // removed from the response after the merge step below.
+    const { data: userStates, error: usError } = await supabaseAdmin
+      .from("job_user_state")
+      .select("job_id, viewed_at, tailored_at, dismissed_at");
+    if (usError) {
+      console.warn("[/api/jobs] job_user_state fetch failed (non-fatal):", usError.message);
+    }
+    type UserStateRow = { job_id: string; viewed_at: string | null; tailored_at: string | null; dismissed_at: string | null };
+    const userStateMap = new Map<string, UserStateRow>();
+    (userStates ?? []).forEach((s: UserStateRow) => userStateMap.set(s.job_id, s));
+
+    // Map -> merge user state -> filter dismissed -> score -> sort -> diversity cap -> paginate
+    const jobs = rows.map((r): Job => {
+      const job = rowToJob(r);
+      const us = userStateMap.get(r.id);
+      if (!us) return job;
+      return {
+        ...job,
+        viewedAt:    us.viewed_at    ?? null,
+        tailoredAt:  us.tailored_at  ?? null,
+        dismissedAt: us.dismissed_at ?? null,
+      };
+    });
+
+    // Filter dismissed after merge — never at the DB query level
+    const activeJobs = jobs.filter(j => !j.dismissedAt);
+
+    const scored    = activeJobs.map(scoreJob);
     const sorted    = sortJobs(scored, sort);
     const capped    = applyDiversityCaps(sorted);
     const total     = capped.length;

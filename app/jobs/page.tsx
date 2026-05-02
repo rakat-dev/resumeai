@@ -7,6 +7,8 @@ import { downloadPDF } from "@/lib/downloadPDF";
 import InterviewPanel from "@/components/InterviewPanel";
 import { saveJob, unsaveJob, isJobSaved, type SavedJob } from "@/lib/savedJobs";
 import { getBaseResume, saveBaseResume } from "@/lib/baseResume";
+import { loadJobCache, saveJobCache } from "@/lib/jobCache";
+import JDModal from "@/components/JDModal";
 
 
 // ── URL safety helper ─────────────────────────────────────────────────────
@@ -80,51 +82,6 @@ function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|nu
 // Stores the full jobs array including fullDescription so every job has JD
 // available for tailoring after navigation, without a DB round-trip.
 // sessionStorage cannot hold ~5 MB of JD text; IndexedDB has no practical limit.
-const IDB_NAME    = "resumeai_cache";
-const IDB_STORE   = "kv";
-const IDB_JOB_KEY = "jobs_cache";
-
-function openIDB():Promise<IDBDatabase>{
-  return new Promise((resolve,reject)=>{
-    if(typeof indexedDB==="undefined"){reject(new Error("no IDB"));return;}
-    const req=indexedDB.open(IDB_NAME,1);
-    req.onupgradeneeded=()=>{req.result.createObjectStore(IDB_STORE);};
-    req.onsuccess=()=>resolve(req.result);
-    req.onerror=()=>reject(req.error);
-  });
-}
-
-type JobCacheEntry={jobs:Job[];sources:Record<string,number>;savedAt:number};
-
-async function saveJobCache(jobs:Job[],sources:Record<string,number>):Promise<void>{
-  try{
-    const db=await openIDB();
-    await new Promise<void>((resolve,reject)=>{
-      const tx=db.transaction(IDB_STORE,"readwrite");
-      const req=tx.objectStore(IDB_STORE).put({jobs,sources,savedAt:Date.now()},IDB_JOB_KEY);
-      req.onsuccess=()=>{db.close();resolve();};
-      req.onerror=()=>{db.close();reject(req.error);};
-    });
-  }catch(e){
-    console.warn("[saveJobCache] IndexedDB write failed:",e);
-  }
-}
-
-async function loadJobCache():Promise<JobCacheEntry|null>{
-  try{
-    const db=await openIDB();
-    return await new Promise<JobCacheEntry|null>((resolve)=>{
-      const tx=db.transaction(IDB_STORE,"readonly");
-      const req=tx.objectStore(IDB_STORE).get(IDB_JOB_KEY) as IDBRequest<JobCacheEntry|undefined>;
-      req.onsuccess=()=>{db.close();resolve(req.result??null);};
-      req.onerror=()=>{db.close();resolve(null);};
-    });
-  }catch(e){
-    console.warn("[loadJobCache] IndexedDB read failed:",e);
-    return null;
-  }
-}
-
 // ── Filter types ───────────────────────────────────────────────────────────
 type SponsorFilter = "all"|"yes"|"no_info";
 type ExpFilter = "0-1yr"|"1-3yr"|"4-6yr"|"6+yr";
@@ -746,6 +703,27 @@ export default function JobsPage(){
   const [jd,setJd]=useState("");
 
 
+  // Optimistic updater — mutates viewedAt / tailoredAt in the jobs array so
+  // badges survive filter/sort/search re-renders without any local card state.
+  const markJobStatus = (jobId: string, type: "viewed"|"tailored") => {
+    setJobs(prev => prev.map(j =>
+      j.id !== jobId ? j : {
+        ...j,
+        viewedAt:   type==="viewed"   ? (j.viewedAt   ?? new Date().toISOString()) : j.viewedAt,
+        tailoredAt: type==="tailored" ? (j.tailoredAt ?? new Date().toISOString()) : j.tailoredAt,
+      }
+    ));
+  };
+
+  // Dismiss — removes job from visible list immediately; also purges from IDB
+  // cache so a stale cache can't re-surface the job within the 5-min TTL.
+  const dismissJob = (jobId: string) => {
+    setJobs(prev => prev.filter(j => j.id !== jobId));
+    loadJobCache().then(cache => {
+      if (cache) saveJobCache(cache.jobs.filter(j => j.id !== jobId), cache.sources);
+    }).catch(() => {});
+  };
+
   // Load jobs on mount — prefer IndexedDB cache (full jobs + JD, 5-min TTL).
   // Async IIFE pattern: useEffect callback must stay synchronous; IDB reads are async.
   useEffect(()=>{
@@ -1186,7 +1164,7 @@ export default function JobsPage(){
                 </summary>
                 <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
                   {g.jobs.map(job=>(
-                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} onMarkStatus={markJobStatus} onDismiss={dismissJob} S={S}/>
                   ))}
                 </div>
               </details>
@@ -1229,7 +1207,7 @@ export default function JobsPage(){
                               </summary>
                               <div style={{padding:"4px 12px 12px",display:"flex",flexDirection:"column",gap:8}}>
                                 {sg.jobs.map(job=>(
-                                  <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                                  <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} onMarkStatus={markJobStatus} onDismiss={dismissJob} S={S}/>
                                 ))}
                               </div>
                             </details>
@@ -1237,7 +1215,7 @@ export default function JobsPage(){
                         </div>
                       )}
                       {g.type==="company_group"&&g.jobs.map(job=>(
-                        <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                        <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} onMarkStatus={markJobStatus} onDismiss={dismissJob} S={S}/>
                       ))}
                     </div>
                   </details>
@@ -1248,7 +1226,7 @@ export default function JobsPage(){
                 {/* All jobs with Load More */}
                 <div style={{display:"flex",flexDirection:"column",gap:10}}>
                   {visibleJobs.map(job=>(
-                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
+                    <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} onMarkStatus={markJobStatus} onDismiss={dismissJob} S={S}/>
                   ))}
                 </div>
                 {/* Load More button */}
@@ -1364,55 +1342,27 @@ export default function JobsPage(){
   );
 }
 
-// ── JD Modal ──────────────────────────────────────────────────────────────────
-// Shows full job description fetched during pipeline (no network call).
-// sessionStorage keys: activeTailorJD, activeTailorJobId
-// Cleared only when user tailors a different job, or session ends.
-function JDModal({jobId,title,company,description,onClose}:{
-  jobId:string; title:string; company:string; description:string; onClose:()=>void;
-}){
-  const handleDownload=()=>{
-    const content=`${title}\n${company}\n${'='.repeat(60)}\n\n${description}`;
-    const blob=new Blob([content],{type:'text/plain'});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url;
-    a.download=`${company}_${title.replace(/[^a-z0-9]/gi,'_').slice(0,40)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  return(
-    <div style={{position:'fixed',inset:0,zIndex:600,display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div onClick={onClose} style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.65)'}}/>
-      <div style={{position:'relative',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:20,width:'min(680px,95vw)',maxHeight:'85vh',display:'flex',flexDirection:'column',overflow:'hidden',zIndex:1}}>
-        <div style={{padding:'16px 20px 12px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-          <div>
-            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15}}>{title}</div>
-            <div style={{fontSize:12,color:'var(--accent2)',fontWeight:500}}>{company}</div>
-          </div>
-          <div style={{display:'flex',gap:6,flexShrink:0}}>
-            <button onClick={handleDownload}
-              style={{padding:'6px 12px',borderRadius:9,border:'1px solid var(--border)',background:'var(--surface2)',color:'var(--text)',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-              Download .txt
-            </button>
-            <button onClick={onClose}
-              style={{padding:'6px 10px',borderRadius:9,border:'none',background:'none',color:'var(--muted)',cursor:'pointer',fontSize:16}}>
-              ✕
-            </button>
-          </div>
-        </div>
-        <div style={{overflowY:'auto',padding:'16px 20px',flex:1}}>
-          <pre style={{fontFamily:"'DM Sans',sans-serif",fontSize:12,color:'var(--text)',lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',margin:0}}>{description}</pre>
-        </div>
-      </div>
-    </div>
-  );
+// ── Job status helper (fire-and-forget) ────────────────────────────────────
+// Persists a user action to /api/jobs/status. Non-blocking — never awaited
+// by the caller. UI state is updated optimistically before this resolves.
+async function postStatus(jobId: string, action: "viewed"|"tailored"|"dismissed"|"undismissed") {
+  try {
+    await fetch("/api/jobs/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId, action }),
+    });
+  } catch (e) {
+    console.warn("[postStatus] failed:", action, e);
+  }
 }
 
 // ── JobCard extracted component ────────────────────────────────────────────
-function JobCard({job,selected,tailoring,onTailor,S}:{
+function JobCard({job,selected,tailoring,onTailor,onMarkStatus,onDismiss,S}:{
   job:Job; selected:Job|null; tailoring:boolean;
   onTailor:(j:Job)=>void;
+  onMarkStatus:(jobId:string,type:"viewed"|"tailored")=>void;
+  onDismiss:(jobId:string)=>void;
   S:{card:React.CSSProperties;tag:React.CSSProperties;btn:(bg:string,color:string,small?:boolean)=>React.CSSProperties};
 }){
   const exp=(job as Job&{experience?:string}).experience;
@@ -1484,6 +1434,8 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
       const fullJD=(job as Job & {fullDescription?: string}).fullDescription || job.description || "";
       sessionStorage.setItem("activeTailorJD",fullJD);
     }catch{}
+    // Mark as tailored (optimistic) and persist to DB — fire-and-forget
+    if(!job.tailoredAt){ onMarkStatus(job.id,"tailored"); postStatus(job.id,"tailored"); }
     onTailor(job);
   };
 
@@ -1528,6 +1480,8 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           })()}
           {bucketBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:bucketBadge.bg,color:bucketBadge.color,border:`1px solid ${bucketBadge.color}40`,whiteSpace:"nowrap",fontWeight:700}}>{bucketBadge.label}</span>}
           {aiBadge&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:aiBadge.bg,color:aiBadge.color,border:`1px solid ${aiBadge.border}`,whiteSpace:"nowrap",fontWeight:600}}>{aiBadge.label}</span>}
+          {!!job.viewedAt&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(108,99,255,0.08)",color:"var(--accent)",border:"1px solid rgba(108,99,255,0.25)",whiteSpace:"nowrap",fontWeight:600}}>👁 Viewed</span>}
+          {!!job.tailoredAt&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:"rgba(0,229,176,0.08)",color:"var(--accent2)",border:"1px solid rgba(0,229,176,0.25)",whiteSpace:"nowrap",fontWeight:600}}>✨ Tailored</span>}
           <SourceBadge source={job.source} sourceType={sourceType}/>
         </div>
       </div>
@@ -1549,7 +1503,7 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
           style={{...S.btn("var(--accent)","#fff",true),opacity:tailoring&&selected?.id===job.id?0.5:1,cursor:tailoring&&selected?.id===job.id?"not-allowed":"pointer"}}>
           {tailoring&&selected?.id===job.id?<><span className="spinner"/>Tailoring...</>:"\u2728 Tailor & Apply"}
         </button>
-        {((job as Job & {fullDescription?: string}).fullDescription || job.description)&&<button onClick={(e)=>{e.stopPropagation();setJdOpen(true);}}
+        {((job as Job & {fullDescription?: string}).fullDescription || job.description)&&<button onClick={(e)=>{e.stopPropagation();setJdOpen(true);if(!job.viewedAt){onMarkStatus(job.id,"viewed");postStatus(job.id,"viewed");}}}
           style={{...S.btn("var(--surface2)","var(--accent)",true),border:"1px solid rgba(108,99,255,0.4)"}}>
           \ud83d\udccb JD
         </button>}
@@ -1558,6 +1512,13 @@ function JobCard({job,selected,tailoring,onTailor,S}:{
         <button onClick={handleBookmark}
           style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"7px 12px",borderRadius:10,border:saved?"1px solid rgba(0,229,176,0.4)":"1px solid var(--border)",background:saved?"rgba(0,229,176,0.1)":"var(--surface2)",color:saved?"var(--accent2)":"var(--muted)",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all .2s",fontFamily:"'DM Sans',sans-serif",whiteSpace:"nowrap"}}>
           {saved?"\u2705 Saved":"\ud83d\udd16 Save"}
+        </button>
+        <button onClick={(e)=>{e.stopPropagation();onDismiss(job.id);postStatus(job.id,"dismissed");}}
+          title="Dismiss this job"
+          style={{display:"inline-flex",alignItems:"center",gap:4,padding:"7px 10px",borderRadius:10,border:"1px solid rgba(112,112,160,0.25)",background:"transparent",color:"var(--muted)",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all .2s",fontFamily:"'DM Sans',sans-serif",whiteSpace:"nowrap",opacity:0.6}}
+          onMouseEnter={e=>(e.currentTarget.style.opacity="1")}
+          onMouseLeave={e=>(e.currentTarget.style.opacity="0.6")}>
+          \u2715 Dismiss
         </button>
       </div>
     </div>
