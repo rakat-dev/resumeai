@@ -146,7 +146,7 @@ function clientSort(jobs:Job[],sort:SortOption):Job[]{
 // When sort === "company_desc", results are rendered as collapsible
 // dropdowns: one per top-15 company, plus a "Remaining Jobs" dropdown
 // with a summary card listing the rest.
-const TOP_COMPANY_GROUP_LIMIT = 15; // kept for backward compat but no longer used
+const TOP_COMPANY_GROUP_LIMIT = 15; // enforced: first 15 unique companies in sort order
 
 // Priority list from priority.rtf — all tiers (lowercase for matching)
 const PRIORITY_COMPANIES = new Set([
@@ -239,67 +239,32 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
     byCompany.get(c)!.sort(byDateDesc);
   }
 
-  // Classify companies into 3 tiers:
-  //   tier1: priority list + ≥10 jobs → standalone dropdown
-  //   tier2: NOT on priority list + ≥10 jobs → sub-dropdown inside Remaining
-  //   tier3: <10 jobs (any) → compact alpha list inside Remaining
-  const tier1: string[] = [];
-  const tier2: string[] = [];
-  const tier3: string[] = [];
-  for (const c of orderedCompanies) {
-    const count = byCompany.get(c)!.length;
-    if (count >= 10 && isOnPriorityList(c)) tier1.push(c);
-    else if (count >= 10) tier2.push(c);
-    else tier3.push(c);
-  }
+  // Top 15 companies by first appearance in the already-sorted list.
+  // orderedCompanies is in first-seen order which equals sort order
+  // (company_desc ranks: Fortune rank asc, then date desc as tiebreaker).
+  // No PRIORITY_COMPANIES gate, no minimum job count — first 15 unique
+  // companies encountered are the Top Company Groups.
+  const top15: string[] = orderedCompanies.slice(0, TOP_COMPANY_GROUP_LIMIT);
+  const rest:  string[] = orderedCompanies.slice(TOP_COMPANY_GROUP_LIMIT);
 
-  // Tier 1 — standalone company dropdowns (Fortune-rank ordered by outer sort)
-  const view: GroupedView = tier1.map((c, i) => ({
+  // Top 15 — standalone company dropdowns
+  const view: GroupedView = top15.map(c => ({
     type: "company_group" as const,
     company: c,
     count: byCompany.get(c)!.length,
     jobs: byCompany.get(c)!,
   }));
 
-  // Remaining group (tier2 sub-dropdowns + tier3 compact list)
-  if (tier2.length > 0 || tier3.length > 0) {
-    const subGroups = tier2.map(c => ({
+  // Remaining group — every company beyond the top 15.
+  // Each is a sub-dropdown so all jobs remain reachable.
+  if (rest.length > 0) {
+    const subGroups = rest.map(c => ({
       company: c,
       count: byCompany.get(c)!.length,
       jobs: byCompany.get(c)!,
     }));
-    // Compact alpha list for tier3 (<10 jobs) — alphabetical.
-    // Rules:
-    //   1. Minimum 3 jobs (single/pair postings are too noisy)
-    //   2. Exclude priority-list companies (they belong in tier1; showing
-    //      them here with 2-9 jobs is misleading when they have a standalone
-    //      dropdown above for their 10+ jobs from a different source variant)
-    //   3. Exclude obvious staffing/agency names (blocklist)
-    const COMPACT_MIN_JOBS = 3;
-    const COMPACT_AGENCY_PATTERNS = [
-      "jobleads","jobgether","eliassen","insight global","synergisticit",
-      "mastech","techdigital","techstaffers","techsoft","radiant infotech",
-      "supportfinity","nupeople","pop-up talent","saidgig","solomon page",
-      "robert half","harnham","it recruitment","greenfield talent",
-      "compunnel","mthree","aptask","pi-square","koitecc","vish consulting",
-      "sa technologies","emonics","united it solutions","liberty personnel",
-      "phase2 technology","global connect","belay tech","intelliforce",
-      "tanaq","itmc","eightelevengroup","full circle group","open roles",
-    ];
-    const companiesSummary = [...tier3]
-      .filter(c => {
-        const count = byCompany.get(c)!.length;
-        if (count < COMPACT_MIN_JOBS) return false;
-        if (isOnPriorityList(c)) return false;  // already in tier1 or close to it
-        const lc = c.toLowerCase();
-        if (COMPACT_AGENCY_PATTERNS.some(p => lc.includes(p))) return false;
-        if (!c.trim()) return false;  // empty company name
-        return true;
-      })
-      .sort((a, b) => a.localeCompare(b))
-      .map(c => ({ company: c, count: byCompany.get(c)!.length }));
     const restJobs: Job[] = [];
-    for (const c of [...tier2, ...tier3]) restJobs.push(...byCompany.get(c)!);
+    for (const c of rest) restJobs.push(...byCompany.get(c)!);
     restJobs.sort(byDateDesc);
     view.push({
       type: "remaining_group" as const,
@@ -307,7 +272,7 @@ function buildGroupedView(sortedJobs: Job[]): GroupedView {
       count: restJobs.length,
       jobs: restJobs,
       subGroups,
-      companiesSummary,
+      companiesSummary: [],
     });
   }
 
@@ -1063,42 +1028,25 @@ export default function JobsPage(){
                     </summary>
                     <div style={{padding:"4px 14px 14px",display:"flex",flexDirection:"column",gap:10}}>
                       {g.type==="remaining_group"&&(
-                        <>
-                          {/* Sub-dropdowns: non-priority companies with ≥10 jobs */}
-                          {g.subGroups.length>0&&(
-                            <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:6}}>
-                              {g.subGroups.map(sg=>(
-                                <details key={`sub-${sg.company}`}
-                                  style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,overflow:"hidden"}}>
-                                  <summary style={{padding:"11px 15px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:14,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-                                    <span>{sg.company}</span>
-                                    <span style={{fontSize:11,color:"var(--muted)",background:"var(--surface2)",padding:"2px 9px",borderRadius:999}}>{sg.count}</span>
-                                  </summary>
-                                  <div style={{padding:"4px 12px 12px",display:"flex",flexDirection:"column",gap:8}}>
-                                    {sg.jobs.map(job=>(
-                                      <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
-                                    ))}
-                                  </div>
-                                </details>
-                              ))}
-                            </div>
-                          )}
-                          {/* Compact alpha list: companies with <10 jobs */}
-                          {g.companiesSummary.length>0&&(
-                            <div style={{background:"var(--surface2)",border:"1px dashed var(--border)",borderRadius:12,padding:"12px 16px",marginTop:g.subGroups.length>0?4:6}}>
-                              <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--muted)",marginBottom:8,fontWeight:600}}>Other companies (&lt;10 jobs)</div>
-                              <div style={{fontSize:12,color:"var(--text)",lineHeight:2.0,wordBreak:"break-word"}}>
-                                {g.companiesSummary.map((c,idx)=>(
-                                  <span key={c.company}>
-                                    <span style={{color:"var(--text)"}}>{c.company}</span>
-                                    <span style={{color:"var(--muted)",fontSize:11}}> ({c.count})</span>
-                                    {idx<g.companiesSummary.length-1&&<span style={{color:"var(--border)",margin:"0 6px"}}>·</span>}
-                                  </span>
+                        // All companies beyond the top 15 — each as an
+                        // expandable section with full JobCard components.
+                        // No compact lists, no hidden jobs, no agency filtering.
+                        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:6}}>
+                          {g.subGroups.map(sg=>(
+                            <details key={`sub-${sg.company}`}
+                              style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,overflow:"hidden"}}>
+                              <summary style={{padding:"11px 15px",cursor:"pointer",userSelect:"none",fontFamily:"'Syne',sans-serif",fontSize:14,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                                <span>{sg.company}</span>
+                                <span style={{fontSize:11,color:"var(--muted)",background:"var(--surface2)",padding:"2px 9px",borderRadius:999}}>{sg.count}</span>
+                              </summary>
+                              <div style={{padding:"4px 12px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                                {sg.jobs.map(job=>(
+                                  <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
                                 ))}
                               </div>
-                            </div>
-                          )}
-                        </>
+                            </details>
+                          ))}
+                        </div>
                       )}
                       {g.type==="company_group"&&g.jobs.map(job=>(
                         <JobCard key={job.id} job={job} selected={selected} tailoring={tailoring} onTailor={handleTailor} S={S}/>
