@@ -19,6 +19,7 @@ export type RefreshSource =
   | "workday"
   | "jsearch"
   | "adzuna"
+  | "adzuna_targeted"               // Targeted Adzuna ingest (28 named companies, sequential throttle)
   | "jooble"
   | "phenom"                       // Phenom-People-hosted careers sites (CVS Health, etc.)
   | "meta"                         // Meta sitemap-based scrape (replaces broken playwright_meta)

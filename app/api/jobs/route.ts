@@ -218,10 +218,11 @@ export async function GET(req: NextRequest) {
     }
 
     // Diagnostic: count adzuna rows + batch-2 companies to verify pagination landed
-    const adzCount = rows.filter(r => r.source === 'adzuna').length;
+    const adzCount         = rows.filter(r => r.source === 'adzuna').length;
+    const adzTargetedCount = rows.filter(r => r.source === 'adzuna_targeted').length;
     const batch2Companies = ['IBM', 'Cigna Group', 'The Cigna Group', 'UnitedHealth Group', 'ServiceNow', 'UPS', 'Snowflake', 'Visa', 'Mastercard', 'Accenture', 'Cognizant', 'Capgemini', 'Maximus'];
     const batch2Count = rows.filter(r => batch2Companies.includes(r.company)).length;
-    console.log(`[/api/jobs] rows=${rows.length} adzuna=${adzCount} batch2=${batch2Count} filter=${filter} sort=${sort}`);
+    console.log(`[/api/jobs] rows=${rows.length} adzuna=${adzCount} adzuna_targeted=${adzTargetedCount} batch2=${batch2Count} filter=${filter} sort=${sort}`);
 
     // ── Fetch user state ────────────────────────────────────────────────────
     // Fetch ALL rows from job_user_state (only jobs the user has interacted
@@ -267,7 +268,7 @@ export async function GET(req: NextRequest) {
       sourceCountMap.set(key, (sourceCountMap.get(key) ?? 0) + 1);
     });
 
-    const SOURCE_KEYS = ["greenhouse", "workday", "playwright", "jsearch", "adzuna", "jooble", "phenom", "meta"];
+    const SOURCE_KEYS = ["greenhouse", "ashby", "workday", "playwright", "jsearch", "adzuna", "adzuna_targeted", "jooble", "phenom", "meta", "v2"];
     const sources: Record<string, number> = {};
     SOURCE_KEYS.forEach(k => { sources[k] = sourceCountMap.get(k) ?? 0; });
 
