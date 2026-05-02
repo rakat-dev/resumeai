@@ -6,3 +6,6 @@ node_modules/
 .DS_Store
 .vercel
 .env*.local
+tsconfig.tsbuildinfo
+.claude/
+vitest.config 2.ts
