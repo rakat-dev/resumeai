@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import AppLayout from "@/components/AppLayout";
 import type { Job, JobFilter, SourceDiagnostic } from "@/app/api/jobs/route";
 import type { ATSResult } from "@/app/api/tailor/route";
@@ -22,7 +22,10 @@ function safeUrl(url: string | null | undefined): string {
 // ── Session storage (clears when tab/browser closed) ──────────────────────
 const SS = { Q:"ss_rq", F:"ss_rf", J:"ss_rj", S:"ss_rs",
   SEL:"ss_sel", V1:"ss_v1", V2:"ss_v2", JD:"ss_jd",
-  V1ATS:"ss_v1ats", V2ATS:"ss_v2ats", STEP:"ss_step" };
+  V1ATS:"ss_v1ats", V2ATS:"ss_v2ats", STEP:"ss_step",
+  TS:"ss_rts",        // cache timestamp (ms since epoch)
+  SCROLL:"ss_scroll", // job list scroll position (px)
+};
 
 function savePanel(sel:Job|null,v1:string,v2:string,jd:string,v1ats:unknown,v2ats:unknown,step:number){
   try{
@@ -55,10 +58,18 @@ function loadPanel():{sel:Job|null;v1:string;v2:string;jd:string;v1ats:unknown;v
 function saveSS(f:JobFilter,jobs:Job[],src:Record<string,number>){
   try{
     sessionStorage.setItem(SS.F,f);
-    // Only cache up to 500 jobs to avoid sessionStorage size limits
-    sessionStorage.setItem(SS.J,JSON.stringify(jobs.slice(0,500)));
+    // Strip fullDescription before caching — it's large (can be several KB per job)
+    // and is only needed at tailoring time (handleTailor falls back to description).
+    // All job records are stored so cached.jobs.length equals the live jobs.length.
+    const slim=jobs.map(j=>({...j,fullDescription:undefined}));
+    sessionStorage.setItem(SS.J,JSON.stringify(slim));
     sessionStorage.setItem(SS.S,JSON.stringify(src));
-  }catch{}
+    sessionStorage.setItem(SS.TS,String(Date.now()));
+  }catch(e){
+    // QuotaExceededError or similar — cache write failed.
+    // Next mount will fall through to a fresh DB fetch (SS.J absent or stale).
+    console.warn("[saveSS] sessionStorage write failed — cache disabled for this session:", e);
+  }
 }
 function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|null{
   try{
@@ -72,7 +83,48 @@ function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|nu
 // ── Filter types ───────────────────────────────────────────────────────────
 type SponsorFilter = "all"|"yes"|"no_info";
 type ExpFilter = "0-1yr"|"1-3yr"|"4-6yr"|"6+yr";
-type SourceType = "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"playwright"|"other";
+type SourceType = "greenhouse"|"workday"|"jsearch"|"adzuna"|"jooble"|"playwright"|"other"|"company_sites"|"ashby"|"phenom"|"meta"|"amazon_jobs"|"v2";
+
+// Maps each UI filter option to the set of actual sourceType values it covers.
+// company_sites covers v2 (google_v2/amazon_v2/microsoft_v2/walmart_v2/jpmorgan_v2),
+// meta career pages, and amazon_jobs scrape — but NOT playwright (scrape method, not source).
+const SOURCE_UI_GROUPS: Record<string, string[]> = {
+  "company_sites": ["v2","meta","amazon_jobs"],
+  "greenhouse":    ["greenhouse"],
+  "ashby":         ["ashby"],
+  "workday":       ["workday"],
+  "playwright":    ["playwright"],
+  "adzuna":        ["adzuna"],
+  "jooble":        ["jooble"],
+  "jsearch":       ["jsearch"],
+  "phenom":        ["phenom"],
+};
+
+// Display labels for each UI group (chips + header subtitle).
+const CHIP_LABELS: Record<string, string> = {
+  company_sites: "Company Career Sites",
+  greenhouse:    "Greenhouse",
+  ashby:         "Ashby",
+  workday:       "Workday",
+  playwright:    "Scraped Sources",
+  adzuna:        "Adzuna",
+  jooble:        "Jooble",
+  jsearch:       "JSearch",
+  phenom:        "Phenom",
+};
+
+// Accent color per UI group used by chips.
+const CHIP_COLORS: Record<string, string> = {
+  company_sites: "#0096ff",
+  greenhouse:    "#00c864",
+  ashby:         "#9664ff",
+  workday:       "#cf4500",
+  playwright:    "#6c63ff",
+  adzuna:        "#00c8b4",
+  jooble:        "#ff9500",
+  jsearch:       "#7070a0",
+  phenom:        "#ff69b4",
+};
 
 interface Filters {
   datePosted: JobFilter;
@@ -440,15 +492,15 @@ function ATSDropdown({ats,onImprove,improving}:{ats:ATSResult;onImprove:()=>void
 interface FiltersModalProps{
   open:boolean; onClose:()=>void;
   filters:Filters; onSave:(f:Filters)=>void;
-  allJobs:Job[];
+  jobsForCompanyOptions:Job[];
   sources:Record<string,number>;
 }
-function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModalProps){
+function FiltersModal({open,onClose,filters,onSave,jobsForCompanyOptions,sources}:FiltersModalProps){
   const [draft,setDraft]=useState<Filters>(filters);
   useEffect(()=>{if(open)setDraft(filters);},[open,filters]);
 
-  const allCompanies=useMemo(()=>Array.from(new Set(allJobs.map(j=>j.company).filter(Boolean))).sort(),[allJobs]);
-  const allSources:SourceType[]=["greenhouse","workday","playwright","jsearch","adzuna","jooble"];
+  const allCompanies=useMemo(()=>Array.from(new Set(jobsForCompanyOptions.map(j=>j.company).filter(Boolean))).sort(),[jobsForCompanyOptions]);
+  const allSources:SourceType[]=["company_sites","greenhouse","ashby","workday","playwright","adzuna","jooble","jsearch","phenom"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
   const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
 
@@ -521,7 +573,7 @@ function FiltersModal({open,onClose,filters,onSave,allJobs,sources}:FiltersModal
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {allSources.map(s=>{
                 const srcCount=sources[s===("other" as string)?"other":s]||0;
-                const srcLabelMap:Record<string,string>={greenhouse:"Greenhouse (ATS)",workday:"Workday (20 cos)",playwright:"Playwright (Tier A)",jsearch:"JSearch (fallback)",adzuna:"Adzuna (backup)",jooble:"Jooble (gap filler)"};
+                const srcLabelMap:Record<string,string>={company_sites:"Company Career Sites",greenhouse:"Greenhouse (ATS)",ashby:"Ashby (ATS)",workday:"Workday (ATS)",playwright:"Scraped Sources",adzuna:"Adzuna",jooble:"Jooble",jsearch:"JSearch",phenom:"Phenom"};
 const label=srcLabelMap[s]||s;
                 const SC:Record<string,string>={jsearch:"#7070a0",greenhouse:"#00c864",lever:"#0096ff",remotive:"#9664ff",theirstack:"#ff8c00",fantasticjobs:"#00c8b4",other:"#7070a0"};
                 const dotColor=SC[s]||"#7070a0";
@@ -615,6 +667,9 @@ export default function JobsPage(){
   const [sources,setSources]=useState<Record<string,number>>({});
   const [diagnostics,setDiagnostics]=useState<SourceDiagnostic[]>([]);
   const [diagOpen,setDiagOpen]=useState(false);
+  // Set to true to show the debug diagnostics panel on this page.
+  // The /diagnostics route has its own dedicated page and is unaffected.
+  const SHOW_DEBUG_PANEL = false;
   const [loading,setLoading]=useState(false);
   const [loadErr,setLoadErr]=useState("");
   const [totalJobs,setTotalJobs]=useState(0);
@@ -623,6 +678,8 @@ export default function JobsPage(){
   const [displayLimit,setDisplayLimit]=useState(50); // start with 50, load more on demand
 
   const [filters,setFilters]=useState<Filters>(DEFAULT_FILTERS);
+  const [searchQuery,setSearchQuery]=useState("");
+  const jobListRef=useRef<HTMLDivElement>(null); // scroll restoration target
   const [filtersOpen,setFiltersOpen]=useState(false);
   const [sort,setSort]=useState<SortOption>("best_match");
 
@@ -644,7 +701,7 @@ export default function JobsPage(){
   const [jd,setJd]=useState("");
 
 
-  // Load jobs from DB on mount (stored-search model)
+  // Load jobs on mount — use session cache if <5 min old, otherwise fetch from DB.
   useEffect(()=>{
     setResume(getBaseResume());
     const panel=loadPanel();
@@ -653,9 +710,18 @@ export default function JobsPage(){
       setJd(panel.jd);setV1Ats(panel.v1ats as ATSResult|null);
       setV2Ats(panel.v2ats as ATSResult|null);setStep(panel.step as 0|1|2);
     }
-    // Always fetch fresh from DB (don't trust stale sessionStorage cache)
-    sessionStorage.removeItem(SS.J); // clear old cache
-    loadJobs(filters.datePosted,sort);
+    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+    const cached = loadSS();
+    const ts = parseInt(sessionStorage.getItem(SS.TS)||"0");
+    const cacheAge = Date.now() - ts;
+    if(cached && cached.jobs.length > 0 && cacheAge < CACHE_TTL_MS){
+      // Cache hit: restore jobs from sessionStorage — no DB round-trip
+      setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);
+    } else {
+      // Cache miss or expired: fetch fresh from DB
+      sessionStorage.removeItem(SS.J);
+      loadJobs(filters.datePosted,sort);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
@@ -742,23 +808,36 @@ export default function JobsPage(){
   };
 
   // ── Client-side filtering ─────────────────────────────────────────────
-  const {filteredJobs,visibleJobs,groupedView,noDateGroups}=useMemo(()=>{
+  const {filteredJobs,visibleJobs,groupedView,noDateGroups,preCompanyList,searchedPreCompanyList}=useMemo(()=>{
     let list=jobs;
+    const q=searchQuery.trim().toLowerCase();
 
     // Apply non-date filters FIRST. The date-filter only affects dated jobs;
     // no-date jobs are filtered separately by rank cutoff below.
     if(filters.sponsorship==="yes")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag==="mentioned");
     if(filters.sponsorship==="no_info")list=list.filter(j=>(j as Job&{sponsorshipTag?:string}).sponsorshipTag!=="mentioned");
-    if(filters.companies.size>0)list=list.filter(j=>filters.companies.has(j.company));
-    if(filters.sources.size>0)list=list.filter(j=>filters.sources.has((j as Job&{sourceType?:string}).sourceType as SourceType||"other"));
-
+    if(filters.sources.size>0)list=list.filter(j=>{
+      const st=(j as Job&{sourceType?:string}).sourceType||"other";
+      return Array.from(filters.sources).some(group=>(SOURCE_UI_GROUPS[group]||[group]).includes(st));
+    });
     if(filters.experience.size>0){
       list=list.filter(j=>{
         const exp=(j as Job&{experience?:string}).experience;
-        if(!exp) return true;
+        if(!exp) return false;
         return filters.experience.has(exp as ExpFilter);
       });
     }
+    // Capture list AFTER sponsorship/source/experience but BEFORE company filter,
+    // so the company options in FiltersModal reflect the current filtered context.
+    const preCompanyList=list;
+    if(filters.companies.size>0)list=list.filter(j=>filters.companies.has(j.company));
+
+    // Search: applied after all modal filters, never mutates base jobs state.
+    // Matches case-insensitively on title, company, or id (trimmed).
+    // searchedPreCompanyList narrows the company options in FiltersModal too.
+    const searchMatch=(j:Job)=>j.title.toLowerCase().includes(q)||j.company.toLowerCase().includes(q)||j.id.toLowerCase().includes(q);
+    const searchedPreCompanyList=q.length>0?preCompanyList.filter(searchMatch):preCompanyList;
+    if(q.length>0)list=list.filter(searchMatch);
 
     // Split: no-date (positionRank set) jobs go into per-company dropdowns
     // pinned at top; dated jobs go through the normal sort + filter path.
@@ -789,16 +868,56 @@ export default function JobsPage(){
     // Synthesize a "filteredJobs" array that just exposes the count via .length
     // for the existing UI consumer. Real rendering uses noDateGroups + sorted.
     const filteredJobs = sorted; // length used for the "Load More" math
-    return{filteredJobs,visibleJobs:sorted.slice(0,displayLimit),groupedView,noDateGroups,totalFilteredCount:totalFiltered};
-  },[jobs,filters,sort,displayLimit]);
+    return{filteredJobs,visibleJobs:sorted.slice(0,displayLimit),groupedView,noDateGroups,totalFilteredCount:totalFiltered,preCompanyList,searchedPreCompanyList};
+  },[jobs,filters,sort,displayLimit,searchQuery]);
+
+  // ── Source chip counts — computed from raw jobs via SOURCE_UI_GROUPS ────
+  // Counts are from the full unfiltered jobs array so chips always show the
+  // total available per source regardless of active filters.
+  const chipCounts=useMemo(()=>{
+    const counts:Record<string,number>={};
+    for(const [group,types] of Object.entries(SOURCE_UI_GROUPS)){
+      counts[group]=jobs.filter(j=>types.includes((j as Job&{sourceType?:string}).sourceType||"other")).length;
+    }
+    return counts;
+  },[jobs]);
 
   const activeFilterCount=countActiveFilters(filters);
   const currentResume=step===2?v2Resume:v1Resume;
   const currentAts=step===2?v2Ats:v1Ats;
 
-  // Re-load when sort changes (date filter is client-side only, no re-fetch needed)
+  // Sort is applied client-side in the filter useMemo — no DB refetch needed.
+  // This effect is intentionally a no-op; kept for reference.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(()=>{if(jobs.length>0||loading)loadJobs("any",sort);},[sort]);
+  useEffect(()=>{/* sort-change DB refetch disabled: sort is client-side only */},[sort]);
+
+  // ── Scroll save: persist job-list scroll position on every scroll event ──
+  useEffect(()=>{
+    const el=jobListRef.current;
+    if(!el)return;
+    const onScroll=()=>{try{sessionStorage.setItem(SS.SCROLL,String(el.scrollTop));}catch{}};
+    el.addEventListener("scroll",onScroll,{passive:true});
+    return ()=>el.removeEventListener("scroll",onScroll);
+  // Attach once after mount — ref never changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  // ── Scroll restore: when jobs first populate, restore saved scroll position ─
+  useEffect(()=>{
+    if(jobs.length===0)return;
+    const el=jobListRef.current;
+    if(!el)return;
+    try{
+      const saved=sessionStorage.getItem(SS.SCROLL);
+      if(saved){el.scrollTop=parseInt(saved,10);sessionStorage.removeItem(SS.SCROLL);}
+    }catch{}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[jobs]);
+
+  // ── Scroll clear: when user intentionally opens a job, discard saved position ─
+  useEffect(()=>{
+    if(selected) try{sessionStorage.removeItem(SS.SCROLL);}catch{}
+  },[selected]);
 
   const handleSaveResume=()=>{
     saveBaseResume(resume);
@@ -863,7 +982,7 @@ export default function JobsPage(){
         <div>
           <h1 style={{fontSize:26,fontWeight:800,marginBottom:2}}>💼 Job Board</h1>
           <p style={{color:"var(--muted)",fontSize:13}}>
-            {loading?"Loading...":jobs.length>0?`${jobs.length.toLocaleString()} stored jobs — Greenhouse, Workday, Playwright, JSearch, Adzuna, Jooble`:"No jobs yet — run a refresh"}
+            {loading?"Loading...":jobs.length>0?`${jobs.length.toLocaleString()} stored jobs — ${Object.entries(chipCounts).filter(([,c])=>c>0).map(([g])=>CHIP_LABELS[g]||g).join(", ")}`:"No jobs yet — run a refresh"}
           </p>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -887,38 +1006,57 @@ export default function JobsPage(){
       {/* Refresh feedback */}
       {refreshMsg&&<div style={{background:refreshMsg.startsWith("✅")?"rgba(0,200,100,0.1)":"rgba(255,107,107,0.1)",border:`1px solid ${refreshMsg.startsWith("✅")?"rgba(0,200,100,0.3)":"rgba(255,107,107,0.3)"}`,borderRadius:10,padding:"9px 14px",fontSize:12,marginBottom:10,color:refreshMsg.startsWith("✅")?"#00c864":"var(--accent3)"}}>{refreshMsg}</div>}
 
+      {/* Search box */}
+      {jobs.length>0&&(
+        <div style={{position:"relative",marginBottom:10}}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e=>setSearchQuery(e.target.value)}
+            placeholder="Search by title, company, or job ID…"
+            style={{width:"100%",padding:"9px 36px 9px 36px",border:"1px solid var(--border)",borderRadius:12,
+              background:"var(--surface2)",color:"var(--text)",fontSize:13,outline:"none",
+              boxSizing:"border-box",fontFamily:"'DM Sans',sans-serif"}}
+          />
+          <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,pointerEvents:"none",color:"var(--muted)"}}>🔍</span>
+          {searchQuery&&(
+            <button onClick={()=>setSearchQuery("")}
+              style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+                background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:15,lineHeight:1,padding:2}}>
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Results count + source breakdown */}
       {jobs.length>0&&(
         <div style={{marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:6}}>
-            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>{filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0)} jobs{(filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0))!==jobs.length?` (filtered from ${jobs.length})`:""}</span>
-            {(diagnostics.length>0
-              ? diagnostics
-              : Object.entries(sources).map(([k,v])=>({source:k,postFilterCount:v,status:v>0?"success":"degraded",rawCount:v,called:true,error:null} as SourceDiagnostic))
-            ).map(d=>{
-              const COL:Record<string,string>={greenhouse:"#00c864",workday:"#cf4500",playwright:"#6c63ff",jsearch:"#7070a0",adzuna:"#00c8b4",jooble:"#ff9500"};
-              const LBL:Record<string,string>={greenhouse:"Greenhouse",workday:"Workday",playwright:"Playwright",jsearch:"JSearch",adzuna:"Adzuna",jooble:"Jooble"};
-              const col=COL[d.source]||"#888";
-              const dot=d.status==="success"?"🟢":d.status==="skipped"?"⚫":d.status==="timeout"||d.status==="rate_limited"?"🟡":"🔴";
+            <span style={{fontSize:12,color:"var(--muted)",marginRight:4}}>
+              {filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0)} jobs
+              {(filteredJobs.length + noDateGroups.reduce((s,g)=>s+g.count,0))!==jobs.length?` (filtered from ${jobs.length})`:""}
+              {searchQuery.trim()&&<span style={{color:"var(--accent)",fontWeight:600}}> · &ldquo;{searchQuery.trim()}&rdquo;</span>}
+            </span>
+            {Object.entries(chipCounts).filter(([,c])=>c>0).map(([group,count])=>{
+              const col=CHIP_COLORS[group]||"#888";
               return(
-                <span key={d.source} title={`${d.status}${d.error?`: ${d.error}`:""}`}
+                <span key={group}
                   style={{fontSize:10,padding:"2px 8px",borderRadius:100,background:`${col}15`,
-                    color:d.postFilterCount>0?col:"var(--muted)",
-                    border:`1px solid ${col}${d.postFilterCount>0?"50":"20"}`,
-                    fontWeight:600,opacity:d.postFilterCount>0?1:0.5,cursor:"default"}}>
-                  {dot} {LBL[d.source]||d.source}:{d.postFilterCount}
+                    color:col,border:`1px solid ${col}50`,fontWeight:600,cursor:"default"}}>
+                  {CHIP_LABELS[group]||group}:{count}
                 </span>
               );
             })}
             {activeFilterCount>0&&<button onClick={()=>setFilters(DEFAULT_FILTERS)} style={{fontSize:11,color:"var(--accent3)",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>✕ Clear</button>}
-            {diagnostics.length>0&&(
+            {SHOW_DEBUG_PANEL&&diagnostics.length>0&&(
               <button onClick={()=>setDiagOpen(o=>!o)}
                 style={{marginLeft:"auto",fontSize:10,color:"var(--muted)",background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:7,padding:"2px 8px",cursor:"pointer"}}>
                 🔬 Debug {diagOpen?"▲":"▼"}
               </button>
             )}
           </div>
-          {diagOpen&&diagnostics.length>0&&(
+          {SHOW_DEBUG_PANEL&&diagOpen&&diagnostics.length>0&&(
             <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:12,padding:"10px 12px",marginBottom:8,overflowX:"auto"}}>
               <div style={{fontSize:11,fontWeight:700,fontFamily:"'Syne',sans-serif",marginBottom:6}}>🔬 Source Diagnostics</div>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,whiteSpace:"nowrap"}}>
@@ -960,7 +1098,7 @@ export default function JobsPage(){
 
         {/* ── Jobs scrollable container ── */}
         <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:16,overflow:"hidden"}}>
-          <div style={{height:"calc(100vh - 230px)",overflowY:"auto",padding:"12px"}}>
+          <div ref={jobListRef} style={{height:"calc(100vh - 230px)",overflowY:"auto",padding:"12px"}}>
             {loading&&jobs.length===0&&(
               <div style={{textAlign:"center",padding:"60px 20px",color:"var(--muted)"}}>
                 <div className="spinner" style={{width:32,height:32,borderWidth:3,borderTopColor:"var(--accent)",margin:"0 auto 14px"}}/>
@@ -1171,7 +1309,7 @@ export default function JobsPage(){
       </div>
 
       {/* Filters Modal */}
-      <FiltersModal open={filtersOpen} onClose={()=>setFiltersOpen(false)} filters={filters} onSave={setFilters} allJobs={jobs} sources={sources}/>
+      <FiltersModal open={filtersOpen} onClose={()=>setFiltersOpen(false)} filters={filters} onSave={setFilters} jobsForCompanyOptions={searchedPreCompanyList??preCompanyList??jobs} sources={sources}/>
     </AppLayout>
   );
 }
