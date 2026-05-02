@@ -128,6 +128,14 @@ const CHIP_COLORS: Record<string, string> = {
   phenom:        "#ff69b4",
 };
 
+// Module-level so both FiltersModal and the active-filter chip bar can use it.
+const EXP_LABELS: Record<ExpFilter, string> = {
+  "0-1yr": "0–1 year",
+  "1-3yr": "1–3 years",
+  "4-6yr": "4–6 years",
+  "6+yr":  "6+ years",
+};
+
 interface Filters {
   datePosted: JobFilter;
   sponsorship: SponsorFilter;
@@ -490,6 +498,26 @@ function ATSDropdown({ats,onImprove,improving}:{ats:ATSResult;onImprove:()=>void
   );
 }
 
+// ── Active-filter chip ─────────────────────────────────────────────────────
+function FilterChip({ label, icon, onRemove }: { label: string; icon: string; onRemove: () => void }) {
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"center", gap:5,
+      padding:"4px 8px 4px 10px", borderRadius:100,
+      background:"var(--surface2)", border:"1px solid var(--border)",
+      fontSize:11, fontWeight:600, color:"var(--text)", whiteSpace:"nowrap",
+    }}>
+      <span style={{fontSize:10}}>{icon}</span>
+      {label}
+      <button onClick={onRemove} style={{
+        background:"none", border:"none", cursor:"pointer", padding:0,
+        color:"var(--muted)", lineHeight:1, fontSize:13,
+        display:"flex", alignItems:"center", marginLeft:2,
+      }}>✕</button>
+    </span>
+  );
+}
+
 // ── Filters Modal ──────────────────────────────────────────────────────────
 interface FiltersModalProps{
   open:boolean; onClose:()=>void;
@@ -504,7 +532,7 @@ function FiltersModal({open,onClose,filters,onSave,jobsForCompanyOptions,sources
   const allCompanies=useMemo(()=>Array.from(new Set(jobsForCompanyOptions.map(j=>j.company).filter(Boolean))).sort(),[jobsForCompanyOptions]);
   const allSources:SourceType[]=["company_sites","greenhouse","ashby","workday","playwright","adzuna","jooble","jsearch","phenom"];
   const expOptions:ExpFilter[]=["0-1yr","1-3yr","4-6yr","6+yr"];
-  const expLabels:Record<ExpFilter,string>={"0-1yr":"0–1 year","1-3yr":"1–3 years","4-6yr":"4–6 years","6+yr":"6+ years"};
+  const expLabels = EXP_LABELS;
 
   const toggle=(set:Set<string>,val:string)=>{const s=new Set(set);s.has(val)?s.delete(val):s.add(val);return s;};
 
@@ -890,13 +918,10 @@ export default function JobsPage(){
     // other sorts use a flat list.
     const groupedView=sort==="company_desc"?buildGroupedView(sorted):null;
 
-    // For the user-visible "filteredJobs" count in the header strip, include
-    // both no-date (after cutoff) and dated (after date filter).
-    const totalFiltered = noDateGroups.reduce((s,g)=>s+g.count,0) + sorted.length;
-    // Synthesize a "filteredJobs" array that just exposes the count via .length
-    // for the existing UI consumer. Real rendering uses noDateGroups + sorted.
+    // filteredJobs (dated, sorted) is the primary list for "Load More" math.
+    // The results-strip count adds noDateGroups separately in the JSX.
     const filteredJobs = sorted; // length used for the "Load More" math
-    return{filteredJobs,visibleJobs:sorted.slice(0,displayLimit),groupedView,noDateGroups,totalFilteredCount:totalFiltered,preCompanyList,searchedPreCompanyList};
+    return{filteredJobs,visibleJobs:sorted.slice(0,displayLimit),groupedView,noDateGroups,preCompanyList,searchedPreCompanyList};
   },[jobs,filters,sort,displayLimit,searchQuery]);
 
   // ── Source chip counts — computed from raw jobs via SOURCE_UI_GROUPS ────
@@ -1057,6 +1082,69 @@ export default function JobsPage(){
         </div>
       )}
 
+      {/* Active filter chip bar — visible whenever any filter or search is active */}
+      {jobs.length>0&&(searchQuery.trim().length>0||activeFilterCount>0)&&(
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10,alignItems:"center"}}>
+          {/* Search query chip */}
+          {searchQuery.trim().length>0&&(
+            <FilterChip label={`"${searchQuery.trim()}"`} icon="🔍" onRemove={()=>setSearchQuery("")}/>
+          )}
+          {/* Date Posted chip */}
+          {filters.datePosted!=="any"&&(
+            <FilterChip
+              label={filters.datePosted==="24h"?"Last 24h":filters.datePosted==="3d"?"Last 3 days":"Last week"}
+              icon="📅"
+              onRemove={()=>setFilters(f=>({...f,datePosted:"any"}))}
+            />
+          )}
+          {/* Sponsorship chip */}
+          {filters.sponsorship!=="all"&&(
+            <FilterChip
+              label={filters.sponsorship==="yes"?"Sponsors Visa":"No Visa Info"}
+              icon="🛂"
+              onRemove={()=>setFilters(f=>({...f,sponsorship:"all"}))}
+            />
+          )}
+          {/* Experience chips — one per selected tier */}
+          {Array.from(filters.experience).map(exp=>(
+            <FilterChip key={exp} label={EXP_LABELS[exp]} icon="⏱"
+              onRemove={()=>setFilters(f=>{const e=new Set(f.experience);e.delete(exp);return{...f,experience:e};})}
+            />
+          ))}
+          {/* Source chips — one per selected source */}
+          {Array.from(filters.sources).map(src=>(
+            <FilterChip key={src} label={CHIP_LABELS[src]||src} icon="🌐"
+              onRemove={()=>setFilters(f=>{const s=new Set(f.sources);s.delete(src);return{...f,sources:s as Set<SourceType>};})}
+            />
+          ))}
+          {/* Company chips — individual if 1–2, summary if 3+ */}
+          {filters.companies.size>0&&filters.companies.size<=2
+            ?Array.from(filters.companies).map(c=>(
+                <FilterChip key={c} label={c} icon="🏢"
+                  onRemove={()=>setFilters(f=>{const co=new Set(f.companies);co.delete(c);return{...f,companies:co};})}
+                />
+              ))
+            :filters.companies.size>2&&(
+                <FilterChip
+                  label={`${filters.companies.size} companies`}
+                  icon="🏢"
+                  onRemove={()=>setFilters(f=>({...f,companies:new Set()}))}
+                />
+              )
+          }
+          {/* Clear all — only when 2+ things are active */}
+          {(searchQuery.trim().length>0?1:0)+countActiveFilters(filters)>=2&&(
+            <button
+              onClick={()=>{setFilters(DEFAULT_FILTERS);setSearchQuery("");}}
+              style={{fontSize:11,padding:"4px 11px",borderRadius:100,
+                border:"1px solid rgba(255,107,107,0.4)",background:"rgba(255,107,107,0.08)",
+                color:"#ff6b6b",cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif"}}>
+              Clear all
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Results count + source breakdown */}
       {jobs.length>0&&(
         <div style={{marginBottom:12}}>
@@ -1076,7 +1164,6 @@ export default function JobsPage(){
                 </span>
               );
             })}
-            {activeFilterCount>0&&<button onClick={()=>setFilters(DEFAULT_FILTERS)} style={{fontSize:11,color:"var(--accent3)",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>✕ Clear</button>}
             {SHOW_DEBUG_PANEL&&diagnostics.length>0&&(
               <button onClick={()=>setDiagOpen(o=>!o)}
                 style={{marginLeft:"auto",fontSize:10,color:"var(--muted)",background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:7,padding:"2px 8px",cursor:"pointer"}}>
@@ -1138,6 +1225,27 @@ export default function JobsPage(){
                 <div style={{fontSize:48,marginBottom:12}}>📭</div>
                 <p style={{fontSize:14}}>No jobs in DB yet</p>
                 <p style={{fontSize:12,marginTop:6}}>Click <strong>Refresh Now</strong> to ingest jobs from all sources</p>
+              </div>
+            )}
+            {/* CP8: Filters zeroed out results — DB has jobs but nothing passes filters */}
+            {jobs.length>0&&!loading&&filteredJobs.length===0&&noDateGroups.length===0&&(
+              <div style={{textAlign:"center",padding:"60px 20px",color:"var(--muted)"}}>
+                <div style={{fontSize:48,marginBottom:12}}>🔍</div>
+                <p style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>No jobs match your current filters</p>
+                <p style={{fontSize:12,marginTop:6,lineHeight:1.7}}>
+                  {searchQuery.trim()&&<>Your search <strong>&ldquo;{searchQuery.trim()}&rdquo;</strong> returned no results. </>}
+                  {activeFilterCount>0&&<>Try removing some filters to see more jobs.</>}
+                  {!searchQuery.trim()&&activeFilterCount===0&&<>All matching jobs may have been dismissed.</>}
+                </p>
+                {(activeFilterCount>0||searchQuery.trim())&&(
+                  <button
+                    onClick={()=>{setFilters(DEFAULT_FILTERS);setSearchQuery("");}}
+                    style={{marginTop:14,padding:"9px 22px",borderRadius:12,border:"none",
+                      background:"var(--accent)",color:"#fff",cursor:"pointer",
+                      fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>
+                    Clear all filters
+                  </button>
+                )}
               </div>
             )}
 

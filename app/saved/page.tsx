@@ -230,8 +230,8 @@ export default function SavedPage() {
   }, []);
 
   // ── Dismissed tab: load on first switch ──────────────────────────────────
-  const loadDismissed = useCallback(async () => {
-    if (dismissedLoaded) return;
+  const loadDismissed = useCallback(async (force = false) => {
+    if (dismissedLoaded && !force) return;
     setDismissedLoading(true);
     setDismissedErr("");
     try {
@@ -490,7 +490,7 @@ export default function SavedPage() {
         ) : dismissedErr ? (
           <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--accent3)" }}>
             <p>⚠️ {dismissedErr}</p>
-            <button onClick={() => { setDismissedLoaded(false); loadDismissed(); }}
+            <button onClick={() => { setDismissedLoaded(false); loadDismissed(true); }}
               style={{ ...S.btn("var(--surface2)", "var(--text)"), border: "1px solid var(--border)", marginTop: 12 }}>
               Retry
             </button>
