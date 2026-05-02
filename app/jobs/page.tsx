@@ -55,20 +55,16 @@ function loadPanel():{sel:Job|null;v1:string;v2:string;jd:string;v1ats:unknown;v
     };
   }catch{return null;}
 }
-function saveSS(f:JobFilter,jobs:Job[],src:Record<string,number>){
+function saveSS(f:JobFilter,_jobs:Job[],src:Record<string,number>){
+  // Jobs (incl. fullDescription) are now stored in IndexedDB via saveJobCache.
+  // sessionStorage only holds lightweight filter/source metadata here.
+  // SS.J and SS.TS are intentionally not written; they remain in SS for key
+  // compatibility but the mount effect reads from IndexedDB instead.
   try{
     sessionStorage.setItem(SS.F,f);
-    // Strip fullDescription before caching — it's large (can be several KB per job)
-    // and is only needed at tailoring time (handleTailor falls back to description).
-    // All job records are stored so cached.jobs.length equals the live jobs.length.
-    const slim=jobs.map(j=>({...j,fullDescription:undefined}));
-    sessionStorage.setItem(SS.J,JSON.stringify(slim));
     sessionStorage.setItem(SS.S,JSON.stringify(src));
-    sessionStorage.setItem(SS.TS,String(Date.now()));
   }catch(e){
-    // QuotaExceededError or similar — cache write failed.
-    // Next mount will fall through to a fresh DB fetch (SS.J absent or stale).
-    console.warn("[saveSS] sessionStorage write failed — cache disabled for this session:", e);
+    console.warn("[saveSS] sessionStorage write failed:",e);
   }
 }
 function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|null{
@@ -78,6 +74,55 @@ function loadSS():{filter:JobFilter;jobs:Job[];sources:Record<string,number>}|nu
     if(!j)return null;
     return{filter:f||"any",jobs:JSON.parse(j),sources:s?JSON.parse(s):{}};
   }catch{return null;}
+}
+
+// ── IndexedDB job cache ────────────────────────────────────────────────────
+// Stores the full jobs array including fullDescription so every job has JD
+// available for tailoring after navigation, without a DB round-trip.
+// sessionStorage cannot hold ~5 MB of JD text; IndexedDB has no practical limit.
+const IDB_NAME    = "resumeai_cache";
+const IDB_STORE   = "kv";
+const IDB_JOB_KEY = "jobs_cache";
+
+function openIDB():Promise<IDBDatabase>{
+  return new Promise((resolve,reject)=>{
+    if(typeof indexedDB==="undefined"){reject(new Error("no IDB"));return;}
+    const req=indexedDB.open(IDB_NAME,1);
+    req.onupgradeneeded=()=>{req.result.createObjectStore(IDB_STORE);};
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+
+type JobCacheEntry={jobs:Job[];sources:Record<string,number>;savedAt:number};
+
+async function saveJobCache(jobs:Job[],sources:Record<string,number>):Promise<void>{
+  try{
+    const db=await openIDB();
+    await new Promise<void>((resolve,reject)=>{
+      const tx=db.transaction(IDB_STORE,"readwrite");
+      const req=tx.objectStore(IDB_STORE).put({jobs,sources,savedAt:Date.now()},IDB_JOB_KEY);
+      req.onsuccess=()=>{db.close();resolve();};
+      req.onerror=()=>{db.close();reject(req.error);};
+    });
+  }catch(e){
+    console.warn("[saveJobCache] IndexedDB write failed:",e);
+  }
+}
+
+async function loadJobCache():Promise<JobCacheEntry|null>{
+  try{
+    const db=await openIDB();
+    return await new Promise<JobCacheEntry|null>((resolve)=>{
+      const tx=db.transaction(IDB_STORE,"readonly");
+      const req=tx.objectStore(IDB_STORE).get(IDB_JOB_KEY) as IDBRequest<JobCacheEntry|undefined>;
+      req.onsuccess=()=>{db.close();resolve(req.result??null);};
+      req.onerror=()=>{db.close();resolve(null);};
+    });
+  }catch(e){
+    console.warn("[loadJobCache] IndexedDB read failed:",e);
+    return null;
+  }
 }
 
 // ── Filter types ───────────────────────────────────────────────────────────
@@ -701,7 +746,8 @@ export default function JobsPage(){
   const [jd,setJd]=useState("");
 
 
-  // Load jobs on mount — use session cache if <5 min old, otherwise fetch from DB.
+  // Load jobs on mount — prefer IndexedDB cache (full jobs + JD, 5-min TTL).
+  // Async IIFE pattern: useEffect callback must stay synchronous; IDB reads are async.
   useEffect(()=>{
     setResume(getBaseResume());
     const panel=loadPanel();
@@ -710,18 +756,17 @@ export default function JobsPage(){
       setJd(panel.jd);setV1Ats(panel.v1ats as ATSResult|null);
       setV2Ats(panel.v2ats as ATSResult|null);setStep(panel.step as 0|1|2);
     }
-    const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-    const cached = loadSS();
-    const ts = parseInt(sessionStorage.getItem(SS.TS)||"0");
-    const cacheAge = Date.now() - ts;
-    if(cached && cached.jobs.length > 0 && cacheAge < CACHE_TTL_MS){
-      // Cache hit: restore jobs from sessionStorage — no DB round-trip
-      setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);
-    } else {
-      // Cache miss or expired: fetch fresh from DB
-      sessionStorage.removeItem(SS.J);
-      loadJobs(filters.datePosted,sort);
-    }
+    (async()=>{
+      const CACHE_TTL_MS=5*60*1000;
+      const cached=await loadJobCache();
+      if(cached && cached.jobs.length>0 && (Date.now()-cached.savedAt)<CACHE_TTL_MS){
+        // Cache hit: full jobs (incl. fullDescription) restored — JD available for all jobs
+        setJobs(cached.jobs);setSources(cached.sources);setTotalJobs(cached.jobs.length);
+      } else {
+        // Cache miss or expired: fetch fresh from DB then persist to IDB
+        loadJobs(filters.datePosted,sort);
+      }
+    })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
@@ -740,7 +785,8 @@ export default function JobsPage(){
       const nd=((data.sourceDiagnostics||[]) as SourceDiagnostic[]);
       setJobs(nj);setSources(ns);setDiagnostics(nd);
       setTotalJobs(nj.length);
-      saveSS("any",nj,ns);
+      saveSS("any",nj,ns); // lightweight sessionStorage metadata
+      saveJobCache(nj,ns).catch(e=>console.warn("[loadJobs] saveJobCache:",e)); // full IDB cache
       if(nj.length===0)setLoadErr(data.message||"No jobs in DB yet — click \"Refresh Now\" to ingest jobs.");
     }catch(e:unknown){setLoadErr(e instanceof Error?e.message:"Failed to load jobs.");}
     setLoading(false);
