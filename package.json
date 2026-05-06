@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "test": "vitest run"
-  },
+  "dev": "next dev",
+  "build": "next build",
+  "start": "next start",
+  "test": "vitest run",
+  "audit:jobs": "node scripts/auditJobs.js"
+},
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
     "@supabase/supabase-js": "^2.103.3",
